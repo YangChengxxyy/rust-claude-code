@@ -26,6 +26,22 @@ pub struct ApiMessage {
     pub content: ApiContent,
 }
 
+impl ApiMessage {
+    pub fn user(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::User,
+            content: ApiContent::Text(text.into()),
+        }
+    }
+
+    pub fn assistant(text: impl Into<String>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: ApiContent::Text(text.into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ApiContent {
@@ -58,6 +74,18 @@ impl ApiTool {
             description: description.into(),
             input_schema,
         }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub fn input_schema(&self) -> &serde_json::Value {
+        &self.input_schema
     }
 }
 
@@ -144,7 +172,7 @@ impl From<Vec<ContentBlock>> for SystemPrompt {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct ApiError {
+pub struct AnthropicErrorBody {
     #[serde(rename = "type")]
     pub error_type: String,
     pub message: String,
@@ -152,7 +180,7 @@ pub struct ApiError {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiErrorResponse {
-    pub error: ApiError,
+    pub error: AnthropicErrorBody,
 }
 
 #[cfg(test)]

@@ -1,0 +1,12 @@
+[package]
+name = "rust-claude-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rust-claude-core = { path = "../core" }
+rust-claude-api = { path = "../api" }
+rust-claude-tools = { path = "../tools" }
+tokio = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }

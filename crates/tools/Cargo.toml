@@ -1,0 +1,12 @@
+[package]
+name = "rust-claude-tools"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rust-claude-core = { path = "../core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }

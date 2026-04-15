@@ -1,0 +1,17 @@
+[package]
+name = "rust-claude-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "rust-claude"
+path = "src/main.rs"
+
+[dependencies]
+rust-claude-core = { path = "../core" }
+rust-claude-api = { path = "../api" }
+rust-claude-tools = { path = "../tools" }
+rust-claude-tui = { path = "../tui" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }

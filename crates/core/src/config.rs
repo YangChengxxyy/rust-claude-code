@@ -7,6 +7,10 @@ pub struct Config {
     #[serde(default = "default_model")]
     pub model: String,
     #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub bearer_auth: bool,
+    #[serde(default)]
     pub system_prompt: Option<String>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
@@ -49,6 +53,8 @@ impl Config {
             Ok(Config {
                 api_key,
                 model: raw.model.unwrap_or_else(default_model),
+                base_url: raw.base_url,
+                bearer_auth: raw.bearer_auth.unwrap_or(false),
                 system_prompt: raw.system_prompt,
                 max_tokens: raw.max_tokens.unwrap_or_else(default_max_tokens),
                 permission_mode: raw.permission_mode.unwrap_or_default(),
@@ -63,6 +69,8 @@ impl Config {
             Ok(Config {
                 api_key,
                 model: default_model(),
+                base_url: None,
+                bearer_auth: false,
                 system_prompt: None,
                 max_tokens: default_max_tokens(),
                 permission_mode: crate::permission::PermissionMode::Default,
@@ -110,6 +118,10 @@ struct RawConfig {
     api_key: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    bearer_auth: Option<bool>,
     #[serde(default)]
     system_prompt: Option<String>,
     #[serde(default)]
@@ -219,6 +231,8 @@ mod tests {
         let config = Config {
             api_key: "test-key".to_string(),
             model: "claude-3-opus".to_string(),
+            base_url: None,
+            bearer_auth: false,
             system_prompt: Some("You are a test assistant".to_string()),
             max_tokens: 4096,
             permission_mode: crate::permission::PermissionMode::BypassPermissions,

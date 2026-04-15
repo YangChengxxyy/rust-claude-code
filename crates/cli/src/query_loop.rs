@@ -92,7 +92,15 @@ where
 
         for _ in 0..self.max_rounds {
             let request = self.build_request(&app_state).await;
-            let response = self.collect_response_from_stream(&request).await?;
+            let use_stream = {
+                let state = app_state.lock().await;
+                state.session.stream
+            };
+            let response = if use_stream {
+                self.collect_response_from_stream(&request).await?
+            } else {
+                self.client.create_message(&request).await?
+            };
 
             let assistant_message = Message::assistant(response.content.clone());
             let stop_reason = response.stop_reason.clone();
@@ -208,6 +216,7 @@ where
             .with_system_opt(state.session.system_prompt.clone())
             .with_max_tokens(state.session.max_tokens)
             .with_tools(tools)
+            .with_stream(state.session.stream)
     }
 
     /// Check permission for a tool invocation. Returns `None` if allowed,

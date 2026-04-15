@@ -5,13 +5,22 @@ use clap::Parser;
 use rust_claude_api::AnthropicClient;
 use rust_claude_core::{
     config::{Config, ConfigError},
+    message::ContentBlock,
     permission::PermissionMode,
+    settings::ClaudeSettings,
     state::AppState,
 };
-use rust_claude_tools::{BashTool, ToolRegistry};
-use tokio::sync::Mutex;
+use rust_claude_tools::{
+    BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool, ToolRegistry,
+};
+use rust_claude_tui::{App, TerminalGuard, TuiBridge};
+use tokio::sync::{mpsc, Mutex};
 
 use rust_claude_cli::query_loop::QueryLoop;
+
+// ---------------------------------------------------------------------------
+// CLI argument definitions
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 struct ModeArg(PermissionMode);
@@ -34,13 +43,201 @@ impl std::str::FromStr for ModeArg {
 }
 
 #[derive(Parser, Debug)]
+#[command(name = "rust-claude", about = "Rust implementation of Claude Code")]
 struct Cli {
+    /// Prompt text (non-interactive mode when provided)
     prompt: Vec<String>,
 
     /// Permission mode: default, accept-edits, bypass, plan, dont-ask
     #[arg(short = 'm', long = "mode")]
     mode: Option<ModeArg>,
+
+    /// Model to use (e.g. claude-sonnet-4-20250514, sonnet, opus)
+    #[arg(long = "model")]
+    model: Option<String>,
+
+    /// Print response and exit (non-interactive / headless mode)
+    #[arg(short = 'p', long = "print")]
+    print: bool,
+
+    /// Output format for non-interactive mode: text, json
+    #[arg(long = "output-format", value_parser = ["text", "json"])]
+    output_format: Option<String>,
+
+    /// Maximum number of agentic turns
+    #[arg(long = "max-turns")]
+    max_turns: Option<usize>,
+
+    /// Override the system prompt
+    #[arg(long = "system-prompt")]
+    system_prompt: Option<String>,
+
+    /// Read system prompt from a file
+    #[arg(long = "system-prompt-file")]
+    system_prompt_file: Option<String>,
+
+    /// Append text to the default system prompt
+    #[arg(long = "append-system-prompt")]
+    append_system_prompt: Option<String>,
+
+    /// Read append system prompt from a file
+    #[arg(long = "append-system-prompt-file")]
+    append_system_prompt_file: Option<String>,
+
+    /// Comma-separated list of allowed tool names (e.g. Bash,FileRead)
+    #[arg(long = "allowed-tools", value_delimiter = ',')]
+    allowed_tools: Option<Vec<String>>,
+
+    /// Comma-separated list of denied tool names (e.g. Bash,FileWrite)
+    #[arg(long = "disallowed-tools", value_delimiter = ',')]
+    disallowed_tools: Option<Vec<String>>,
+
+    /// Maximum output tokens
+    #[arg(long = "max-tokens")]
+    max_tokens: Option<u32>,
+
+    /// Disable streaming
+    #[arg(long = "no-stream")]
+    no_stream: bool,
+
+    /// Verbose mode
+    #[arg(long = "verbose")]
+    verbose: bool,
+
+    /// Path to a Claude Code settings.json file to load env from
+    #[arg(long = "settings")]
+    settings: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Resolved configuration (unified priority chain result)
+// ---------------------------------------------------------------------------
+
+struct ResolvedConfig {
+    api_key: String,
+    model: String,
+    base_url: Option<String>,
+    bearer_auth: bool,
+    stream: bool,
+    max_tokens: u32,
+    system_prompt: Option<String>,
+    permission_mode: PermissionMode,
+    max_turns: Option<usize>,
+    verbose: bool,
+    print_mode: bool,
+    output_json: bool,
+    allowed_tools: Vec<String>,
+    disallowed_tools: Vec<String>,
+    always_allow: Vec<rust_claude_core::permission::PermissionRule>,
+    always_deny: Vec<rust_claude_core::permission::PermissionRule>,
+}
+
+fn parse_bool_env(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" => Some(true),
+        "0" | "false" => Some(false),
+        _ => None,
+    }
+}
+
+/// Resolve all configuration through the unified priority chain:
+/// RUST_CLAUDE_* env > CLI flags > ANTHROPIC_* env (from settings.json + shell) > config file > defaults
+fn resolve_config(cli: &Cli, config: Config) -> Result<ResolvedConfig> {
+    // --- System prompt ---
+    if cli.system_prompt.is_some() && cli.system_prompt_file.is_some() {
+        return Err(anyhow!("--system-prompt and --system-prompt-file are mutually exclusive"));
+    }
+    let system_prompt = if let Some(ref path) = cli.system_prompt_file {
+        Some(std::fs::read_to_string(path).map_err(|e| {
+            anyhow!("failed to read --system-prompt-file '{}': {e}", path)
+        })?)
+    } else {
+        cli.system_prompt.clone().or(config.system_prompt)
+    };
+
+    // Append system prompt
+    let append_prompt = if let Some(ref path) = cli.append_system_prompt_file {
+        Some(std::fs::read_to_string(path).map_err(|e| {
+            anyhow!("failed to read --append-system-prompt-file '{}': {e}", path)
+        })?)
+    } else {
+        cli.append_system_prompt.clone()
+    };
+    let system_prompt = match (system_prompt, append_prompt) {
+        (Some(base), Some(append)) => Some(format!("{base}\n\n{append}")),
+        (Some(base), None) => Some(base),
+        (None, Some(append)) => Some(append),
+        (None, None) => None,
+    };
+
+    // --- Model: RUST_CLAUDE_MODEL_OVERRIDE > --model > ANTHROPIC_MODEL > config > default ---
+    let model = std::env::var("RUST_CLAUDE_MODEL_OVERRIDE")
+        .ok()
+        .or_else(|| cli.model.clone())
+        .or_else(|| std::env::var("ANTHROPIC_MODEL").ok())
+        .unwrap_or(config.model);
+
+    // --- Base URL: RUST_CLAUDE_BASE_URL > ANTHROPIC_BASE_URL > config ---
+    let base_url = std::env::var("RUST_CLAUDE_BASE_URL")
+        .ok()
+        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
+        .or(config.base_url);
+
+    // --- Bearer auth: RUST_CLAUDE_BEARER_AUTH > config ---
+    let bearer_auth = std::env::var("RUST_CLAUDE_BEARER_AUTH")
+        .ok()
+        .and_then(|v| parse_bool_env(&v))
+        .unwrap_or(config.bearer_auth);
+
+    // --- Stream: RUST_CLAUDE_STREAM > --no-stream > config > default(true) ---
+    let stream = std::env::var("RUST_CLAUDE_STREAM")
+        .ok()
+        .and_then(|v| parse_bool_env(&v))
+        .unwrap_or_else(|| if cli.no_stream { false } else { config.stream });
+
+    // --- Max tokens: --max-tokens > config > default(16384) ---
+    let max_tokens = cli.max_tokens.unwrap_or(config.max_tokens);
+
+    // --- Permission mode: --mode > config > Default ---
+    let permission_mode = cli
+        .mode
+        .as_ref()
+        .map(|m| m.0.clone())
+        .unwrap_or(config.permission_mode);
+
+    // --- Print mode: true when prompt text is provided or -p/--print flag is set ---
+    let print_mode = cli.print || !cli.prompt.is_empty();
+
+    // --- Output format ---
+    let output_json = cli.output_format.as_deref() == Some("json");
+
+    // --- Tool filters ---
+    let allowed_tools = cli.allowed_tools.clone().unwrap_or_default();
+    let disallowed_tools = cli.disallowed_tools.clone().unwrap_or_default();
+
+    Ok(ResolvedConfig {
+        api_key: config.api_key,
+        model,
+        base_url,
+        bearer_auth,
+        stream,
+        max_tokens,
+        system_prompt,
+        permission_mode,
+        max_turns: cli.max_turns,
+        verbose: cli.verbose,
+        print_mode,
+        output_json,
+        allowed_tools,
+        disallowed_tools,
+        always_allow: config.always_allow,
+        always_deny: config.always_deny,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -49,64 +246,215 @@ async fn main() -> Result<()> {
 
     println!("rust-claude-code: Rust implementation of Claude Code");
 
-    match Config::load() {
-        Ok(config) => {
-            let model = std::env::var("RUST_CLAUDE_MODEL_OVERRIDE").unwrap_or_else(|_| config.model.clone());
-            let base_url_override = std::env::var("RUST_CLAUDE_BASE_URL").ok();
-            let bearer_auth = std::env::var("RUST_CLAUDE_BEARER_AUTH")
-                .ok()
-                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
+    // 1. Load Claude Code settings.json env (before Config so ANTHROPIC_* can be used)
+    let settings = match &cli.settings {
+        Some(path) => ClaudeSettings::load_from(std::path::Path::new(path))?,
+        None => ClaudeSettings::load().unwrap_or_default(),
+    };
+    settings.apply_env();
 
-            let mut state = AppState::from_config(cwd.clone(), &config);
-            state.session.model = model;
-            if let Some(ModeArg(mode)) = cli.mode {
-                state.permission_mode = mode;
-            }
-            println!("Initialized session state from config.");
-            println!("cwd: {}", cwd.display());
-            println!("model: {}", state.session.model);
-            println!("max_tokens: {}", state.session.max_tokens);
-            println!("permission_mode: {:?}", state.permission_mode);
-            println!("always_allow_rules: {}", state.always_allow_rules.len());
-            println!("always_deny_rules: {}", state.always_deny_rules.len());
-
-            if !cli.prompt.is_empty() {
-                let app_state = Arc::new(Mutex::new(state));
-                let mut client = AnthropicClient::new(config.api_key)?;
-                if let Some(base_url) = base_url_override {
-                    client = client.with_base_url(base_url);
-                }
-                if bearer_auth {
-                    client = client.with_bearer_auth();
-                }
-                let mut tools = ToolRegistry::new();
-                tools.register(BashTool::new());
-
-                let query_loop = QueryLoop::new(client, tools);
-                let prompt = cli.prompt.join(" ");
-                let final_message = query_loop.run(app_state, prompt).await?;
-
-                for block in final_message.content {
-                    if let rust_claude_core::message::ContentBlock::Text { text } = block {
-                        println!("{text}");
-                    }
-                }
-                return Ok(());
-            }
-        }
+    // 2. Load project config
+    let config = match Config::load() {
+        Ok(config) => config,
         Err(ConfigError::MissingApiKey) => {
             println!("No API key configured yet. Skipping session initialization.");
             println!("cwd: {}", cwd.display());
-            if !cli.prompt.is_empty() {
-                println!("Cannot run the query loop without ANTHROPIC_API_KEY.");
-                return Err(anyhow!("ANTHROPIC_API_KEY is required to run the query loop"));
-            }
+            return Err(anyhow!(
+                "ANTHROPIC_API_KEY is required to run the query loop or TUI"
+            ));
         }
         Err(error) => return Err(error.into()),
+    };
+
+    // 3. Resolve full configuration through priority chain
+    let resolved = resolve_config(&cli, config)?;
+
+    if resolved.verbose {
+        println!("cwd: {}", cwd.display());
+        println!("model: {}", resolved.model);
+        println!("max_tokens: {}", resolved.max_tokens);
+        println!("stream: {}", resolved.stream);
+        println!("permission_mode: {:?}", resolved.permission_mode);
+        println!("max_turns: {:?}", resolved.max_turns);
+        if resolved.allowed_tools.is_empty() {
+            println!("allowed_tools: (all)");
+        } else {
+            println!("allowed_tools: {:?}", resolved.allowed_tools);
+        }
+        println!("disallowed_tools: {:?}", resolved.disallowed_tools);
+        println!(
+            "always_allow_rules: {}",
+            resolved.always_allow.len()
+        );
+        println!(
+            "always_deny_rules: {}",
+            resolved.always_deny.len()
+        );
     }
 
-    println!("Pass a prompt argument to run the query loop.");
+    // 4. Build AppState
+    let mut state = AppState::new(cwd.clone());
+    state.session.model = resolved.model.clone();
+    state.session.system_prompt = resolved.system_prompt.clone();
+    state.session.max_tokens = resolved.max_tokens;
+    state.session.stream = resolved.stream;
+    state.permission_mode = resolved.permission_mode.clone();
+    state.always_allow_rules = resolved.always_allow.clone();
+    state.always_deny_rules = resolved.always_deny.clone();
 
+    let app_state = Arc::new(Mutex::new(state));
+
+    // 5. Run
+    if resolved.print_mode {
+        let prompt = cli.prompt.join(" ");
+        let client =
+            build_client(&resolved.api_key, resolved.base_url.clone(), resolved.bearer_auth)?;
+        let mut tools = build_tools();
+        tools.apply_tool_filters(&resolved.allowed_tools, &resolved.disallowed_tools);
+        let mut query_loop = QueryLoop::new(client, tools);
+        if let Some(max_turns) = resolved.max_turns {
+            query_loop = query_loop.with_max_rounds(max_turns);
+        }
+        let final_message = query_loop.run(app_state, prompt).await?;
+
+        if resolved.output_json {
+            let json = serde_json::to_string_pretty(&final_message)?;
+            println!("{json}");
+        } else {
+            for block in final_message.content {
+                if let ContentBlock::Text { text } = block {
+                    println!("{text}");
+                }
+            }
+        }
+        Ok(())
+    } else {
+        let allowed_tools = resolved.allowed_tools.clone();
+        let disallowed_tools = resolved.disallowed_tools.clone();
+        run_tui(app_state, allowed_tools, disallowed_tools).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn build_client(
+    api_key: &str,
+    base_url_override: Option<String>,
+    bearer_auth: bool,
+) -> Result<AnthropicClient> {
+    let mut client = AnthropicClient::new(api_key.to_string())?;
+    if let Some(base_url) = base_url_override {
+        client = client.with_base_url(base_url);
+    }
+    if bearer_auth {
+        client = client.with_bearer_auth();
+    }
+    Ok(client)
+}
+
+fn build_tools() -> ToolRegistry {
+    let mut tools = ToolRegistry::new();
+    tools.register(BashTool::new());
+    tools.register(FileReadTool::new());
+    tools.register(FileEditTool::new());
+    tools.register(FileWriteTool::new());
+    tools.register(TodoWriteTool::new());
+    tools
+}
+
+fn build_filtered_tools(allowed: &[String], disallowed: &[String]) -> ToolRegistry {
+    let mut tools = build_tools();
+    tools.apply_tool_filters(allowed, disallowed);
+    tools
+}
+
+// ---------------------------------------------------------------------------
+// TUI (interactive) mode
+// ---------------------------------------------------------------------------
+
+async fn run_tui(
+    app_state: Arc<Mutex<AppState>>,
+    allowed_tools: Vec<String>,
+    disallowed_tools: Vec<String>,
+) -> Result<()> {
+    let (model, permission_mode) = {
+        let state = app_state.lock().await;
+        (
+            state.session.model.clone(),
+            format!("{:?}", state.permission_mode),
+        )
+    };
+
+    // Read client config from current env / config
+    let config = Config::load().map_err(|e| anyhow!("failed to load config for TUI: {e}"))?;
+    let base_url = std::env::var("RUST_CLAUDE_BASE_URL")
+        .ok()
+        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
+        .or(config.base_url);
+    let bearer_auth = std::env::var("RUST_CLAUDE_BEARER_AUTH")
+        .ok()
+        .and_then(|v| parse_bool_env(&v))
+        .unwrap_or(config.bearer_auth);
+
+    let (event_tx, event_rx) = mpsc::channel(128);
+    let (user_tx, mut user_rx) = mpsc::channel::<String>(16);
+
+    let bridge = TuiBridge::new(event_tx);
+    let worker_bridge = bridge.clone();
+    let worker_state = app_state.clone();
+
+    tokio::spawn(async move {
+        while let Some(prompt) = user_rx.recv().await {
+            let client = match build_client(&config.api_key, base_url.clone(), bearer_auth) {
+                Ok(client) => client,
+                Err(error) => {
+                    worker_bridge.send_error(&error.to_string()).await;
+                    continue;
+                }
+            };
+
+            let tools = build_filtered_tools(&allowed_tools, &disallowed_tools);
+            let query_loop = QueryLoop::new(client, tools);
+            match query_loop.run(worker_state.clone(), prompt).await {
+                Ok(final_message) => {
+                    let text = final_message
+                        .content
+                        .into_iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text { text } => Some(text),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+
+                    if !text.is_empty() {
+                        worker_bridge.send_assistant_message(&text).await;
+                    } else {
+                        worker_bridge.send_assistant_message("(no text content)").await;
+                    }
+
+                    let usage = {
+                        let state = worker_state.lock().await;
+                        state.total_usage.clone()
+                    };
+                    worker_bridge
+                        .send_usage_update(
+                            usage.input_tokens as u64,
+                            usage.output_tokens as u64,
+                        )
+                        .await;
+                }
+                Err(error) => {
+                    worker_bridge.send_error(&error.to_string()).await;
+                }
+            }
+        }
+    });
+
+    let mut terminal_guard = TerminalGuard::new()?;
+    let mut app = App::new(model, permission_mode);
+    app.run(terminal_guard.terminal_mut(), event_rx, user_tx).await?;
     Ok(())
 }

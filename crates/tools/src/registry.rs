@@ -74,6 +74,17 @@ impl ToolRegistry {
             .map(|tool| tool.is_concurrency_safe)
             .unwrap_or(false)
     }
+
+    /// Filter tools: keep only those in the allow list (if non-empty),
+    /// then remove any in the deny list.
+    pub fn apply_tool_filters(&mut self, allowed: &[String], disallowed: &[String]) {
+        if !allowed.is_empty() {
+            self.tools.retain(|name, _| allowed.iter().any(|a| a == name));
+        }
+        for name in disallowed {
+            self.tools.remove(name);
+        }
+    }
 }
 
 impl Default for ToolRegistry {

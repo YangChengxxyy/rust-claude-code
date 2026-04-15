@@ -149,6 +149,12 @@
 - 已实现最小可运行的 CLI 入口，支持配置加载、`AppState` 初始化与单 prompt 非交互模式。
 - 已接入 `QueryLoop`、流式响应消费、工具执行与多轮 tool use。
 - 已支持 `--mode` / `-m` 参数切换权限模式（`default`、`accept-edits`、`bypass`、`plan`、`dont-ask`）。
+- 无 prompt 启动时，已可进入基础 TUI 交互模式，并通过现有 `QueryLoop` 执行用户输入。
+- 已实现 Claude Code 兼容的 CLI 参数体系：`--model`、`-p/--print`、`--output-format`、`--max-turns`、`--system-prompt`/`--system-prompt-file`、`--append-system-prompt`/`--append-system-prompt-file`、`--max-tokens`、`--no-stream`、`--verbose`、`--allowed-tools`、`--disallowed-tools`、`--settings`。
+- 已实现统一优先级链：`RUST_CLAUDE_*` 环境变量 > CLI 参数 > `ANTHROPIC_*` 环境变量（含 `~/.claude/settings.json` env 注入）> 配置文件 > 默认值。
+- 已支持通过 `--settings` 指定自定义 settings.json 路径，默认读取 `~/.claude/settings.json` 的 `env` 字段注入进程环境变量（不覆盖已有值）。
+- 已支持工具白名单/黑名单过滤（`--allowed-tools`、`--disallowed-tools`）。
+- 已支持 `--output-format json` 以 JSON 格式输出最终消息。
 
 ### 4.5 tui crate
 
@@ -156,7 +162,8 @@
 - 已实现顶部状态栏、中间聊天区域、底部输入框的基础布局。
 - 已实现基础键盘交互：Enter 发送、Ctrl+C 退出、Esc 清空/取消、左右移动光标、上下滚动。
 - 已实现 TUI 事件桥接 `TuiBridge`，支持流式文本、工具调用、工具结果、usage 更新事件。
-- 目前尚未接入 CLI 主入口，权限对话框与 Todo 面板留待后续迭代。
+- 已接入 CLI 主入口的最小交互路径；当前通过后台任务复用既有 `QueryLoop` 执行 prompt，并将最终文本结果回填到 TUI。
+- 真实流式 token 级展示、权限对话框与 Todo 面板留待后续迭代。
 
 ---
 

@@ -32,6 +32,7 @@ pub struct SessionSettings {
     pub model: String,
     pub system_prompt: Option<String>,
     pub max_tokens: u32,
+    pub stream: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +59,7 @@ impl AppState {
                 model: "claude-sonnet-4-20250514".to_string(),
                 system_prompt: None,
                 max_tokens: 16384,
+                stream: true,
             },
             cwd,
             total_usage: Usage {
@@ -78,6 +80,7 @@ impl AppState {
                 model: config.model.clone(),
                 system_prompt: config.system_prompt.clone(),
                 max_tokens: config.max_tokens,
+                stream: config.stream,
             },
             ..Self::new(cwd)
         }
@@ -135,6 +138,7 @@ mod tests {
         assert_eq!(state.session.model, "claude-sonnet-4-20250514");
         assert!(state.session.system_prompt.is_none());
         assert_eq!(state.session.max_tokens, 16384);
+        assert!(state.session.stream);
     }
 
     #[test]
@@ -244,6 +248,8 @@ mod tests {
         let config = crate::config::Config {
             api_key: "test-key".to_string(),
             model: "claude-test".to_string(),
+            base_url: None,
+            bearer_auth: false,
             system_prompt: Some("You are a test assistant".to_string()),
             max_tokens: 2048,
             permission_mode: PermissionMode::AcceptEdits,
@@ -269,6 +275,7 @@ mod tests {
             Some("You are a test assistant")
         );
         assert_eq!(state.session.max_tokens, 2048);
+        assert!(state.session.stream);
         assert_eq!(state.always_allow_rules, config.always_allow);
         assert_eq!(state.always_deny_rules, config.always_deny);
     }
@@ -279,6 +286,7 @@ mod tests {
             model: "claude-test".to_string(),
             system_prompt: Some("Be concise".to_string()),
             max_tokens: 4096,
+            stream: false,
         };
 
         let json = serde_json::to_string(&settings).unwrap();
@@ -287,5 +295,6 @@ mod tests {
         assert_eq!(parsed.model, "claude-test");
         assert_eq!(parsed.system_prompt.as_deref(), Some("Be concise"));
         assert_eq!(parsed.max_tokens, 4096);
+        assert!(!parsed.stream);
     }
 }

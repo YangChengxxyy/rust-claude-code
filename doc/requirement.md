@@ -140,9 +140,9 @@
 
 ### 4.3 tools crate
 
-- 已实现 `Tool` trait、可执行的 `ToolRegistry` 与 `BashTool`。
+- 已实现 `Tool` trait、可执行的 `ToolRegistry` 与首批 5 个核心工具。
 - `BashTool` 已支持 shell 执行、timeout、workdir、危险命令检测与输出截断。
-- FileRead、FileEdit、FileWrite、TodoWrite 尚未实现。
+- 已实现 `FileReadTool`、`FileEditTool`、`FileWriteTool`、`TodoWriteTool`，并完成工具注册与基础测试覆盖。
 
 ### 4.4 cli crate
 
@@ -426,6 +426,8 @@ rust-claude-code/
 ---
 
 ### 迭代 6：FileRead + FileEdit + FileWrite + TodoWrite
+
+**状态**: 已完成
 
 **目标**: 实现剩余 4 个核心工具。
 

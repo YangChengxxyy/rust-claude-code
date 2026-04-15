@@ -155,6 +155,7 @@ mod tests {
                 serde_json::json!({ "command": "printf hello" }),
                 ToolContext {
                     tool_use_id: "tool_1".to_string(),
+                    app_state: None,
                 },
             )
             .await
@@ -172,6 +173,7 @@ mod tests {
                 serde_json::json!({ "command": "sleep 1", "timeout_ms": 10 }),
                 ToolContext {
                     tool_use_id: "tool_1".to_string(),
+                    app_state: None,
                 },
             )
             .await
@@ -196,6 +198,7 @@ mod tests {
                 serde_json::json!({ "command": "ls", "workdir": temp_dir }),
                 ToolContext {
                     tool_use_id: "tool_1".to_string(),
+                    app_state: None,
                 },
             )
             .await
@@ -215,6 +218,7 @@ mod tests {
                 serde_json::json!({ "command": command }),
                 ToolContext {
                     tool_use_id: "tool_1".to_string(),
+                    app_state: None,
                 },
             )
             .await

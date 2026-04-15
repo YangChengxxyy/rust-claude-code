@@ -1,7 +1,15 @@
 pub mod bash;
+pub mod file_edit;
+pub mod file_read;
+pub mod file_write;
 pub mod registry;
+pub mod todo_write;
 pub mod tool;
 
 pub use bash::BashTool;
+pub use file_edit::FileEditTool;
+pub use file_read::FileReadTool;
+pub use file_write::FileWriteTool;
 pub use registry::{RegisteredTool, ToolRegistry};
+pub use todo_write::TodoWriteTool;
 pub use tool::{Tool, ToolContext, ToolError};

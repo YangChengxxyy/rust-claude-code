@@ -79,6 +79,7 @@ impl Default for ToolRegistry {
 mod tests {
     use super::*;
     use crate::bash::BashTool;
+    use crate::{FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool};
 
     #[test]
     fn test_register_and_get() {
@@ -124,11 +125,28 @@ mod tests {
                 serde_json::json!({ "command": "printf hello" }),
                 ToolContext {
                     tool_use_id: "tool_1".to_string(),
+                    app_state: None,
                 },
             )
             .await
             .unwrap();
 
         assert_eq!(result.content, "hello");
+    }
+
+    #[test]
+    fn test_register_all_core_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(BashTool::new());
+        registry.register(FileReadTool::new());
+        registry.register(FileEditTool::new());
+        registry.register(FileWriteTool::new());
+        registry.register(TodoWriteTool::new());
+
+        let names = registry.names();
+        assert_eq!(
+            names,
+            vec!["Bash", "FileEdit", "FileRead", "FileWrite", "TodoWrite"]
+        );
     }
 }

@@ -1,9 +1,13 @@
 use async_trait::async_trait;
+use rust_claude_core::state::AppState;
 use rust_claude_core::tool_types::{ToolInfo, ToolResult};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Default)]
 pub struct ToolContext {
     pub tool_use_id: String,
+    pub app_state: Option<Arc<Mutex<AppState>>>,
 }
 
 #[derive(Debug, thiserror::Error)]

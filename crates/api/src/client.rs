@@ -13,12 +13,19 @@ const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const DEFAULT_VERSION: &str = "2023-06-01";
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthMode {
+    Anthropic,
+    Bearer,
+}
+
 #[derive(Debug, Clone)]
 pub struct AnthropicClient {
     http_client: Client,
     api_key: String,
     base_url: String,
     anthropic_version: String,
+    auth_mode: AuthMode,
 }
 
 impl AnthropicClient {
@@ -50,7 +57,13 @@ impl AnthropicClient {
             api_key,
             base_url: DEFAULT_BASE_URL.to_string(),
             anthropic_version: DEFAULT_VERSION.to_string(),
+            auth_mode: AuthMode::Anthropic,
         })
+    }
+
+    pub fn with_bearer_auth(mut self) -> Self {
+        self.auth_mode = AuthMode::Bearer;
+        self
     }
 
     pub async fn create_message(
@@ -95,17 +108,28 @@ impl AnthropicClient {
 
     fn default_headers(&self) -> Result<HeaderMap, ApiError> {
         let mut headers = HeaderMap::new();
-        let api_key = HeaderValue::from_str(&self.api_key)
-            .map_err(|error| ApiError::Auth(format!("invalid API key header value: {error}")))?;
-        headers.insert("x-api-key", api_key);
-        headers.insert(
-            "anthropic-version",
-            HeaderValue::from_str(&self.anthropic_version)
-                .map_err(|error| ApiError::Api {
-                    status: 0,
-                    message: format!("invalid anthropic-version header value: {error}"),
-                })?,
-        );
+        match self.auth_mode {
+            AuthMode::Anthropic => {
+                let api_key = HeaderValue::from_str(&self.api_key).map_err(|error| {
+                    ApiError::Auth(format!("invalid API key header value: {error}"))
+                })?;
+                headers.insert("x-api-key", api_key);
+                headers.insert(
+                    "anthropic-version",
+                    HeaderValue::from_str(&self.anthropic_version).map_err(|error| {
+                        ApiError::Api {
+                            status: 0,
+                            message: format!("invalid anthropic-version header value: {error}"),
+                        }
+                    })?,
+                );
+            }
+            AuthMode::Bearer => {
+                let bearer = HeaderValue::from_str(&format!("Bearer {}", self.api_key))
+                    .map_err(|error| ApiError::Auth(format!("invalid authorization header value: {error}")))?;
+                headers.insert(reqwest::header::AUTHORIZATION, bearer);
+            }
+        }
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(headers)
     }
@@ -205,6 +229,19 @@ mod tests {
         assert_eq!(headers.get("x-api-key").unwrap(), "test-key");
         assert_eq!(headers.get("anthropic-version").unwrap(), "2024-01-01");
         assert_eq!(headers.get(CONTENT_TYPE).unwrap(), "application/json");
+    }
+
+    #[test]
+    fn test_bearer_auth_headers_use_authorization() {
+        let client = AnthropicClient::new("test-key")
+            .unwrap()
+            .with_bearer_auth();
+
+        let headers = client.default_headers().unwrap();
+
+        assert_eq!(headers.get(reqwest::header::AUTHORIZATION).unwrap(), "Bearer test-key");
+        assert!(headers.get("x-api-key").is_none());
+        assert!(headers.get("anthropic-version").is_none());
     }
 
     #[test]

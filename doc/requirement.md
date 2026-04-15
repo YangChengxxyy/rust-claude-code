@@ -464,11 +464,13 @@ rust-claude-code/
 
 ### 迭代 7：查询循环（Query Loop）
 
+**状态**: 已完成
+
 **目标**: 实现核心 agent 循环，串联 API 调用和工具执行。
 
 **产出**:
 
-- `core` crate: QueryLoop struct
+- `cli` crate: QueryLoop struct
   - 发送消息到 API
   - 流式接收响应
   - 检测 `tool_use` blocks
@@ -489,6 +491,12 @@ rust-claude-code/
 - CLI 可运行：`cargo run -- "list files in current directory"` 正确调用 BashTool
 
 **依赖**: 迭代 4, 迭代 6
+
+**当前对齐说明**:
+
+- 当前 `QueryLoop` 放在 `cli` crate，而不是 `core` crate，以避免 `core -> api` 与现有 `api -> core` 形成循环依赖。
+- 流式响应消费、工具调用回填、多轮工具调用与并发安全工具并发执行已实现。
+- CLI 已接入最小 QueryLoop 路径，并补充了基于本地兼容端点的 ignored 集成验证（支持通过环境变量覆盖 `base_url`、认证方式与模型）。
 
 ---
 

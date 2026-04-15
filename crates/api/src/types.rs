@@ -132,6 +132,11 @@ impl CreateMessageRequest {
         self
     }
 
+    pub fn with_system_opt(mut self, system: Option<String>) -> Self {
+        self.system = system.map(SystemPrompt::Text);
+        self
+    }
+
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = Some(max_tokens);
         self
@@ -217,6 +222,20 @@ mod tests {
         assert!(json.contains("\"model\":\"claude-sonnet-4-20250514\""));
         assert!(json.contains("\"max_tokens\":1024"));
         assert!(json.contains("\"stream\":true"));
+    }
+
+    #[test]
+    fn test_create_message_request_with_optional_system_prompt() {
+        let req = CreateMessageRequest::new("claude-sonnet-4-20250514", vec![])
+            .with_system_opt(Some("You are concise".to_string()));
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"system\":\"You are concise\""));
+
+        let req =
+            CreateMessageRequest::new("claude-sonnet-4-20250514", vec![]).with_system_opt(None);
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("\"system\""));
     }
 
     #[test]

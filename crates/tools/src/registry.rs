@@ -67,6 +67,13 @@ impl ToolRegistry {
         names.sort();
         names
     }
+
+    pub fn is_concurrency_safe(&self, name: &str) -> bool {
+        self.tools
+            .get(name)
+            .map(|tool| tool.is_concurrency_safe)
+            .unwrap_or(false)
+    }
 }
 
 impl Default for ToolRegistry {

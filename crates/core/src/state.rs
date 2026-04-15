@@ -30,6 +30,7 @@ pub enum TodoPriority {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSettings {
     pub model: String,
+    pub system_prompt: Option<String>,
     pub max_tokens: u32,
 }
 
@@ -55,6 +56,7 @@ impl AppState {
             always_deny_rules: Vec::new(),
             session: SessionSettings {
                 model: "claude-sonnet-4-20250514".to_string(),
+                system_prompt: None,
                 max_tokens: 16384,
             },
             cwd,
@@ -74,6 +76,7 @@ impl AppState {
             always_deny_rules: config.always_deny.clone(),
             session: SessionSettings {
                 model: config.model.clone(),
+                system_prompt: config.system_prompt.clone(),
                 max_tokens: config.max_tokens,
             },
             ..Self::new(cwd)
@@ -130,6 +133,7 @@ mod tests {
         assert!(state.always_allow_rules.is_empty());
         assert!(state.always_deny_rules.is_empty());
         assert_eq!(state.session.model, "claude-sonnet-4-20250514");
+        assert!(state.session.system_prompt.is_none());
         assert_eq!(state.session.max_tokens, 16384);
     }
 
@@ -240,6 +244,7 @@ mod tests {
         let config = crate::config::Config {
             api_key: "test-key".to_string(),
             model: "claude-test".to_string(),
+            system_prompt: Some("You are a test assistant".to_string()),
             max_tokens: 2048,
             permission_mode: PermissionMode::AcceptEdits,
             always_allow: vec![PermissionRule {
@@ -259,6 +264,10 @@ mod tests {
 
         assert_eq!(state.permission_mode, PermissionMode::AcceptEdits);
         assert_eq!(state.session.model, "claude-test");
+        assert_eq!(
+            state.session.system_prompt.as_deref(),
+            Some("You are a test assistant")
+        );
         assert_eq!(state.session.max_tokens, 2048);
         assert_eq!(state.always_allow_rules, config.always_allow);
         assert_eq!(state.always_deny_rules, config.always_deny);
@@ -268,6 +277,7 @@ mod tests {
     fn test_session_settings_serde() {
         let settings = SessionSettings {
             model: "claude-test".to_string(),
+            system_prompt: Some("Be concise".to_string()),
             max_tokens: 4096,
         };
 
@@ -275,6 +285,7 @@ mod tests {
         let parsed: SessionSettings = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.model, "claude-test");
+        assert_eq!(parsed.system_prompt.as_deref(), Some("Be concise"));
         assert_eq!(parsed.max_tokens, 4096);
     }
 }

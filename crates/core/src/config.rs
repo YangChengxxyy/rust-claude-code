@@ -6,6 +6,8 @@ pub struct Config {
     pub api_key: String,
     #[serde(default = "default_model")]
     pub model: String,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
     #[serde(default)]
@@ -47,6 +49,7 @@ impl Config {
             Ok(Config {
                 api_key,
                 model: raw.model.unwrap_or_else(default_model),
+                system_prompt: raw.system_prompt,
                 max_tokens: raw.max_tokens.unwrap_or_else(default_max_tokens),
                 permission_mode: raw.permission_mode.unwrap_or_default(),
                 always_allow: raw.always_allow.unwrap_or_default(),
@@ -60,6 +63,7 @@ impl Config {
             Ok(Config {
                 api_key,
                 model: default_model(),
+                system_prompt: None,
                 max_tokens: default_max_tokens(),
                 permission_mode: crate::permission::PermissionMode::Default,
                 always_allow: Vec::new(),
@@ -106,6 +110,8 @@ struct RawConfig {
     api_key: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    system_prompt: Option<String>,
     #[serde(default)]
     max_tokens: Option<u32>,
     #[serde(default)]
@@ -213,6 +219,7 @@ mod tests {
         let config = Config {
             api_key: "test-key".to_string(),
             model: "claude-3-opus".to_string(),
+            system_prompt: Some("You are a test assistant".to_string()),
             max_tokens: 4096,
             permission_mode: crate::permission::PermissionMode::BypassPermissions,
             always_allow: vec![],
@@ -224,6 +231,10 @@ mod tests {
         let parsed: Config = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.api_key, "test-key");
         assert_eq!(parsed.model, "claude-3-opus");
+        assert_eq!(
+            parsed.system_prompt.as_deref(),
+            Some("You are a test assistant")
+        );
         assert_eq!(parsed.max_tokens, 4096);
         assert!(!parsed.stream);
     }
@@ -234,6 +245,7 @@ mod tests {
         let config: Config = serde_json::from_str(json).unwrap();
         assert_eq!(config.api_key, "key123");
         assert_eq!(config.model, "claude-sonnet-4-20250514");
+        assert!(config.system_prompt.is_none());
         assert_eq!(config.max_tokens, 16384);
         assert!(config.stream);
     }

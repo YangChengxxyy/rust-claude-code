@@ -146,13 +146,17 @@
 
 ### 4.4 cli crate
 
-- 当前为最小入口程序，已接入配置加载与 `AppState` 初始化的占位路径。
-- 尚未接入 Query Loop、参数解析和交互模式。
+- 已实现最小可运行的 CLI 入口，支持配置加载、`AppState` 初始化与单 prompt 非交互模式。
+- 已接入 `QueryLoop`、流式响应消费、工具执行与多轮 tool use。
+- 已支持 `--mode` / `-m` 参数切换权限模式（`default`、`accept-edits`、`bypass`、`plan`、`dont-ask`）。
 
 ### 4.5 tui crate
 
-- 当前仅有最小 crate 骨架。
-- 尚未实现界面状态、渲染和交互逻辑。
+- 已实现基础 TUI 框架：`App` 状态对象、`ChatMessage` / `AppEvent` 事件模型、渲染层与终端守卫。
+- 已实现顶部状态栏、中间聊天区域、底部输入框的基础布局。
+- 已实现基础键盘交互：Enter 发送、Ctrl+C 退出、Esc 清空/取消、左右移动光标、上下滚动。
+- 已实现 TUI 事件桥接 `TuiBridge`，支持流式文本、工具调用、工具结果、usage 更新事件。
+- 目前尚未接入 CLI 主入口，权限对话框与 Todo 面板留待后续迭代。
 
 ---
 
@@ -188,7 +192,14 @@ pub trait Tool: Send + Sync {
 
 ### 5.3 Permission 系统
 
-当前 Rust 版本已经实现权限模式和规则匹配的基础类型，但尚未实现 `PermissionManager`、规则持久化与 Query Loop 集成。
+当前 Rust 版本已经实现：
+
+- `PermissionManager`
+- always_allow / always_deny 规则管理与 JSON 持久化
+- Query Loop 集成权限检查
+- CLI `--mode` 参数切换权限模式
+
+当前仍未实现交互式权限确认 UI；对 `NeedsConfirmation` 的场景会在 CLI 查询循环中暂时按拒绝处理，等待后续 TUI 权限对话框接入。
 
 ### 5.4 AppState
 
@@ -502,6 +513,20 @@ rust-claude-code/
 
 ### 迭代 8：权限系统
 
+**状态**: 已完成
+
+**完成记录**:
+
+- 已实现 `core` crate 的 `PermissionManager`
+- 已支持规则持久化到 `~/.config/rust-claude-code/permissions.json`
+- 已支持紧凑规则格式解析与序列化：`Bash`、`Bash(git *)`、`FileRead`
+- 已将权限检查集成到 `QueryLoop` 的工具执行前置路径
+- 已为 `Bash` 工具提取 `command` 字段参与 pattern 匹配
+- 对 `NeedsConfirmation` 场景已在当前 CLI 路径中暂时按拒绝处理，并返回明确错误信息
+- CLI 已支持 `--mode` / `-m` 参数切换权限模式
+- 已补充规则解析、持久化、模式行为与 QueryLoop 权限集成测试
+- 验证结果：`cargo test --workspace` 通过
+
 **目标**: 实现完整的 5 种权限模式。
 
 **产出**:
@@ -530,6 +555,20 @@ rust-claude-code/
 ---
 
 ### 迭代 9：TUI 基础框架
+
+**状态**: 已完成
+
+**完成记录**:
+
+- 已实现 `tui` crate 的基础模块：`app.rs`、`ui.rs`、`events.rs`、`bridge.rs`
+- 已实现 `App` 状态对象与 `ChatMessage` / `AppEvent` 事件模型
+- 已实现顶部状态栏、中间聊天区域、底部输入框的基础布局与样式
+- 已实现基础键盘交互：Enter、Ctrl+C、Esc、方向键、Home / End、Backspace / Delete
+- 已实现流式文本显示状态与结束后落盘为 assistant 消息的状态切换
+- 已实现 `TuiBridge`，支持流式文本、工具调用、工具结果、usage 和错误事件
+- 已实现终端初始化/清理守卫 `TerminalGuard`，处理 raw mode、alternate screen、mouse capture 与 panic 清理
+- 已补充 TUI 单元测试覆盖状态迁移、事件传递与基础渲染辅助逻辑
+- 验证结果：`cargo check -p rust-claude-tui` 通过，`cargo test -p rust-claude-tui` 通过，`cargo test --workspace` 通过
 
 **目标**: 用 ratatui 构建基础 TUI 界面。
 

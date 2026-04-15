@@ -10,3 +10,4 @@ rust-claude-tools = { path = "../tools" }
 tokio = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+serde_json = { workspace = true }

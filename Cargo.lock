@@ -1212,6 +1212,7 @@ dependencies = [
  "rust-claude-api",
  "rust-claude-core",
  "rust-claude-tools",
+ "serde_json",
  "tokio",
 ]
 

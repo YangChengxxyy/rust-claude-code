@@ -134,12 +134,15 @@
 - 已实现基础错误映射：认证失败、限流、通用 API 错误、超时、连接错误。
 - 已实现 `CreateMessageRequest`、`CreateMessageResponse`、`ApiMessage`、`ApiTool`、`SystemPrompt`。
 - `CreateMessageRequest` 已支持 `metadata`，`AnthropicClient` 已收敛共享的 header / request / JSON 响应处理边界。
+- 已实现 SSE 流式基础设施：`MessageStream`、`StreamEvent`、SSE 事件解析、真实流式请求入口与 `examples/streaming_chat.rs`。
+- 已实现基础 delta 累积器，支持 `text_delta`、`thinking_delta` 与 `input_json_delta` 还原完整内容块。
 - 已新增 `examples/simple_chat.rs` 与真实 API 的忽略型集成测试。
 
 ### 4.3 tools crate
 
-- 当前仅有 `ToolRegistry` 存根入口。
-- Bash、FileRead、FileEdit、FileWrite、TodoWrite 尚未实现。
+- 已实现 `Tool` trait、可执行的 `ToolRegistry` 与 `BashTool`。
+- `BashTool` 已支持 shell 执行、timeout、workdir、危险命令检测与输出截断。
+- FileRead、FileEdit、FileWrite、TodoWrite 尚未实现。
 
 ### 4.4 cli crate
 
@@ -371,6 +374,8 @@ rust-claude-code/
 
 ### 迭代 4：SSE 流式传输
 
+**状态**: 已完成
+
 **目标**: 支持 Anthropic API 的 SSE 流式响应。
 
 **产出**:
@@ -392,6 +397,8 @@ rust-claude-code/
 ---
 
 ### 迭代 5：Tool 系统框架 + BashTool
+
+**状态**: 已完成
 
 **目标**: 实现 Tool trait、ToolRegistry，并完成第一个工具 BashTool。
 

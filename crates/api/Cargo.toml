@@ -11,4 +11,5 @@ tokio = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { workspace = true }
 futures-core = { workspace = true }
+futures-util = "0.3"
 eventsource-stream = { workspace = true }

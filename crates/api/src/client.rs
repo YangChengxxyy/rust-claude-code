@@ -6,6 +6,7 @@ use reqwest::{
 };
 
 use crate::error::ApiError;
+use crate::streaming::{stream_events_from_response, MessageStream};
 use crate::types::{ApiErrorResponse, CreateMessageRequest, CreateMessageResponse};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -58,6 +59,27 @@ impl AnthropicClient {
     ) -> Result<CreateMessageResponse, ApiError> {
         self.send_json(Method::POST, self.messages_endpoint(), request)
             .await
+    }
+
+    pub async fn create_message_stream(
+        &self,
+        request: &CreateMessageRequest,
+    ) -> Result<MessageStream, ApiError> {
+        let request = request.clone().with_stream(true);
+        let response = self
+            .request(Method::POST, self.messages_endpoint())?
+            .json(&request)
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.map_err(map_reqwest_error)?;
+            return Err(map_error_response(status, &body));
+        }
+
+        Ok(stream_events_from_response(response))
     }
 
     fn messages_endpoint(&self) -> String {

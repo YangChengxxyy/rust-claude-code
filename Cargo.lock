@@ -1152,6 +1152,7 @@ version = "0.1.0"
 dependencies = [
  "eventsource-stream",
  "futures-core",
+ "futures-util",
  "reqwest",
  "rust-claude-core",
  "serde",
@@ -1189,6 +1190,7 @@ dependencies = [
 name = "rust-claude-tools"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "rust-claude-core",
  "serde",

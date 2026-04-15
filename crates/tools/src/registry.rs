@@ -1,16 +1,18 @@
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
-pub struct ToolInfo {
-    pub name: String,
-    pub description: String,
-    pub input_schema: serde_json::Value,
+use rust_claude_core::tool_types::ToolInfo;
+
+use crate::tool::{Tool, ToolContext, ToolError};
+
+pub struct RegisteredTool {
+    pub info: ToolInfo,
     pub is_read_only: bool,
     pub is_concurrency_safe: bool,
+    pub tool: Box<dyn Tool>,
 }
 
 pub struct ToolRegistry {
-    tools: HashMap<String, ToolInfo>,
+    tools: HashMap<String, RegisteredTool>,
 }
 
 impl ToolRegistry {
@@ -20,18 +22,44 @@ impl ToolRegistry {
         }
     }
 
-    pub fn register(&mut self, info: ToolInfo) {
-        self.tools.insert(info.name.clone(), info);
+    pub fn register<T>(&mut self, tool: T)
+    where
+        T: Tool + 'static,
+    {
+        let info = tool.info();
+        self.tools.insert(
+            info.name.clone(),
+            RegisteredTool {
+                is_read_only: tool.is_read_only(),
+                is_concurrency_safe: tool.is_concurrency_safe(),
+                info,
+                tool: Box::new(tool),
+            },
+        );
     }
 
-    pub fn get(&self, name: &str) -> Option<&ToolInfo> {
+    pub fn get(&self, name: &str) -> Option<&RegisteredTool> {
         self.tools.get(name)
     }
 
-    pub fn list(&self) -> Vec<&ToolInfo> {
-        let mut tools: Vec<&ToolInfo> = self.tools.values().collect();
-        tools.sort_by(|a, b| a.name.cmp(&b.name));
+    pub fn list(&self) -> Vec<&RegisteredTool> {
+        let mut tools: Vec<&RegisteredTool> = self.tools.values().collect();
+        tools.sort_by(|a, b| a.info.name.cmp(&b.info.name));
         tools
+    }
+
+    pub async fn execute(
+        &self,
+        name: &str,
+        input: serde_json::Value,
+        context: ToolContext,
+    ) -> Result<rust_claude_core::tool_types::ToolResult, ToolError> {
+        let tool = self
+            .tools
+            .get(name)
+            .ok_or_else(|| ToolError::Execution(format!("unknown tool: {name}")))?;
+
+        tool.tool.execute(input, context).await
     }
 
     pub fn names(&self) -> Vec<&str> {
@@ -50,41 +78,57 @@ impl Default for ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bash::BashTool;
 
     #[test]
     fn test_register_and_get() {
         let mut registry = ToolRegistry::new();
-        registry.register(ToolInfo {
-            name: "Bash".to_string(),
-            description: "Run bash".to_string(),
-            input_schema: serde_json::json!({}),
-            is_read_only: false,
-            is_concurrency_safe: false,
-        });
+        registry.register(BashTool::new());
 
-        assert!(registry.get("Bash").is_some());
+        let tool = registry.get("Bash").unwrap();
+        assert_eq!(tool.info.name, "Bash");
+        assert!(tool.is_concurrency_safe);
         assert!(registry.get("Unknown").is_none());
     }
 
     #[test]
     fn test_list_sorted() {
         let mut registry = ToolRegistry::new();
-        registry.register(ToolInfo {
-            name: "FileWrite".to_string(),
-            description: "Write file".to_string(),
-            input_schema: serde_json::json!({}),
-            is_read_only: false,
-            is_concurrency_safe: false,
-        });
-        registry.register(ToolInfo {
-            name: "Bash".to_string(),
-            description: "Run bash".to_string(),
-            input_schema: serde_json::json!({}),
-            is_read_only: false,
-            is_concurrency_safe: false,
-        });
+        registry.register(BashTool::new());
+        registry.tools.insert(
+            "FileWrite".to_string(),
+            RegisteredTool {
+                info: ToolInfo {
+                    name: "FileWrite".to_string(),
+                    description: "Write file".to_string(),
+                    input_schema: serde_json::json!({}),
+                },
+                is_read_only: false,
+                is_concurrency_safe: false,
+                tool: Box::new(BashTool::new()),
+            },
+        );
 
         let names = registry.names();
         assert_eq!(names, vec!["Bash", "FileWrite"]);
+    }
+
+    #[tokio::test]
+    async fn test_execute_registered_tool() {
+        let mut registry = ToolRegistry::new();
+        registry.register(BashTool::new());
+
+        let result = registry
+            .execute(
+                "Bash",
+                serde_json::json!({ "command": "printf hello" }),
+                ToolContext {
+                    tool_use_id: "tool_1".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.content, "hello");
     }
 }

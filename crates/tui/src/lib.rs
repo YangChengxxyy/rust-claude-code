@@ -11,11 +11,12 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 pub mod app;
 pub mod bridge;
 pub mod events;
+pub mod theme;
 pub mod ui;
 
-pub use app::App;
+pub use app::{App, PermissionDialog};
 pub use bridge::TuiBridge;
-pub use events::{AppEvent, ChatMessage};
+pub use events::{AppEvent, ChatMessage, PermissionResponse};
 
 static PANIC_HOOK_ONCE: Once = Once::new();
 

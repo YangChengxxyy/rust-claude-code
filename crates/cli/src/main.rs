@@ -17,6 +17,8 @@ use rust_claude_tui::{App, TerminalGuard, TuiBridge};
 use tokio::sync::{mpsc, Mutex};
 
 use rust_claude_cli::query_loop::QueryLoop;
+use rust_claude_cli::session::{self, SessionFile};
+use rust_claude_cli::system_prompt;
 
 // ---------------------------------------------------------------------------
 // CLI argument definitions
@@ -103,6 +105,10 @@ struct Cli {
     /// Verbose mode
     #[arg(long = "verbose")]
     verbose: bool,
+
+    /// Continue the most recent session
+    #[arg(long = "continue", short = 'c')]
+    continue_session: bool,
 
     /// Path to a Claude Code settings.json file to load env from
     #[arg(long = "settings")]
@@ -317,9 +323,33 @@ async fn main() -> Result<()> {
     state.always_allow_rules = resolved.always_allow.clone();
     state.always_deny_rules = resolved.always_deny.clone();
 
+    // Load previous session if --continue
+    if cli.continue_session {
+        match session::load_latest_session() {
+            Ok(Some(prev)) => {
+                state.messages = prev.messages;
+                println!("Continuing session {} ({} messages)", prev.id, state.messages.len());
+            }
+            Ok(None) => {
+                println!("No previous session found. Starting fresh.");
+            }
+            Err(e) => {
+                eprintln!("Warning: failed to load previous session: {e}");
+            }
+        }
+    }
+
     let app_state = Arc::new(Mutex::new(state));
 
-    // 5. Run
+    // 5. Compose system prompt if none explicitly provided
+    if resolved.system_prompt.is_none() {
+        let tools_for_prompt = build_filtered_tools(&resolved.allowed_tools, &resolved.disallowed_tools);
+        let composed = system_prompt::build_system_prompt(&cwd, &tools_for_prompt, None);
+        let mut state = app_state.lock().await;
+        state.session.system_prompt = Some(composed);
+    }
+
+    // 6. Run
     if resolved.print_mode {
         let prompt = cli.prompt.join(" ");
         let client =
@@ -456,7 +486,7 @@ async fn run_tui(
             };
 
             let tools = build_filtered_tools(&allowed_tools, &disallowed_tools);
-            let query_loop = QueryLoop::new(client, tools);
+            let query_loop = QueryLoop::new(client, tools).with_bridge(worker_bridge.clone());
             match query_loop.run(worker_state.clone(), prompt).await {
                 Ok(final_message) => {
                     let text = final_message
@@ -489,6 +519,16 @@ async fn run_tui(
                 Err(error) => {
                     worker_bridge.send_error(&error.to_string()).await;
                 }
+            }
+
+            // Save session after each query round
+            let state_snapshot = worker_state.lock().await;
+            let mut session_file =
+                SessionFile::new(&state_snapshot.session.model, &state_snapshot.cwd);
+            session_file.messages = state_snapshot.messages.clone();
+            drop(state_snapshot);
+            if let Err(e) = session_file.save() {
+                worker_bridge.send_error(&format!("Warning: failed to save session: {e}")).await;
             }
         }
     });

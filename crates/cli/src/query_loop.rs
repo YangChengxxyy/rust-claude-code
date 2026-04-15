@@ -61,6 +61,7 @@ pub struct QueryLoop<C> {
     client: C,
     tools: ToolRegistry,
     max_rounds: usize,
+    bridge: Option<rust_claude_tui::TuiBridge>,
 }
 
 impl<C> QueryLoop<C>
@@ -72,11 +73,17 @@ where
             client,
             tools,
             max_rounds: 8,
+            bridge: None,
         }
     }
 
     pub fn with_max_rounds(mut self, max_rounds: usize) -> Self {
         self.max_rounds = max_rounds;
+        self
+    }
+
+    pub fn with_bridge(mut self, bridge: rust_claude_tui::TuiBridge) -> Self {
+        self.bridge = Some(bridge);
         self
     }
 
@@ -104,6 +111,15 @@ where
 
             let assistant_message = Message::assistant(response.content.clone());
             let stop_reason = response.stop_reason.clone();
+
+            // Notify bridge that streaming ended
+            if let Some(bridge) = &self.bridge {
+                bridge.send_stream_end().await;
+                let usage = &response.usage;
+                bridge
+                    .send_usage_update(usage.input_tokens as u64, usage.output_tokens as u64)
+                    .await;
+            }
 
             {
                 let mut state = app_state.lock().await;
@@ -158,6 +174,18 @@ where
                     let accumulator = accumulators[index]
                         .as_mut()
                         .ok_or_else(|| QueryLoopError::Tool("missing content block accumulator".to_string()))?;
+                    // Send streaming text deltas to the TUI bridge
+                    if let Some(bridge) = &self.bridge {
+                        match &delta {
+                            rust_claude_api::ContentBlockDelta::TextDelta { text } => {
+                                bridge.send_stream_delta(text).await;
+                            }
+                            rust_claude_api::ContentBlockDelta::ThinkingDelta { .. } => {
+                                bridge.send_thinking_start().await;
+                            }
+                            _ => {}
+                        }
+                    }
                     accumulator.push(&delta).map_err(QueryLoopError::Api)?;
                 }
                 StreamEvent::ContentBlockStop { index } => {
@@ -221,16 +249,17 @@ where
 
     /// Check permission for a tool invocation. Returns `None` if allowed,
     /// or `Some((content, is_error))` if the tool should not be executed.
-    fn check_tool_permission(
-        app_state_snapshot: &AppState,
+    /// When a TuiBridge is connected, `NeedsConfirmation` is forwarded to the
+    /// user as an interactive dialog. Without a bridge it is auto-denied.
+    async fn check_tool_permission(
+        &self,
+        app_state: &Arc<Mutex<AppState>>,
         tool_name: &str,
         input: &serde_json::Value,
         is_read_only: bool,
     ) -> Option<(String, bool)> {
         let command = if tool_name == "Bash" {
-            input
-                .get("command")
-                .and_then(|v| v.as_str())
+            input.get("command").and_then(|v| v.as_str())
         } else {
             None
         };
@@ -241,16 +270,61 @@ where
             is_read_only,
         };
 
-        match app_state_snapshot.check_permission(request) {
+        let check = {
+            let state = app_state.lock().await;
+            state.check_permission(request)
+        };
+
+        match check {
             PermissionCheck::Allowed => None,
             PermissionCheck::Denied { reason } => {
                 Some((format!("Permission denied: {reason}"), true))
             }
             PermissionCheck::NeedsConfirmation { prompt: _ } => {
-                Some((
-                    "Permission denied: interactive confirmation not yet supported".to_string(),
-                    true,
-                ))
+                if let Some(bridge) = &self.bridge {
+                    // Send permission request to TUI and wait for response
+                    match bridge.request_permission(tool_name, input).await {
+                        Some(rust_claude_tui::PermissionResponse::Allow) => None,
+                        Some(rust_claude_tui::PermissionResponse::AlwaysAllow) => {
+                            let mut state = app_state.lock().await;
+                            let rule = rust_claude_core::permission::PermissionRule {
+                                tool_name: tool_name.to_string(),
+                                pattern: command.map(|c| {
+                                    // For bash commands, create a prefix pattern
+                                    let first_word =
+                                        c.split_whitespace().next().unwrap_or(c);
+                                    format!("{first_word} *")
+                                }),
+                                rule_type: rust_claude_core::permission::RuleType::Allow,
+                            };
+                            state.always_allow_rules.push(rule);
+                            None
+                        }
+                        Some(rust_claude_tui::PermissionResponse::Deny) => {
+                            Some(("Permission denied by user".to_string(), true))
+                        }
+                        Some(rust_claude_tui::PermissionResponse::AlwaysDeny) => {
+                            let mut state = app_state.lock().await;
+                            let rule = rust_claude_core::permission::PermissionRule {
+                                tool_name: tool_name.to_string(),
+                                pattern: command.map(|c| {
+                                    let first_word =
+                                        c.split_whitespace().next().unwrap_or(c);
+                                    format!("{first_word} *")
+                                }),
+                                rule_type: rust_claude_core::permission::RuleType::Deny,
+                            };
+                            state.always_deny_rules.push(rule);
+                            Some(("Permission denied by user (always deny)".to_string(), true))
+                        }
+                        None => Some(("Permission denied: dialog unavailable".to_string(), true)),
+                    }
+                } else {
+                    Some((
+                        "Permission denied: interactive confirmation not yet supported".to_string(),
+                        true,
+                    ))
+                }
             }
         }
     }
@@ -261,9 +335,6 @@ where
         assistant_message: &Message,
     ) -> Result<(), QueryLoopError> {
         let tool_uses = assistant_message.tool_uses();
-
-        // Snapshot the app state for permission checks (avoids holding lock during execution).
-        let state_snapshot = app_state.lock().await.clone();
 
         let mut concurrent = Vec::new();
         let mut serial = Vec::new();
@@ -276,10 +347,19 @@ where
                 .map(|t| t.is_read_only)
                 .unwrap_or(false);
 
+            // Notify TUI about tool use start
+            if let Some(bridge) = &self.bridge {
+                bridge.send_tool_use(name, input).await;
+            }
+
             // Check permission before scheduling execution.
             if let Some((denial_msg, is_error)) =
-                Self::check_tool_permission(&state_snapshot, name, input, is_read_only)
+                self.check_tool_permission(app_state, name, input, is_read_only)
+                    .await
             {
+                if let Some(bridge) = &self.bridge {
+                    bridge.send_tool_result(name, &denial_msg, is_error).await;
+                }
                 tool_results.push((index, tool_use_id.to_string(), denial_msg, is_error));
                 continue;
             }
@@ -310,6 +390,12 @@ where
 
         for (index, result) in concurrent_results {
             let result = result.map_err(|error| QueryLoopError::Tool(error.to_string()))?;
+            if let Some(bridge) = &self.bridge {
+                // Find original tool name from the tool_use_id
+                bridge
+                    .send_tool_result("tool", &result.content, result.is_error)
+                    .await;
+            }
             tool_results.push((
                 index,
                 result.tool_use_id,
@@ -332,6 +418,11 @@ where
                 .await
                 .map_err(|error| QueryLoopError::Tool(error.to_string()))?;
 
+            if let Some(bridge) = &self.bridge {
+                bridge
+                    .send_tool_result(&name, &result.content, result.is_error)
+                    .await;
+            }
             tool_results.push((
                 index,
                 result.tool_use_id,

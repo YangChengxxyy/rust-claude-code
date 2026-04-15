@@ -1167,12 +1167,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "clap",
  "futures-util",
  "rust-claude-api",
  "rust-claude-core",
  "rust-claude-tools",
  "rust-claude-tui",
+ "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
@@ -1214,6 +1216,7 @@ dependencies = [
  "rust-claude-tools",
  "serde_json",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]

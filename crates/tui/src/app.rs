@@ -4,10 +4,23 @@ use std::time::Duration;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use rust_claude_core::state::TodoItem;
 use tokio::sync::mpsc;
 
-use crate::events::{AppEvent, ChatMessage};
+use crate::events::{AppEvent, ChatMessage, PermissionResponse};
 use crate::ui;
+
+/// State of the modal permission confirmation dialog.
+pub struct PermissionDialog {
+    /// The tool requesting permission.
+    pub tool_name: String,
+    /// Summary of the tool input.
+    pub input_summary: String,
+    /// Which option is currently highlighted (0=Allow, 1=AlwaysAllow, 2=Deny, 3=AlwaysDeny).
+    pub selected: usize,
+    /// Channel to send the user's decision back to the query loop.
+    pub response_tx: Option<tokio::sync::oneshot::Sender<PermissionResponse>>,
+}
 
 /// Main TUI application state.
 pub struct App {
@@ -21,6 +34,8 @@ pub struct App {
     pub scroll_offset: u16,
     /// Whether the assistant is currently streaming a response.
     pub is_streaming: bool,
+    /// Whether the model is in the "thinking" phase.
+    pub is_thinking: bool,
     /// Ignore incoming stream events until the current stream ends.
     pub suppress_stream: bool,
     /// Accumulated streaming text (displayed live, moved to messages on StreamEnd).
@@ -33,6 +48,13 @@ pub struct App {
     pub permission_mode: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+
+    // -- permission dialog --
+    pub permission_dialog: Option<PermissionDialog>,
+
+    // -- todo panel --
+    pub todo_visible: bool,
+    pub todos: Vec<TodoItem>,
 }
 
 impl App {
@@ -43,6 +65,7 @@ impl App {
             input_cursor: 0,
             scroll_offset: 0,
             is_streaming: false,
+            is_thinking: false,
             suppress_stream: false,
             streaming_text: String::new(),
             should_quit: false,
@@ -50,6 +73,9 @@ impl App {
             permission_mode,
             input_tokens: 0,
             output_tokens: 0,
+            permission_dialog: None,
+            todo_visible: false,
+            todos: Vec::new(),
         }
     }
 
@@ -125,6 +151,12 @@ impl App {
         key: crossterm::event::KeyEvent,
         user_tx: &mpsc::Sender<String>,
     ) {
+        // If the permission dialog is open, all keys are routed to it.
+        if self.permission_dialog.is_some() {
+            self.handle_permission_key(key);
+            return;
+        }
+
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
                 self.should_quit = true;
@@ -142,8 +174,16 @@ impl App {
                     self.input_cursor = 0;
                 }
             }
+            (_, KeyCode::Tab) => {
+                self.todo_visible = !self.todo_visible;
+            }
             (_, KeyCode::Enter) => {
                 if !self.is_streaming && !self.input.is_empty() {
+                    // Check for slash commands
+                    if self.input.starts_with('/') {
+                        self.handle_slash_command();
+                        return;
+                    }
                     let text = self.input.clone();
                     match user_tx.send(text.clone()).await {
                         Ok(()) => {
@@ -221,11 +261,126 @@ impl App {
         }
     }
 
+    /// Handle keyboard input while the permission dialog is open.
+    fn handle_permission_key(&mut self, key: crossterm::event::KeyEvent) {
+        let response = match key.code {
+            KeyCode::Char('y') | KeyCode::Enter => {
+                if let Some(dialog) = &self.permission_dialog {
+                    match dialog.selected {
+                        0 => Some(PermissionResponse::Allow),
+                        1 => Some(PermissionResponse::AlwaysAllow),
+                        2 => Some(PermissionResponse::Deny),
+                        3 => Some(PermissionResponse::AlwaysDeny),
+                        _ => Some(PermissionResponse::Allow),
+                    }
+                } else {
+                    None
+                }
+            }
+            KeyCode::Char('a') => Some(PermissionResponse::AlwaysAllow),
+            KeyCode::Char('n') => Some(PermissionResponse::Deny),
+            KeyCode::Char('d') => Some(PermissionResponse::AlwaysDeny),
+            KeyCode::Esc => Some(PermissionResponse::Deny),
+            KeyCode::Up => {
+                if let Some(dialog) = &mut self.permission_dialog {
+                    dialog.selected = dialog.selected.saturating_sub(1);
+                }
+                None
+            }
+            KeyCode::Down => {
+                if let Some(dialog) = &mut self.permission_dialog {
+                    dialog.selected = (dialog.selected + 1).min(3);
+                }
+                None
+            }
+            _ => None,
+        };
+
+        if let Some(response) = response {
+            if let Some(dialog) = self.permission_dialog.take() {
+                if let Some(tx) = dialog.response_tx {
+                    let _ = tx.send(response);
+                }
+            }
+        }
+    }
+
+    /// Process slash commands entered in the input box.
+    fn handle_slash_command(&mut self) {
+        let cmd = self.input.trim().to_string();
+        self.input.clear();
+        self.input_cursor = 0;
+
+        let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
+        match parts[0] {
+            "/clear" => {
+                self.messages.clear();
+                self.streaming_text.clear();
+                self.scroll_offset = 0;
+                self.messages
+                    .push(ChatMessage::System("Session cleared.".into()));
+            }
+            "/mode" => {
+                if parts.len() > 1 {
+                    let mode_str = parts[1].trim();
+                    match mode_str {
+                        "default" | "accept-edits" | "bypass" | "plan" | "dont-ask" => {
+                            self.permission_mode = match mode_str {
+                                "default" => "Default".to_string(),
+                                "accept-edits" => "AcceptEdits".to_string(),
+                                "bypass" => "BypassPermissions".to_string(),
+                                "plan" => "Plan".to_string(),
+                                "dont-ask" => "DontAsk".to_string(),
+                                _ => unreachable!(),
+                            };
+                            self.messages.push(ChatMessage::System(format!(
+                                "Permission mode switched to: {mode_str}"
+                            )));
+                        }
+                        _ => {
+                            self.messages.push(ChatMessage::System(
+                                "Unknown mode. Valid modes: default, accept-edits, bypass, plan, dont-ask"
+                                    .into(),
+                            ));
+                        }
+                    }
+                } else {
+                    self.messages.push(ChatMessage::System(format!(
+                        "Current mode: {}. Usage: /mode <default|accept-edits|bypass|plan|dont-ask>",
+                        self.permission_mode
+                    )));
+                }
+            }
+            "/todo" => {
+                self.todo_visible = !self.todo_visible;
+            }
+            "/help" => {
+                self.messages.push(ChatMessage::System(
+                    "Available commands:\n  /clear       — Clear current session\n  /mode <mode> — Switch permission mode\n  /todo        — Toggle todo panel\n  /help        — Show this help\n  /exit        — Exit"
+                        .into(),
+                ));
+            }
+            "/exit" => {
+                self.should_quit = true;
+            }
+            _ => {
+                self.messages.push(ChatMessage::System(format!(
+                    "Unknown command: {}. Type /help for available commands.",
+                    parts[0]
+                )));
+            }
+        }
+    }
+
     /// Process an event from the query bridge / background tasks.
     pub fn handle_app_event(&mut self, event: AppEvent) {
         match event {
+            AppEvent::ThinkingStart => {
+                self.is_thinking = true;
+            }
             AppEvent::StreamDelta(text) => {
                 if self.is_streaming && !self.suppress_stream {
+                    self.is_thinking = false;
                     self.streaming_text.push_str(&text);
                 }
             }
@@ -237,10 +392,12 @@ impl App {
                     self.streaming_text.clear();
                 }
                 self.is_streaming = false;
+                self.is_thinking = false;
                 self.suppress_stream = false;
                 self.scroll_offset = 0;
             }
             AppEvent::ToolUseStart { name, input } => {
+                self.is_thinking = false;
                 let summary = summarize_tool_input(&name, &input);
                 self.messages.push(ChatMessage::ToolUse {
                     name,
@@ -265,6 +422,7 @@ impl App {
                 }
                 self.streaming_text.clear();
                 self.is_streaming = false;
+                self.is_thinking = false;
                 self.suppress_stream = false;
                 self.scroll_offset = 0;
             }
@@ -279,7 +437,24 @@ impl App {
                 self.messages.push(ChatMessage::System(msg));
                 self.streaming_text.clear();
                 self.is_streaming = false;
+                self.is_thinking = false;
                 self.suppress_stream = false;
+            }
+            AppEvent::PermissionRequest {
+                tool_name,
+                input,
+                response_tx,
+            } => {
+                let input_summary = summarize_tool_input(&tool_name, &input);
+                self.permission_dialog = Some(PermissionDialog {
+                    tool_name,
+                    input_summary,
+                    selected: 0,
+                    response_tx: Some(response_tx),
+                });
+            }
+            AppEvent::TodoUpdate(todos) => {
+                self.todos = todos;
             }
             AppEvent::Resize(_, _) => {}
             AppEvent::Key(_) => {}
@@ -532,6 +707,203 @@ mod tests {
         assert!(!app.is_streaming);
         assert_eq!(app.messages.len(), 1);
         assert!(matches!(&app.messages[0], ChatMessage::System(s) if s == "something failed"));
+    }
+
+    #[test]
+    fn test_permission_request_event_opens_dialog() {
+        let mut app = App::new("test".into(), "default".into());
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        app.handle_app_event(AppEvent::PermissionRequest {
+            tool_name: "Bash".into(),
+            input: serde_json::json!({"command": "rm -rf /tmp"}),
+            response_tx: tx,
+        });
+        assert!(app.permission_dialog.is_some());
+        let dialog = app.permission_dialog.as_ref().unwrap();
+        assert_eq!(dialog.tool_name, "Bash");
+        assert_eq!(dialog.selected, 0);
+    }
+
+    #[tokio::test]
+    async fn test_permission_dialog_y_key_sends_allow() {
+        let mut app = App::new("test".into(), "default".into());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (user_tx, _user_rx) = mpsc::channel(1);
+
+        app.permission_dialog = Some(super::PermissionDialog {
+            tool_name: "Bash".into(),
+            input_summary: "rm -rf".into(),
+            selected: 0,
+            response_tx: Some(tx),
+        });
+
+        app.handle_key_event(key(KeyCode::Char('y')), &user_tx).await;
+        assert!(app.permission_dialog.is_none());
+        let response = rx.await.unwrap();
+        assert_eq!(response, PermissionResponse::Allow);
+    }
+
+    #[tokio::test]
+    async fn test_permission_dialog_a_key_sends_always_allow() {
+        let mut app = App::new("test".into(), "default".into());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (user_tx, _user_rx) = mpsc::channel(1);
+
+        app.permission_dialog = Some(super::PermissionDialog {
+            tool_name: "Bash".into(),
+            input_summary: "ls".into(),
+            selected: 0,
+            response_tx: Some(tx),
+        });
+
+        app.handle_key_event(key(KeyCode::Char('a')), &user_tx).await;
+        assert!(app.permission_dialog.is_none());
+        assert_eq!(rx.await.unwrap(), PermissionResponse::AlwaysAllow);
+    }
+
+    #[tokio::test]
+    async fn test_permission_dialog_n_key_sends_deny() {
+        let mut app = App::new("test".into(), "default".into());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (user_tx, _user_rx) = mpsc::channel(1);
+
+        app.permission_dialog = Some(super::PermissionDialog {
+            tool_name: "Bash".into(),
+            input_summary: "ls".into(),
+            selected: 0,
+            response_tx: Some(tx),
+        });
+
+        app.handle_key_event(key(KeyCode::Char('n')), &user_tx).await;
+        assert!(app.permission_dialog.is_none());
+        assert_eq!(rx.await.unwrap(), PermissionResponse::Deny);
+    }
+
+    #[tokio::test]
+    async fn test_permission_dialog_d_key_sends_always_deny() {
+        let mut app = App::new("test".into(), "default".into());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (user_tx, _user_rx) = mpsc::channel(1);
+
+        app.permission_dialog = Some(super::PermissionDialog {
+            tool_name: "Bash".into(),
+            input_summary: "ls".into(),
+            selected: 0,
+            response_tx: Some(tx),
+        });
+
+        app.handle_key_event(key(KeyCode::Char('d')), &user_tx).await;
+        assert!(app.permission_dialog.is_none());
+        assert_eq!(rx.await.unwrap(), PermissionResponse::AlwaysDeny);
+    }
+
+    #[tokio::test]
+    async fn test_permission_dialog_arrow_keys_navigate() {
+        let mut app = App::new("test".into(), "default".into());
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let (user_tx, _user_rx) = mpsc::channel(1);
+
+        app.permission_dialog = Some(super::PermissionDialog {
+            tool_name: "Bash".into(),
+            input_summary: "ls".into(),
+            selected: 0,
+            response_tx: Some(tx),
+        });
+
+        app.handle_key_event(key(KeyCode::Down), &user_tx).await;
+        assert_eq!(app.permission_dialog.as_ref().unwrap().selected, 1);
+        app.handle_key_event(key(KeyCode::Down), &user_tx).await;
+        assert_eq!(app.permission_dialog.as_ref().unwrap().selected, 2);
+        app.handle_key_event(key(KeyCode::Up), &user_tx).await;
+        assert_eq!(app.permission_dialog.as_ref().unwrap().selected, 1);
+    }
+
+    #[tokio::test]
+    async fn test_tab_toggles_todo_panel() {
+        let mut app = App::new("test".into(), "default".into());
+        let (tx, _rx) = mpsc::channel(1);
+        assert!(!app.todo_visible);
+        app.handle_key_event(key(KeyCode::Tab), &tx).await;
+        assert!(app.todo_visible);
+        app.handle_key_event(key(KeyCode::Tab), &tx).await;
+        assert!(!app.todo_visible);
+    }
+
+    #[test]
+    fn test_todo_update_event() {
+        use rust_claude_core::state::{TodoItem, TodoPriority, TodoStatus};
+        let mut app = App::new("test".into(), "default".into());
+        app.handle_app_event(AppEvent::TodoUpdate(vec![TodoItem {
+            id: "1".into(),
+            content: "test task".into(),
+            status: TodoStatus::Pending,
+            priority: TodoPriority::High,
+        }]));
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].id, "1");
+    }
+
+    #[test]
+    fn test_slash_command_clear() {
+        let mut app = App::new("test".into(), "default".into());
+        app.messages.push(ChatMessage::User("hello".into()));
+        app.messages.push(ChatMessage::Assistant("hi".into()));
+        app.input = "/clear".into();
+        app.input_cursor = 6;
+        app.handle_slash_command();
+        // After clear, only the system message "Session cleared." remains
+        assert_eq!(app.messages.len(), 1);
+        assert!(matches!(&app.messages[0], ChatMessage::System(s) if s.contains("cleared")));
+    }
+
+    #[test]
+    fn test_slash_command_mode() {
+        let mut app = App::new("test".into(), "Default".into());
+        app.input = "/mode bypass".into();
+        app.handle_slash_command();
+        assert_eq!(app.permission_mode, "BypassPermissions");
+    }
+
+    #[test]
+    fn test_slash_command_mode_invalid() {
+        let mut app = App::new("test".into(), "Default".into());
+        app.input = "/mode invalid".into();
+        app.handle_slash_command();
+        assert_eq!(app.permission_mode, "Default");
+        assert!(matches!(&app.messages[0], ChatMessage::System(s) if s.contains("Unknown mode")));
+    }
+
+    #[test]
+    fn test_slash_command_help() {
+        let mut app = App::new("test".into(), "default".into());
+        app.input = "/help".into();
+        app.handle_slash_command();
+        assert_eq!(app.messages.len(), 1);
+        assert!(matches!(&app.messages[0], ChatMessage::System(s) if s.contains("/clear")));
+    }
+
+    #[test]
+    fn test_slash_command_exit() {
+        let mut app = App::new("test".into(), "default".into());
+        app.input = "/exit".into();
+        app.handle_slash_command();
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn test_slash_command_todo() {
+        let mut app = App::new("test".into(), "default".into());
+        app.input = "/todo".into();
+        app.handle_slash_command();
+        assert!(app.todo_visible);
+    }
+
+    #[test]
+    fn test_slash_command_unknown() {
+        let mut app = App::new("test".into(), "default".into());
+        app.input = "/unknown".into();
+        app.handle_slash_command();
+        assert!(matches!(&app.messages[0], ChatMessage::System(s) if s.contains("Unknown command")));
     }
 
     #[test]

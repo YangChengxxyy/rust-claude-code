@@ -606,6 +606,29 @@ rust-claude-code/
 
 ### 迭代 10：TUI 权限对话框 + Todo 面板
 
+**状态**: 已完成
+
+**完成记录**:
+
+- 已实现权限确认对话框（模态弹窗）：
+  - 居中弹窗显示工具名、参数摘要
+  - 支持 4 个选项：Allow(y) / Always Allow(a) / Deny(n) / Always Deny(d)
+  - 上下方向键导航，Enter 确认当前选项
+  - Always Allow/Deny 自动添加到权限规则列表
+- 已实现 TuiBridge 权限请求通道（oneshot channel 双向通信）
+- 已将 QueryLoop 中的 `NeedsConfirmation` 硬编码拒绝替换为交互式权限对话框
+- 已实现 Todo 侧面板（Tab 键切换显示/隐藏）：
+  - 右侧 30 列面板，显示 TodoItem 列表
+  - 状态图标：○ pending / ◐ in_progress / ● completed
+  - TodoUpdate 事件支持实时刷新
+- 已实现 QueryLoop 到 TUI 的完整事件桥接：
+  - StreamDelta 实时推送到 TUI（token 级流式显示）
+  - ThinkingStart 事件推送（thinking 阶段显示）
+  - ToolUseStart / ToolResult 事件推送
+  - StreamEnd / UsageUpdate 事件推送
+- 已补充权限对话框、Todo 面板、桥接通道的单元测试
+- 验证结果：`cargo test --workspace` 通过
+
 **目标**: 在 TUI 中集成权限确认和 Todo 显示。
 
 **产出**:
@@ -634,6 +657,31 @@ rust-claude-code/
 ---
 
 ### 迭代 11：System Prompt + 会话管理 + 斜杠命令
+
+**状态**: 已完成
+
+**完成记录**:
+
+- 已实现 System Prompt 组合模块（`cli/src/system_prompt.rs`）：
+  - 核心行为指导、工具使用说明
+  - 动态注入可用工具描述列表
+  - 注入 CWD、OS、架构、日期等环境上下文
+  - 支持 `--append-system-prompt` 自定义追加
+  - 当无显式 `--system-prompt` 时自动使用组合 prompt
+- 已实现会话持久化（`cli/src/session.rs`）：
+  - JSON 格式保存到 `~/.config/rust-claude-code/sessions/`
+  - 每次查询结束后自动保存
+  - 支持 `--continue` / `-c` 参数恢复最近会话
+  - SessionFile 包含 id、model、cwd、timestamps、messages
+- 已实现斜杠命令：
+  - `/clear` — 清空当前会话消息
+  - `/mode <mode>` — 切换权限模式（支持 5 种模式）
+  - `/todo` — 切换 Todo 面板显示
+  - `/help` — 显示可用命令帮助
+  - `/exit` — 退出程序
+  - 未知命令显示友好错误提示
+- 已补充 system prompt、session、slash command 的单元测试
+- 验证结果：`cargo test --workspace` 通过，218 个测试全部通过
 
 **目标**: 最终打磨，达到可日常使用的状态。
 

@@ -1,4 +1,5 @@
 use crossterm::event::KeyEvent;
+use rust_claude_core::state::TodoItem;
 
 /// Events consumed by the TUI application.
 #[derive(Debug)]
@@ -9,6 +10,8 @@ pub enum AppEvent {
     StreamDelta(String),
     /// The assistant finished streaming its response.
     StreamEnd,
+    /// The model is thinking (extended thinking / reasoning).
+    ThinkingStart,
     /// The model began a tool call.
     ToolUseStart {
         name: String,
@@ -31,6 +34,28 @@ pub enum AppEvent {
     Error(String),
     /// Terminal resize event.
     Resize(u16, u16),
+    /// A tool needs permission confirmation from the user.
+    PermissionRequest {
+        tool_name: String,
+        input: serde_json::Value,
+        /// Channel to send the user's response back.
+        response_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
+    },
+    /// Todo list has been updated.
+    TodoUpdate(Vec<TodoItem>),
+}
+
+/// The user's response to a permission confirmation dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionResponse {
+    /// Allow this one invocation.
+    Allow,
+    /// Allow and add an always-allow rule.
+    AlwaysAllow,
+    /// Deny this one invocation.
+    Deny,
+    /// Deny and add an always-deny rule.
+    AlwaysDeny,
 }
 
 /// Messages that the TUI's chat area displays.
@@ -77,6 +102,18 @@ impl ChatMessage {
                 }
             }
             ChatMessage::ToolResult { output_summary, .. } => output_summary,
+        }
+    }
+
+    /// Map internal tool names to user-facing display names matching Claude Code.
+    pub fn user_facing_tool_name(tool_name: &str) -> &str {
+        match tool_name {
+            "Bash" => "Bash",
+            "FileRead" => "Read",
+            "FileEdit" => "Update",
+            "FileWrite" => "Write",
+            "TodoWrite" => "Todo",
+            other => other,
         }
     }
 }
@@ -137,5 +174,15 @@ mod tests {
             .body(),
             "echo hi"
         );
+    }
+
+    #[test]
+    fn test_user_facing_tool_name() {
+        assert_eq!(ChatMessage::user_facing_tool_name("FileRead"), "Read");
+        assert_eq!(ChatMessage::user_facing_tool_name("FileEdit"), "Update");
+        assert_eq!(ChatMessage::user_facing_tool_name("FileWrite"), "Write");
+        assert_eq!(ChatMessage::user_facing_tool_name("Bash"), "Bash");
+        assert_eq!(ChatMessage::user_facing_tool_name("TodoWrite"), "Todo");
+        assert_eq!(ChatMessage::user_facing_tool_name("Unknown"), "Unknown");
     }
 }

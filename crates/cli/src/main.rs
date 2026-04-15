@@ -141,8 +141,8 @@ fn parse_bool_env(value: &str) -> Option<bool> {
 }
 
 /// Resolve all configuration through the unified priority chain:
-/// RUST_CLAUDE_* env > CLI flags > ANTHROPIC_* env (from settings.json + shell) > config file > defaults
-fn resolve_config(cli: &Cli, config: Config) -> Result<ResolvedConfig> {
+/// RUST_CLAUDE_* env > CLI flags > ANTHROPIC_* env (from settings.json + shell) > settings.json fields > config file > defaults
+fn resolve_config(cli: &Cli, config: Config, settings: &ClaudeSettings) -> Result<ResolvedConfig> {
     // --- System prompt ---
     if cli.system_prompt.is_some() && cli.system_prompt_file.is_some() {
         return Err(anyhow!("--system-prompt and --system-prompt-file are mutually exclusive"));
@@ -170,11 +170,12 @@ fn resolve_config(cli: &Cli, config: Config) -> Result<ResolvedConfig> {
         (None, None) => None,
     };
 
-    // --- Model: RUST_CLAUDE_MODEL_OVERRIDE > --model > ANTHROPIC_MODEL > config > default ---
+    // --- Model: RUST_CLAUDE_MODEL_OVERRIDE > --model > ANTHROPIC_MODEL > settings.model > config > default ---
     let model = std::env::var("RUST_CLAUDE_MODEL_OVERRIDE")
         .ok()
         .or_else(|| cli.model.clone())
         .or_else(|| std::env::var("ANTHROPIC_MODEL").ok())
+        .or_else(|| settings.model.clone())
         .unwrap_or(config.model);
 
     // --- Base URL: RUST_CLAUDE_BASE_URL > ANTHROPIC_BASE_URL > config ---
@@ -253,21 +254,35 @@ async fn main() -> Result<()> {
     };
     settings.apply_env();
 
-    // 2. Load project config
+    // 2. Load project config (try apiKeyHelper if no credential found)
     let config = match Config::load() {
         Ok(config) => config,
         Err(ConfigError::MissingApiKey) => {
-            println!("No API key configured yet. Skipping session initialization.");
-            println!("cwd: {}", cwd.display());
-            return Err(anyhow!(
-                "ANTHROPIC_API_KEY is required to run the query loop or TUI"
-            ));
+            // Try apiKeyHelper from settings.json before giving up
+            if let Some(ref helper) = settings.api_key_helper {
+                match run_api_key_helper(helper) {
+                    Ok(credential) => {
+                        // apiKeyHelper output is used as Bearer token (same as Claude Code)
+                        Config::with_credential(credential, true)
+                    }
+                    Err(e) => {
+                        eprintln!("apiKeyHelper failed: {e}");
+                        return Err(anyhow!(
+                            "No API credential found. Set ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or configure apiKeyHelper in settings.json"
+                        ));
+                    }
+                }
+            } else {
+                return Err(anyhow!(
+                    "No API credential found. Set ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or configure apiKeyHelper in settings.json"
+                ));
+            }
         }
         Err(error) => return Err(error.into()),
     };
 
     // 3. Resolve full configuration through priority chain
-    let resolved = resolve_config(&cli, config)?;
+    let resolved = resolve_config(&cli, config, &settings)?;
 
     if resolved.verbose {
         println!("cwd: {}", cwd.display());
@@ -338,6 +353,31 @@ async fn main() -> Result<()> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Run an apiKeyHelper command and return its stdout as the credential.
+fn run_api_key_helper(command: &str) -> Result<String> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .map_err(|e| anyhow!("failed to execute apiKeyHelper: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("apiKeyHelper exited with {}: {stderr}", output.status));
+    }
+
+    let credential = String::from_utf8(output.stdout)
+        .map_err(|e| anyhow!("apiKeyHelper output is not valid UTF-8: {e}"))?
+        .trim()
+        .to_string();
+
+    if credential.is_empty() {
+        return Err(anyhow!("apiKeyHelper returned empty output"));
+    }
+
+    Ok(credential)
+}
 
 fn build_client(
     api_key: &str,

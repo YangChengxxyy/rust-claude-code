@@ -43,18 +43,18 @@ impl Config {
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
             let raw: RawConfig = serde_json::from_str(&content)?;
-            let api_key = match raw.api_key {
-                Some(api_key) => api_key,
-                None => {
-                    std::env::var("ANTHROPIC_API_KEY").map_err(|_| ConfigError::MissingApiKey)?
-                }
+
+            // Credential resolution: config api_key → ANTHROPIC_API_KEY → ANTHROPIC_AUTH_TOKEN
+            let (api_key, bearer_auth) = match raw.api_key {
+                Some(api_key) => (api_key, raw.bearer_auth.unwrap_or(false)),
+                None => Self::resolve_credential_from_env(raw.bearer_auth)?,
             };
 
             Ok(Config {
                 api_key,
                 model: raw.model.unwrap_or_else(default_model),
                 base_url: raw.base_url,
-                bearer_auth: raw.bearer_auth.unwrap_or(false),
+                bearer_auth,
                 system_prompt: raw.system_prompt,
                 max_tokens: raw.max_tokens.unwrap_or_else(default_max_tokens),
                 permission_mode: raw.permission_mode.unwrap_or_default(),
@@ -63,14 +63,13 @@ impl Config {
                 stream: raw.stream.unwrap_or_else(default_true),
             })
         } else {
-            let api_key =
-                std::env::var("ANTHROPIC_API_KEY").map_err(|_| ConfigError::MissingApiKey)?;
+            let (api_key, bearer_auth) = Self::resolve_credential_from_env(None)?;
 
             Ok(Config {
                 api_key,
                 model: default_model(),
                 base_url: None,
-                bearer_auth: false,
+                bearer_auth,
                 system_prompt: None,
                 max_tokens: default_max_tokens(),
                 permission_mode: crate::permission::PermissionMode::Default,
@@ -79,6 +78,22 @@ impl Config {
                 stream: true,
             })
         }
+    }
+
+    /// Resolve API credential from environment variables.
+    /// Tries ANTHROPIC_API_KEY first (x-api-key), then ANTHROPIC_AUTH_TOKEN (Bearer).
+    /// Returns (credential, bearer_auth).
+    fn resolve_credential_from_env(
+        config_bearer_auth: Option<bool>,
+    ) -> Result<(String, bool), ConfigError> {
+        if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
+            return Ok((api_key, config_bearer_auth.unwrap_or(false)));
+        }
+        if let Ok(auth_token) = std::env::var("ANTHROPIC_AUTH_TOKEN") {
+            // ANTHROPIC_AUTH_TOKEN always implies Bearer auth
+            return Ok((auth_token, true));
+        }
+        Err(ConfigError::MissingApiKey)
     }
 
     pub fn save(&self) -> Result<(), ConfigError> {
@@ -99,6 +114,22 @@ impl Config {
             .join(".config")
             .join("rust-claude-code")
             .join("config.json"))
+    }
+
+    /// Create a Config with just a credential and bearer_auth flag, using defaults for everything else.
+    pub fn with_credential(api_key: String, bearer_auth: bool) -> Self {
+        Config {
+            api_key,
+            model: default_model(),
+            base_url: None,
+            bearer_auth,
+            system_prompt: None,
+            max_tokens: default_max_tokens(),
+            permission_mode: crate::permission::PermissionMode::Default,
+            always_allow: Vec::new(),
+            always_deny: Vec::new(),
+            stream: true,
+        }
     }
 
     pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
@@ -138,7 +169,7 @@ struct RawConfig {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("ANTHROPIC_API_KEY environment variable not set")]
+    #[error("No API credential found. Set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN")]
     MissingApiKey,
     #[error("HOME environment variable not set")]
     NoHomeDir,
@@ -170,6 +201,7 @@ mod tests {
     struct TestEnv {
         old_home: Option<String>,
         old_api_key: Option<String>,
+        old_auth_token: Option<String>,
         temp_home: PathBuf,
     }
 
@@ -178,14 +210,18 @@ mod tests {
             let temp_home = make_temp_home(name);
             let old_home = std::env::var("HOME").ok();
             let old_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
+            let old_auth_token = std::env::var("ANTHROPIC_AUTH_TOKEN").ok();
 
             unsafe {
                 std::env::set_var("HOME", &temp_home);
+                // Clear both credential env vars to isolate tests
+                std::env::remove_var("ANTHROPIC_AUTH_TOKEN");
             }
 
             TestEnv {
                 old_home,
                 old_api_key,
+                old_auth_token,
                 temp_home,
             }
         }
@@ -220,6 +256,11 @@ mod tests {
             match &self.old_api_key {
                 Some(value) => unsafe { std::env::set_var("ANTHROPIC_API_KEY", value) },
                 None => unsafe { std::env::remove_var("ANTHROPIC_API_KEY") },
+            }
+
+            match &self.old_auth_token {
+                Some(value) => unsafe { std::env::set_var("ANTHROPIC_AUTH_TOKEN", value) },
+                None => unsafe { std::env::remove_var("ANTHROPIC_AUTH_TOKEN") },
             }
 
             let _ = fs::remove_dir_all(&self.temp_home);

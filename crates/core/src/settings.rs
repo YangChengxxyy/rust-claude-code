@@ -2,12 +2,20 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Minimal representation of `~/.claude/settings.json`.
-/// Only the `env` field is read — other fields are ignored.
+/// Representation of `~/.claude/settings.json`.
+/// Reads `env`, `model`, and `apiKeyHelper` fields.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ClaudeSettings {
     #[serde(default)]
     pub env: HashMap<String, String>,
+
+    /// Top-level model override from settings (e.g. "opus[1m]").
+    #[serde(default)]
+    pub model: Option<String>,
+
+    /// Script/command that outputs an API credential to stdout.
+    #[serde(default, rename = "apiKeyHelper")]
+    pub api_key_helper: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -36,14 +44,15 @@ impl ClaudeSettings {
             let settings: ClaudeSettings = serde_json::from_str(&content)?;
             Ok(settings)
         } else {
-            Ok(ClaudeSettings {
-                env: HashMap::new(),
-            })
+            Ok(ClaudeSettings::default())
         }
     }
 
-    /// The default path: `$HOME/.claude/settings.json`
+    /// The default path: `$CLAUDE_CONFIG_DIR/settings.json` or `$HOME/.claude/settings.json`
     fn default_path() -> Result<PathBuf, SettingsError> {
+        if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+            return Ok(PathBuf::from(config_dir).join("settings.json"));
+        }
         let home = std::env::var("HOME").map_err(|_| SettingsError::NoHomeDir)?;
         Ok(PathBuf::from(home).join(".claude").join("settings.json"))
     }
@@ -127,7 +136,7 @@ mod tests {
             "from-settings".to_string(),
         );
 
-        let settings = ClaudeSettings { env };
+        let settings = ClaudeSettings { env, ..Default::default() };
         settings.apply_env();
 
         assert_eq!(std::env::var(test_key).unwrap(), "from-settings");
@@ -142,7 +151,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert(test_key.to_string(), "from-settings".to_string());
 
-        let settings = ClaudeSettings { env };
+        let settings = ClaudeSettings { env, ..Default::default() };
         settings.apply_env();
 
         assert_eq!(std::env::var(test_key).unwrap(), "from-shell");

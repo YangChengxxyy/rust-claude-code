@@ -44,16 +44,28 @@ cargo test -p rust-claude-cli -- --ignored
 
 ## Environment Variables
 
-- `ANTHROPIC_API_KEY` — Required for running the CLI or integration tests
+- `ANTHROPIC_API_KEY` — API key for x-api-key authentication
+- `ANTHROPIC_AUTH_TOKEN` — Auth token for Bearer authentication (used by Claude Code)
 - `ANTHROPIC_MODEL` — Override the model (also read from `~/.claude/settings.json` env)
 - `ANTHROPIC_BASE_URL` — Custom API endpoint URL
+- `CLAUDE_CONFIG_DIR` — Override Claude config directory (default: `~/.claude`)
 - `RUST_CLAUDE_MODEL_OVERRIDE` — Override the model (highest priority)
 - `RUST_CLAUDE_BASE_URL` — Custom API endpoint URL (highest priority)
 - `RUST_CLAUDE_BEARER_AUTH` — Set to `1` or `true` to use Bearer auth instead of x-api-key header
 - `RUST_CLAUDE_STREAM` — Set to `1`/`true` or `0`/`false` to override streaming
 
+### Authentication
+
+Credentials are resolved in this order:
+1. Config file `api_key` field → uses x-api-key header
+2. `ANTHROPIC_API_KEY` env → uses x-api-key header
+3. `ANTHROPIC_AUTH_TOKEN` env → uses Bearer auth (auto-detected)
+4. `apiKeyHelper` from settings.json → runs script, uses output as Bearer token
+
+This means rust-claude works out-of-the-box in a configured Claude Code environment — it reads `~/.claude/settings.json` env variables (including `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL`) and auto-selects the correct auth mode.
+
 Config file location: `~/.config/rust-claude-code/config.json`
-Claude Code settings: `~/.claude/settings.json` (reads `env` field)
+Claude Code settings: `~/.claude/settings.json` (reads `env`, `model`, `apiKeyHelper` fields)
 Permission rules location: `~/.config/rust-claude-code/permissions.json`
 
 ## CLI Parameters
@@ -85,9 +97,10 @@ For each value, the resolution order is:
 
 | Value | Priority (high → low) |
 |---|---|
-| model | `RUST_CLAUDE_MODEL_OVERRIDE` → `--model` → `ANTHROPIC_MODEL` → config.json → default |
+| model | `RUST_CLAUDE_MODEL_OVERRIDE` → `--model` → `ANTHROPIC_MODEL` → `settings.json model` → config.json → default |
+| credential | config.json `api_key` → `ANTHROPIC_API_KEY` → `ANTHROPIC_AUTH_TOKEN` → `apiKeyHelper` |
 | base_url | `RUST_CLAUDE_BASE_URL` → `ANTHROPIC_BASE_URL` → config.json → API default |
-| bearer_auth | `RUST_CLAUDE_BEARER_AUTH` → config.json → `false` |
+| bearer_auth | `RUST_CLAUDE_BEARER_AUTH` → auto (true if `ANTHROPIC_AUTH_TOKEN`) → config.json → `false` |
 | stream | `RUST_CLAUDE_STREAM` → `--no-stream` → config.json → `true` |
 | max_tokens | `--max-tokens` → config.json → `16384` |
 | system_prompt | `--system-prompt`/`--system-prompt-file` → config.json → `None` |
@@ -98,7 +111,7 @@ For each value, the resolution order is:
 
 ### Workspace Crates (dependency order: core → api/tools → cli/tui)
 
-- **`core`** — Shared types with zero external service dependencies. Defines `Message`, `ContentBlock`, `AppState`, `PermissionMode`/`PermissionRule`/`PermissionCheck`, `PermissionManager`, `Config` (with `base_url` and `bearer_auth` fields), `ClaudeSettings` (reads `~/.claude/settings.json` env), `ToolInfo`/`ToolResult`. Everything else depends on this crate.
+- **`core`** — Shared types with zero external service dependencies. Defines `Message`, `ContentBlock`, `AppState`, `PermissionMode`/`PermissionRule`/`PermissionCheck`, `PermissionManager`, `Config` (with `base_url`, `bearer_auth`, and `ANTHROPIC_AUTH_TOKEN` auto-detection), `ClaudeSettings` (reads `~/.claude/settings.json` — `env`, `model`, `apiKeyHelper` fields), `ToolInfo`/`ToolResult`. Everything else depends on this crate.
 - **`api`** — Anthropic HTTP client with SSE streaming. `AnthropicClient` sends requests and returns `MessageStream` (a `Pin<Box<dyn Stream<Item=StreamEvent>>>`). The streaming module has delta accumulators (`TextDeltaAccumulator`, `ThinkingDeltaAccumulator`, `ToolUseDeltaAccumulator`) that assemble partial events into complete content blocks.
 - **`tools`** — Tool trait and implementations: `BashTool`, `FileReadTool`, `FileEditTool`, `FileWriteTool`, `TodoWriteTool`. Each implements the `Tool` trait (`info()`, `is_read_only()`, `is_concurrency_safe()`, `execute()`). `ToolRegistry` indexes tools by name, partitions them by concurrency safety for execution, and supports allow/deny list filtering via `apply_tool_filters()`.
 - **`cli`** — Binary crate (`rust-claude`) and `QueryLoop` — the agentic loop that sends messages, streams responses, detects `tool_use` stop reasons, checks permissions, executes tools (concurrent-safe in parallel via `join_all`, others serially), appends `tool_result` messages, and loops up to `max_rounds` (default 8). CLI supports extensive parameters (`--model`, `--mode`, `--print`, `--max-turns`, `--system-prompt`, etc.) and a unified priority chain for configuration resolution. With a prompt argument it runs non-interactively; without a prompt it enters the basic TUI and dispatches prompts through the same `QueryLoop` in a background task.

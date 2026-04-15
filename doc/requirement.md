@@ -122,8 +122,8 @@
 - 已实现 `Message`、`ContentBlock`、`Role`、`StopReason`、`Usage`。
 - `Role` 当前只包含 `User` 和 `Assistant`。
 - 已实现 `ToolResult`、`ToolResultMetadata`、`ToolInfo`。
-- 已实现 `PermissionMode`、`PermissionRule`、`PermissionCheck`。
-- 已实现 `AppState`、`TodoItem`、`TodoStatus`、`TodoPriority`。
+- 已实现 `PermissionMode`、`PermissionRule`、`PermissionCheck`，并收敛了统一权限检查入口与规则优先级边界。
+- 已实现 `AppState`、`SessionSettings`、`TodoItem`、`TodoStatus`、`TodoPriority`。
 - 已实现 `Config`，支持从配置文件或 `ANTHROPIC_API_KEY` 加载 API Key。
 
 ### 4.2 api crate
@@ -133,6 +133,7 @@
 - 已支持 `x-api-key` 和 `anthropic-version` 请求头。
 - 已实现基础错误映射：认证失败、限流、通用 API 错误、超时、连接错误。
 - 已实现 `CreateMessageRequest`、`CreateMessageResponse`、`ApiMessage`、`ApiTool`、`SystemPrompt`。
+- `CreateMessageRequest` 已支持 `metadata`，`AnthropicClient` 已收敛共享的 header / request / JSON 响应处理边界。
 - 已新增 `examples/simple_chat.rs` 与真实 API 的忽略型集成测试。
 
 ### 4.3 tools crate
@@ -142,7 +143,7 @@
 
 ### 4.4 cli crate
 
-- 当前为最小入口程序。
+- 当前为最小入口程序，已接入配置加载与 `AppState` 初始化的占位路径。
 - 尚未接入 Query Loop、参数解析和交互模式。
 
 ### 4.5 tui crate

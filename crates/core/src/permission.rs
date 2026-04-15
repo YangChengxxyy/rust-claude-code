@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PermissionRequest<'a> {
+    pub tool_name: &'a str,
+    pub command: Option<&'a str>,
+    pub is_read_only: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum PermissionMode {
@@ -34,6 +41,37 @@ pub enum PermissionCheck {
 }
 
 impl PermissionMode {
+    pub fn check(
+        &self,
+        request: PermissionRequest<'_>,
+        always_deny: &[PermissionRule],
+        always_allow: &[PermissionRule],
+    ) -> PermissionCheck {
+        if let Some(check) = match_rule(request, always_deny) {
+            return check;
+        }
+
+        if let Some(check) = match_rule(request, always_allow) {
+            if matches!(check, PermissionCheck::Allowed)
+                && matches!(self, PermissionMode::Plan)
+                && !request.is_read_only
+            {
+                return PermissionCheck::Denied {
+                    reason: "Plan mode does not allow write operations".to_string(),
+                };
+            }
+
+            return check;
+        }
+
+        self.check_tool_with_command(
+            request.tool_name,
+            request.command,
+            request.is_read_only,
+            &[],
+        )
+    }
+
     pub fn check_tool(
         &self,
         tool_name: &str,
@@ -124,6 +162,26 @@ impl RuleType {
             },
         }
     }
+}
+
+fn match_rule(request: PermissionRequest<'_>, rules: &[PermissionRule]) -> Option<PermissionCheck> {
+    for rule in rules {
+        if rule.tool_name != request.tool_name && rule.tool_name != "*" {
+            continue;
+        }
+
+        let pattern_matches = match (&rule.pattern, request.command) {
+            (None, _) => true,
+            (Some(pattern), Some(command)) => pattern_matches(command, pattern),
+            (Some(_), None) => false,
+        };
+
+        if pattern_matches {
+            return Some(rule.rule_type.to_permission_check());
+        }
+    }
+
+    None
 }
 
 fn pattern_matches(value: &str, pattern: &str) -> bool {
@@ -275,6 +333,101 @@ mod tests {
         assert!(pattern_matches("git commit -m 'test'", "git *"));
         assert!(!pattern_matches("rm -rf /", "git *"));
         assert!(pattern_matches("anything", "*"));
+    }
+
+    #[test]
+    fn test_check_prioritizes_deny_over_allow() {
+        let request = PermissionRequest {
+            tool_name: "Bash",
+            command: Some("git status"),
+            is_read_only: false,
+        };
+
+        let allow_rules = vec![PermissionRule {
+            tool_name: "Bash".to_string(),
+            pattern: Some("git *".to_string()),
+            rule_type: RuleType::Allow,
+        }];
+        let deny_rules = vec![PermissionRule {
+            tool_name: "Bash".to_string(),
+            pattern: Some("git status".to_string()),
+            rule_type: RuleType::Deny,
+        }];
+
+        let check = PermissionMode::Default.check(request, &deny_rules, &allow_rules);
+        assert!(matches!(check, PermissionCheck::Denied { .. }));
+    }
+
+    #[test]
+    fn test_check_plan_mode_does_not_allow_write_even_with_allow_rule() {
+        let request = PermissionRequest {
+            tool_name: "FileWrite",
+            command: None,
+            is_read_only: false,
+        };
+
+        let allow_rules = vec![PermissionRule {
+            tool_name: "FileWrite".to_string(),
+            pattern: None,
+            rule_type: RuleType::Allow,
+        }];
+
+        let check = PermissionMode::Plan.check(request, &[], &allow_rules);
+        assert!(matches!(check, PermissionCheck::Denied { .. }));
+    }
+
+    #[test]
+    fn test_check_plan_mode_still_allows_read_only_allow_rule() {
+        let request = PermissionRequest {
+            tool_name: "FileRead",
+            command: None,
+            is_read_only: true,
+        };
+
+        let allow_rules = vec![PermissionRule {
+            tool_name: "FileRead".to_string(),
+            pattern: None,
+            rule_type: RuleType::Allow,
+        }];
+
+        let check = PermissionMode::Plan.check(request, &[], &allow_rules);
+        assert_eq!(check, PermissionCheck::Allowed);
+    }
+
+    #[test]
+    fn test_check_pattern_rule_without_command_falls_back_to_mode() {
+        let request = PermissionRequest {
+            tool_name: "Bash",
+            command: None,
+            is_read_only: false,
+        };
+
+        let allow_rules = vec![PermissionRule {
+            tool_name: "Bash".to_string(),
+            pattern: Some("git *".to_string()),
+            rule_type: RuleType::Allow,
+        }];
+
+        let check = PermissionMode::Default.check(request, &[], &allow_rules);
+        assert!(matches!(check, PermissionCheck::NeedsConfirmation { .. }));
+    }
+
+    #[test]
+    fn test_check_wildcard_pattern_rule_matches_command() {
+        let request = PermissionRequest {
+            tool_name: "Bash",
+            command: Some("git status"),
+            is_read_only: false,
+        };
+
+        let allow_rules = vec![PermissionRule {
+            tool_name: "*".to_string(),
+            pattern: Some("git *".to_string()),
+            rule_type: RuleType::Allow,
+        }];
+
+        let check = PermissionMode::Default.check(request, &[], &allow_rules);
+        assert_eq!(check, PermissionCheck::Allowed);
     }
 
     #[test]

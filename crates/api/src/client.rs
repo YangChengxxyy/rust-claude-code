@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use reqwest::{Client, StatusCode};
+use reqwest::{
+    header::{HeaderMap, HeaderValue, CONTENT_TYPE},
+    Client, Method, RequestBuilder, StatusCode,
+};
 
 use crate::error::ApiError;
 use crate::types::{ApiErrorResponse, CreateMessageRequest, CreateMessageResponse};
@@ -53,17 +56,42 @@ impl AnthropicClient {
         &self,
         request: &CreateMessageRequest,
     ) -> Result<CreateMessageResponse, ApiError> {
-        let response = self
-            .http_client
-            .post(self.messages_endpoint())
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", &self.anthropic_version)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .json(request)
-            .send()
+        self.send_json(Method::POST, self.messages_endpoint(), request)
             .await
-            .map_err(map_reqwest_error)?;
+    }
 
+    fn messages_endpoint(&self) -> String {
+        format!("{}/v1/messages", self.base_url)
+    }
+
+    fn request(&self, method: Method, url: String) -> Result<RequestBuilder, ApiError> {
+        Ok(self
+            .http_client
+            .request(method, url)
+            .headers(self.default_headers()?))
+    }
+
+    fn default_headers(&self) -> Result<HeaderMap, ApiError> {
+        let mut headers = HeaderMap::new();
+        let api_key = HeaderValue::from_str(&self.api_key)
+            .map_err(|error| ApiError::Auth(format!("invalid API key header value: {error}")))?;
+        headers.insert("x-api-key", api_key);
+        headers.insert(
+            "anthropic-version",
+            HeaderValue::from_str(&self.anthropic_version)
+                .map_err(|error| ApiError::Api {
+                    status: 0,
+                    message: format!("invalid anthropic-version header value: {error}"),
+                })?,
+        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        Ok(headers)
+    }
+
+    async fn parse_json_response<T: serde::de::DeserializeOwned>(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<T, ApiError> {
         let status = response.status();
         let body = response.text().await.map_err(map_reqwest_error)?;
 
@@ -74,8 +102,24 @@ impl AnthropicClient {
         Err(map_error_response(status, &body))
     }
 
-    fn messages_endpoint(&self) -> String {
-        format!("{}/v1/messages", self.base_url)
+    async fn send_json<TRequest, TResponse>(
+        &self,
+        method: Method,
+        url: String,
+        request: &TRequest,
+    ) -> Result<TResponse, ApiError>
+    where
+        TRequest: serde::Serialize + ?Sized,
+        TResponse: serde::de::DeserializeOwned,
+    {
+        let response = self
+            .request(method, url)?
+            .json(request)
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+
+        self.parse_json_response(response).await
     }
 }
 
@@ -126,6 +170,58 @@ mod tests {
             .with_base_url("https://example.com/");
 
         assert_eq!(client.messages_endpoint(), "https://example.com/v1/messages");
+    }
+
+    #[test]
+    fn test_default_headers_include_auth_version_and_content_type() {
+        let client = AnthropicClient::new("test-key")
+            .unwrap()
+            .with_version("2024-01-01");
+
+        let headers = client.default_headers().unwrap();
+
+        assert_eq!(headers.get("x-api-key").unwrap(), "test-key");
+        assert_eq!(headers.get("anthropic-version").unwrap(), "2024-01-01");
+        assert_eq!(headers.get(CONTENT_TYPE).unwrap(), "application/json");
+    }
+
+    #[test]
+    fn test_default_headers_reject_invalid_api_key_value() {
+        let client = AnthropicClient::new("test-key")
+            .unwrap()
+            .with_version("2024-01-01");
+        let mut client = client;
+        client.api_key = "bad\nkey".to_string();
+
+        let error = client.default_headers().unwrap_err();
+        assert!(matches!(error, ApiError::Auth(message) if message.contains("invalid API key header value")));
+    }
+
+    #[test]
+    fn test_default_headers_reject_invalid_version_value() {
+        let client = AnthropicClient::new("test-key").unwrap();
+        let mut client = client;
+        client.anthropic_version = "2024-01-01\n".to_string();
+
+        let error = client.default_headers().unwrap_err();
+        assert!(matches!(error, ApiError::Api { status: 0, message } if message.contains("invalid anthropic-version header value")));
+    }
+
+    #[test]
+    fn test_request_uses_messages_endpoint() {
+        let client = AnthropicClient::new("test-key")
+            .unwrap()
+            .with_base_url("https://example.com");
+
+        let request = client
+            .http_client
+            .request(Method::POST, client.messages_endpoint())
+            .headers(client.default_headers().unwrap())
+            .build()
+            .expect("request should build");
+
+        assert_eq!(request.method(), Method::POST);
+        assert_eq!(request.url().as_str(), "https://example.com/v1/messages");
     }
 
     #[test]

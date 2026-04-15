@@ -9,6 +9,8 @@ pub struct CreateMessageRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<SystemPrompt>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<RequestMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
@@ -63,6 +65,12 @@ pub struct ApiTool {
     input_schema: serde_json::Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+}
+
 impl ApiTool {
     pub fn new(
         name: impl Into<String>,
@@ -110,6 +118,7 @@ impl CreateMessageRequest {
             model: model.into(),
             messages,
             system: None,
+            metadata: None,
             max_tokens: None,
             stream: None,
             tools: None,
@@ -125,6 +134,11 @@ impl CreateMessageRequest {
 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    pub fn with_metadata(mut self, metadata: RequestMetadata) -> Self {
+        self.metadata = Some(metadata);
         self
     }
 
@@ -210,9 +224,22 @@ mod tests {
         let req = CreateMessageRequest::new("claude-sonnet-4-20250514", vec![]);
         let json = serde_json::to_string(&req).unwrap();
         assert!(!json.contains("system"));
+        assert!(!json.contains("metadata"));
         assert!(!json.contains("max_tokens"));
         assert!(!json.contains("stream"));
         assert!(!json.contains("tools"));
+    }
+
+    #[test]
+    fn test_create_message_request_with_metadata() {
+        let req = CreateMessageRequest::new("claude-sonnet-4-20250514", vec![]).with_metadata(
+            RequestMetadata {
+                user_id: Some("user-123".to_string()),
+            },
+        );
+
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"metadata\":{\"user_id\":\"user-123\"}"));
     }
 
     #[test]

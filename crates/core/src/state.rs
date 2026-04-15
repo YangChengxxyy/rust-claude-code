@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::message::{Message, Usage};
-use crate::permission::PermissionMode;
+use crate::permission::{PermissionCheck, PermissionMode, PermissionRequest, PermissionRule};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TodoItem {
@@ -27,13 +27,20 @@ pub enum TodoPriority {
     Low,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSettings {
+    pub model: String,
+    pub max_tokens: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub messages: Vec<Message>,
     pub todos: Vec<TodoItem>,
     pub permission_mode: PermissionMode,
-    pub model: String,
-    pub max_tokens: u32,
+    pub always_allow_rules: Vec<PermissionRule>,
+    pub always_deny_rules: Vec<PermissionRule>,
+    pub session: SessionSettings,
     pub cwd: std::path::PathBuf,
     pub total_usage: Usage,
 }
@@ -44,8 +51,12 @@ impl AppState {
             messages: Vec::new(),
             todos: Vec::new(),
             permission_mode: PermissionMode::Default,
-            model: "claude-sonnet-4-20250514".to_string(),
-            max_tokens: 16384,
+            always_allow_rules: Vec::new(),
+            always_deny_rules: Vec::new(),
+            session: SessionSettings {
+                model: "claude-sonnet-4-20250514".to_string(),
+                max_tokens: 16384,
+            },
             cwd,
             total_usage: Usage {
                 input_tokens: 0,
@@ -53,6 +64,19 @@ impl AppState {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
             },
+        }
+    }
+
+    pub fn from_config(cwd: std::path::PathBuf, config: &crate::config::Config) -> Self {
+        AppState {
+            permission_mode: config.permission_mode,
+            always_allow_rules: config.always_allow.clone(),
+            always_deny_rules: config.always_deny.clone(),
+            session: SessionSettings {
+                model: config.model.clone(),
+                max_tokens: config.max_tokens,
+            },
+            ..Self::new(cwd)
         }
     }
 
@@ -80,6 +104,11 @@ impl AppState {
         self.messages.iter().collect()
     }
 
+    pub fn check_permission(&self, request: PermissionRequest<'_>) -> PermissionCheck {
+        self.permission_mode
+            .check(request, &self.always_deny_rules, &self.always_allow_rules)
+    }
+
     pub fn conversation_turns(&self) -> usize {
         self.messages
             .iter()
@@ -98,7 +127,10 @@ mod tests {
         assert!(state.messages.is_empty());
         assert!(state.todos.is_empty());
         assert_eq!(state.permission_mode, PermissionMode::Default);
-        assert_eq!(state.model, "claude-sonnet-4-20250514");
+        assert!(state.always_allow_rules.is_empty());
+        assert!(state.always_deny_rules.is_empty());
+        assert_eq!(state.session.model, "claude-sonnet-4-20250514");
+        assert_eq!(state.session.max_tokens, 16384);
     }
 
     #[test]
@@ -178,5 +210,71 @@ mod tests {
         assert_eq!(parsed.id, "1");
         assert_eq!(parsed.status, TodoStatus::InProgress);
         assert_eq!(parsed.priority, TodoPriority::High);
+    }
+
+    #[test]
+    fn test_check_permission_uses_state_rules() {
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.always_deny_rules = vec![PermissionRule {
+            tool_name: "Bash".to_string(),
+            pattern: Some("git status".to_string()),
+            rule_type: crate::permission::RuleType::Deny,
+        }];
+        state.always_allow_rules = vec![PermissionRule {
+            tool_name: "Bash".to_string(),
+            pattern: Some("git *".to_string()),
+            rule_type: crate::permission::RuleType::Allow,
+        }];
+
+        let check = state.check_permission(PermissionRequest {
+            tool_name: "Bash",
+            command: Some("git status"),
+            is_read_only: false,
+        });
+
+        assert!(matches!(check, PermissionCheck::Denied { .. }));
+    }
+
+    #[test]
+    fn test_from_config_copies_permission_and_model_settings() {
+        let config = crate::config::Config {
+            api_key: "test-key".to_string(),
+            model: "claude-test".to_string(),
+            max_tokens: 2048,
+            permission_mode: PermissionMode::AcceptEdits,
+            always_allow: vec![PermissionRule {
+                tool_name: "FileEdit".to_string(),
+                pattern: None,
+                rule_type: crate::permission::RuleType::Allow,
+            }],
+            always_deny: vec![PermissionRule {
+                tool_name: "Bash".to_string(),
+                pattern: None,
+                rule_type: crate::permission::RuleType::Deny,
+            }],
+            stream: true,
+        };
+
+        let state = AppState::from_config(std::path::PathBuf::from("/tmp"), &config);
+
+        assert_eq!(state.permission_mode, PermissionMode::AcceptEdits);
+        assert_eq!(state.session.model, "claude-test");
+        assert_eq!(state.session.max_tokens, 2048);
+        assert_eq!(state.always_allow_rules, config.always_allow);
+        assert_eq!(state.always_deny_rules, config.always_deny);
+    }
+
+    #[test]
+    fn test_session_settings_serde() {
+        let settings = SessionSettings {
+            model: "claude-test".to_string(),
+            max_tokens: 4096,
+        };
+
+        let json = serde_json::to_string(&settings).unwrap();
+        let parsed: SessionSettings = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.model, "claude-test");
+        assert_eq!(parsed.max_tokens, 4096);
     }
 }

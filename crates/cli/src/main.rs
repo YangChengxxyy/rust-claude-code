@@ -5,6 +5,7 @@ use clap::Parser;
 use rust_claude_api::AnthropicClient;
 use rust_claude_core::{
     config::{Config, ConfigError},
+    permission::PermissionMode,
     state::AppState,
 };
 use rust_claude_tools::{BashTool, ToolRegistry};
@@ -12,9 +13,33 @@ use tokio::sync::Mutex;
 
 use rust_claude_cli::query_loop::QueryLoop;
 
+#[derive(Debug, Clone)]
+struct ModeArg(PermissionMode);
+
+impl std::str::FromStr for ModeArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "default" => Ok(ModeArg(PermissionMode::Default)),
+            "accept-edits" => Ok(ModeArg(PermissionMode::AcceptEdits)),
+            "bypass" => Ok(ModeArg(PermissionMode::BypassPermissions)),
+            "plan" => Ok(ModeArg(PermissionMode::Plan)),
+            "dont-ask" => Ok(ModeArg(PermissionMode::DontAsk)),
+            other => Err(format!(
+                "unknown mode '{other}'; valid modes: default, accept-edits, bypass, plan, dont-ask"
+            )),
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 struct Cli {
     prompt: Vec<String>,
+
+    /// Permission mode: default, accept-edits, bypass, plan, dont-ask
+    #[arg(short = 'm', long = "mode")]
+    mode: Option<ModeArg>,
 }
 
 #[tokio::main]
@@ -35,6 +60,9 @@ async fn main() -> Result<()> {
 
             let mut state = AppState::from_config(cwd.clone(), &config);
             state.session.model = model;
+            if let Some(ModeArg(mode)) = cli.mode {
+                state.permission_mode = mode;
+            }
             println!("Initialized session state from config.");
             println!("cwd: {}", cwd.display());
             println!("model: {}", state.session.model);

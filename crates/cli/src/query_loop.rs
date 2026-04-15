@@ -9,6 +9,7 @@ use rust_claude_api::{
 };
 use rust_claude_core::{
     message::{ContentBlock, Message, StopReason},
+    permission::{PermissionCheck, PermissionRequest},
     state::AppState,
 };
 use rust_claude_tools::{ToolContext, ToolRegistry};
@@ -209,16 +210,71 @@ where
             .with_tools(tools)
     }
 
+    /// Check permission for a tool invocation. Returns `None` if allowed,
+    /// or `Some((content, is_error))` if the tool should not be executed.
+    fn check_tool_permission(
+        app_state_snapshot: &AppState,
+        tool_name: &str,
+        input: &serde_json::Value,
+        is_read_only: bool,
+    ) -> Option<(String, bool)> {
+        let command = if tool_name == "Bash" {
+            input
+                .get("command")
+                .and_then(|v| v.as_str())
+        } else {
+            None
+        };
+
+        let request = PermissionRequest {
+            tool_name,
+            command,
+            is_read_only,
+        };
+
+        match app_state_snapshot.check_permission(request) {
+            PermissionCheck::Allowed => None,
+            PermissionCheck::Denied { reason } => {
+                Some((format!("Permission denied: {reason}"), true))
+            }
+            PermissionCheck::NeedsConfirmation { prompt: _ } => {
+                Some((
+                    "Permission denied: interactive confirmation not yet supported".to_string(),
+                    true,
+                ))
+            }
+        }
+    }
+
     async fn execute_tool_uses(
         &self,
         app_state: &Arc<Mutex<AppState>>,
         assistant_message: &Message,
     ) -> Result<(), QueryLoopError> {
         let tool_uses = assistant_message.tool_uses();
+
+        // Snapshot the app state for permission checks (avoids holding lock during execution).
+        let state_snapshot = app_state.lock().await.clone();
+
         let mut concurrent = Vec::new();
         let mut serial = Vec::new();
+        let mut tool_results: Vec<(usize, String, String, bool)> = Vec::new();
 
         for (index, (tool_use_id, name, input)) in tool_uses.into_iter().enumerate() {
+            let is_read_only = self
+                .tools
+                .get(name)
+                .map(|t| t.is_read_only)
+                .unwrap_or(false);
+
+            // Check permission before scheduling execution.
+            if let Some((denial_msg, is_error)) =
+                Self::check_tool_permission(&state_snapshot, name, input, is_read_only)
+            {
+                tool_results.push((index, tool_use_id.to_string(), denial_msg, is_error));
+                continue;
+            }
+
             let entry = (index, tool_use_id.to_string(), name.to_string(), input.clone());
             if self.tools.is_concurrency_safe(name) {
                 concurrent.push(entry);
@@ -226,8 +282,6 @@ where
                 serial.push(entry);
             }
         }
-
-        let mut tool_results = Vec::new();
 
         let concurrent_results = join_all(concurrent.into_iter().map(|(index, tool_use_id, name, input)| async move {
             let result = self
@@ -422,7 +476,11 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(BashTool::new());
         let loop_runner = QueryLoop::new(client, tools);
-        let app_state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
+
+        // BashTool is not read-only, so bypass permissions to let it execute.
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.permission_mode = rust_claude_core::permission::PermissionMode::BypassPermissions;
+        let app_state = Arc::new(Mutex::new(state));
 
         let final_message = loop_runner.run(app_state.clone(), "say hi").await.unwrap();
 
@@ -555,7 +613,11 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(BashTool::new());
         let loop_runner = QueryLoop::new(client, tools).with_max_rounds(4);
-        let app_state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
+
+        // BashTool is not read-only, so bypass permissions to let it execute.
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.permission_mode = rust_claude_core::permission::PermissionMode::BypassPermissions;
+        let app_state = Arc::new(Mutex::new(state));
 
         let final_message = loop_runner.run(app_state.clone(), "multi").await.unwrap();
 
@@ -706,7 +768,11 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(SlowWriteTool);
         let loop_runner = QueryLoop::new(client, tools);
-        let app_state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
+
+        // SlowWriteTool is not read-only, so we need BypassPermissions to let it execute.
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.permission_mode = rust_claude_core::permission::PermissionMode::BypassPermissions;
+        let app_state = Arc::new(Mutex::new(state));
 
         let started = Instant::now();
         let _ = loop_runner.run(app_state, "serial").await.unwrap();
@@ -736,5 +802,346 @@ mod tests {
 
         let final_message = loop_runner.run(app_state, "hello").await.unwrap();
         assert_eq!(final_message.content, vec![ContentBlock::text("streamed")]);
+    }
+
+    // --- Permission integration tests ---
+
+    #[tokio::test]
+    async fn test_query_loop_denied_tool_returns_error_tool_result() {
+        // Use Plan mode which denies write (non-read-only) tools.
+        // BashTool.is_read_only() == false, so Plan mode should deny it.
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                CreateMessageResponse {
+                    id: "msg_1".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::tool_use(
+                        "tool_1",
+                        "Bash",
+                        serde_json::json!({ "command": "echo hello" }),
+                    )],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_2".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("understood")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+            ])),
+        };
+
+        let mut tools = ToolRegistry::new();
+        tools.register(BashTool::new());
+        let loop_runner = QueryLoop::new(client, tools);
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.permission_mode = rust_claude_core::permission::PermissionMode::Plan;
+        let app_state = Arc::new(Mutex::new(state));
+
+        let final_message = loop_runner.run(app_state.clone(), "run bash").await.unwrap();
+        assert_eq!(final_message.content, vec![ContentBlock::text("understood")]);
+
+        // Verify the tool result message is an error containing the denial reason.
+        let state = app_state.lock().await;
+        // Messages: [user, assistant(tool_use), user(tool_result), assistant(text)]
+        assert_eq!(state.messages.len(), 4);
+        match &state.messages[2].content[0] {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(*is_error);
+                assert!(content.contains("Permission denied"));
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_loop_allowed_tool_executes_normally() {
+        // BypassPermissions mode allows everything.
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                CreateMessageResponse {
+                    id: "msg_1".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::tool_use(
+                        "tool_1",
+                        "Bash",
+                        serde_json::json!({ "command": "printf allowed" }),
+                    )],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_2".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("done")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+            ])),
+        };
+
+        let mut tools = ToolRegistry::new();
+        tools.register(BashTool::new());
+        let loop_runner = QueryLoop::new(client, tools);
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.permission_mode = rust_claude_core::permission::PermissionMode::BypassPermissions;
+        let app_state = Arc::new(Mutex::new(state));
+
+        let final_message = loop_runner.run(app_state.clone(), "test").await.unwrap();
+        assert_eq!(final_message.content, vec![ContentBlock::text("done")]);
+
+        // Verify the tool result was successful (not an error).
+        let state = app_state.lock().await;
+        match &state.messages[2].content[0] {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(!*is_error);
+                assert_eq!(content, "allowed");
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_loop_plan_mode_denies_write_tools() {
+        // SlowWriteTool is not read-only, Plan mode should deny it.
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                CreateMessageResponse {
+                    id: "msg_1".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::tool_use(
+                        "tool_1",
+                        "SlowWrite",
+                        serde_json::json!({}),
+                    )],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_2".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("ok")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+            ])),
+        };
+
+        let mut tools = ToolRegistry::new();
+        tools.register(SlowWriteTool);
+        let loop_runner = QueryLoop::new(client, tools);
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.permission_mode = rust_claude_core::permission::PermissionMode::Plan;
+        let app_state = Arc::new(Mutex::new(state));
+
+        let final_message = loop_runner.run(app_state.clone(), "write").await.unwrap();
+        assert_eq!(final_message.content, vec![ContentBlock::text("ok")]);
+
+        let state = app_state.lock().await;
+        match &state.messages[2].content[0] {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(*is_error);
+                assert!(content.contains("Permission denied"));
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_loop_plan_mode_allows_read_tools() {
+        // SlowReadTool is read-only, Plan mode should allow it.
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                CreateMessageResponse {
+                    id: "msg_1".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::tool_use(
+                        "tool_1",
+                        "SlowRead",
+                        serde_json::json!({}),
+                    )],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_2".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("ok")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+            ])),
+        };
+
+        let mut tools = ToolRegistry::new();
+        tools.register(SlowReadTool);
+        let loop_runner = QueryLoop::new(client, tools);
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.permission_mode = rust_claude_core::permission::PermissionMode::Plan;
+        let app_state = Arc::new(Mutex::new(state));
+
+        let final_message = loop_runner.run(app_state.clone(), "read").await.unwrap();
+        assert_eq!(final_message.content, vec![ContentBlock::text("ok")]);
+
+        let state = app_state.lock().await;
+        match &state.messages[2].content[0] {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(!*is_error);
+                assert_eq!(content, "ok");
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_loop_default_mode_needs_confirmation_auto_denies() {
+        // Default mode for non-read-only tools returns NeedsConfirmation,
+        // which the query loop auto-denies.
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                CreateMessageResponse {
+                    id: "msg_1".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::tool_use(
+                        "tool_1",
+                        "SlowWrite",
+                        serde_json::json!({}),
+                    )],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_2".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("ok")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+            ])),
+        };
+
+        let mut tools = ToolRegistry::new();
+        tools.register(SlowWriteTool);
+        let loop_runner = QueryLoop::new(client, tools);
+
+        // Default mode: non-read-only tools need confirmation
+        let state = AppState::new(std::path::PathBuf::from("/tmp"));
+        let app_state = Arc::new(Mutex::new(state));
+
+        let _ = loop_runner.run(app_state.clone(), "write").await.unwrap();
+
+        let state = app_state.lock().await;
+        match &state.messages[2].content[0] {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(*is_error);
+                assert!(content.contains("interactive confirmation not yet supported"));
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_loop_deny_rule_blocks_specific_bash_command() {
+        // Test that a deny rule on a specific bash command pattern works.
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                CreateMessageResponse {
+                    id: "msg_1".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::tool_use(
+                        "tool_1",
+                        "Bash",
+                        serde_json::json!({ "command": "git push" }),
+                    )],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_2".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("ok")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+            ])),
+        };
+
+        let mut tools = ToolRegistry::new();
+        tools.register(BashTool::new());
+        let loop_runner = QueryLoop::new(client, tools);
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.permission_mode = rust_claude_core::permission::PermissionMode::BypassPermissions;
+        state.always_deny_rules = vec![rust_claude_core::permission::PermissionRule {
+            tool_name: "Bash".to_string(),
+            pattern: Some("git push".to_string()),
+            rule_type: rust_claude_core::permission::RuleType::Deny,
+        }];
+        let app_state = Arc::new(Mutex::new(state));
+
+        let _ = loop_runner.run(app_state.clone(), "push").await.unwrap();
+
+        let state = app_state.lock().await;
+        match &state.messages[2].content[0] {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(*is_error);
+                assert!(content.contains("Permission denied"));
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
     }
 }

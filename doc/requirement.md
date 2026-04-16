@@ -29,7 +29,7 @@
 |--------|------|------|
 | TUI 框架 | ratatui | 成熟的 Rust TUI 库 |
 | LLM API | Anthropic API（直接对接） | 不使用中间层 |
-| 工具范围 | Core 5 | Bash, FileRead, FileEdit, FileWrite, TodoWrite |
+| 工具范围 | Core 7 | Bash, FileRead, FileEdit, FileWrite, TodoWrite, Glob, Grep |
 | 权限系统 | 完整权限模式 | default, acceptEdits, bypassPermissions, plan, dontAsk |
 | 项目结构 | Cargo workspace | 多 crate: core, api, tools, tui, cli |
 
@@ -124,7 +124,11 @@
 - 已实现 `ToolResult`、`ToolResultMetadata`、`ToolInfo`。
 - 已实现 `PermissionMode`、`PermissionRule`、`PermissionCheck`，并收敛了统一权限检查入口与规则优先级边界。
 - 已实现 `AppState`、`SessionSettings`、`TodoItem`、`TodoStatus`、`TodoPriority`。
-- 已实现 `Config`，支持从配置文件或 `ANTHROPIC_API_KEY` 加载 API Key。
+- 已实现 `Config`，支持从配置文件或 `ANTHROPIC_API_KEY` 加载 API Key，支持 `base_url`、`bearer_auth` 与 `ANTHROPIC_AUTH_TOKEN` 自动检测。
+- 已实现 `ClaudeSettings`（`settings.rs`），读取 `~/.claude/settings.json` 的 `env`、`model`、`apiKeyHelper` 字段。
+- 已实现 `Model`（`model.rs`），支持模型名称标准化与用量阈值检查。
+- 已实现 `claude_md` 模块（`claude_md.rs`），支持 CLAUDE.md 发现（全局 + 项目级）、git root 检测、内容截断。
+- 已实现 `compaction` 模块（`compaction.rs`），支持 token 估算、消息分区、`needs_compaction` 检查。
 
 ### 4.2 api crate
 
@@ -140,9 +144,11 @@
 
 ### 4.3 tools crate
 
-- 已实现 `Tool` trait、可执行的 `ToolRegistry` 与首批 5 个核心工具。
+- 已实现 `Tool` trait、可执行的 `ToolRegistry` 与 7 个工具。
 - `BashTool` 已支持 shell 执行、timeout、workdir、危险命令检测与输出截断。
 - 已实现 `FileReadTool`、`FileEditTool`、`FileWriteTool`、`TodoWriteTool`，并完成工具注册与基础测试覆盖。
+- 已实现 `GlobTool`（`glob.rs`），支持 glob pattern 文件搜索，按修改时间排序，标记为只读且并发安全。
+- 已实现 `GrepTool`（`grep.rs`），支持 regex 内容搜索、`-A`/`-B`/`-C` 上下文行、glob/type 过滤、大小写不敏感、`head_limit`，标记为只读且并发安全。
 
 ### 4.4 cli crate
 
@@ -155,15 +161,20 @@
 - 已支持通过 `--settings` 指定自定义 settings.json 路径，默认读取 `~/.claude/settings.json` 的 `env` 字段注入进程环境变量（不覆盖已有值）。
 - 已支持工具白名单/黑名单过滤（`--allowed-tools`、`--disallowed-tools`）。
 - 已支持 `--output-format json` 以 JSON 格式输出最终消息。
+- 已实现 System Prompt 组合模块（`system_prompt.rs`）：核心行为指导、动态工具描述注入、环境上下文、CLAUDE.md 内容注入、自定义追加。
+- 已实现会话持久化（`session.rs`）：JSON 格式保存/加载，支持 `--continue` / `-c` 恢复最近会话。
+- 已实现 Compaction 服务（`compaction.rs`）：LLM 摘要压缩、可配置阈值、手动 `/compact` 与 QueryLoop 自动压缩集成。
 
 ### 4.5 tui crate
 
-- 已实现基础 TUI 框架：`App` 状态对象、`ChatMessage` / `AppEvent` 事件模型、渲染层与终端守卫。
-- 已实现顶部状态栏、中间聊天区域、底部输入框的基础布局。
-- 已实现基础键盘交互：Enter 发送、Ctrl+C 退出、Esc 清空/取消、左右移动光标、上下滚动。
-- 已实现 TUI 事件桥接 `TuiBridge`，支持流式文本、工具调用、工具结果、usage 更新事件。
-- 已接入 CLI 主入口的最小交互路径；当前通过后台任务复用既有 `QueryLoop` 执行 prompt，并将最终文本结果回填到 TUI。
-- 真实流式 token 级展示、权限对话框与 Todo 面板留待后续迭代。
+- 已实现基础 TUI 框架：`App` 状态对象、`ChatMessage` / `AppEvent` 事件模型（35+ 事件变体）、渲染层与终端守卫。
+- 已实现顶部状态栏、中间聊天区域、底部输入框的基础布局与样式（`theme.rs`）。
+- 已实现基础键盘交互：Enter 发送、Ctrl+C 退出、Esc 清空/取消、左右移动光标、上下滚动、Home/End、Backspace/Delete。
+- 已实现 TUI 事件桥接 `TuiBridge`，支持流式文本（token 级）、工具调用、工具结果、usage 更新、thinking 阶段、压缩事件等。
+- 已实现权限确认对话框（模态弹窗）：居中弹窗显示工具名与参数摘要，支持 Allow(y)/AlwaysAllow(a)/Deny(n)/AlwaysDeny(d) 四选项，方向键导航 + Enter 确认。
+- 已实现 Todo 侧面板（Tab 键切换）：右侧 30 列面板，状态图标（○/◐/●），实时刷新。
+- 已实现斜杠命令：`/clear`、`/compact`、`/mode`、`/model`、`/todo`、`/help`、`/exit`。
+- QueryLoop 中 `NeedsConfirmation` 已通过 TuiBridge oneshot channel 接入交互式权限对话框。
 
 ---
 
@@ -182,20 +193,19 @@
 
 ### 5.2 Tool 接口
 
-参考设计中的 Tool 接口已经明确，但 Rust 版本目前尚未在 `tools` crate 中正式落地。后续实现应至少覆盖以下能力：
+参考设计中的 Tool 接口已在 `tools` crate 中正式落地（`tool.rs`），通过 `Tool` trait 统一了 7 个工具的接口：
 
 ```rust
 #[async_trait]
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &str;
-    fn description(&self) -> &str;
-    fn input_schema(&self) -> serde_json::Value;
+    fn info(&self) -> ToolInfo;         // 名称、描述、input_schema
     fn is_read_only(&self) -> bool;
     fn is_concurrency_safe(&self) -> bool;
-    async fn call(&self, input: serde_json::Value, state: &mut AppState) -> ToolResult;
-    fn check_permissions(&self, input: &serde_json::Value, state: &AppState) -> PermissionCheck;
+    async fn execute(&self, input: serde_json::Value, context: ToolContext) -> Result<ToolResult, ToolError>;
 }
 ```
+
+权限检查已收敛到 `PermissionManager` 统一处理，不在 Tool trait 内。
 
 ### 5.3 Permission 系统
 
@@ -205,8 +215,8 @@ pub trait Tool: Send + Sync {
 - always_allow / always_deny 规则管理与 JSON 持久化
 - Query Loop 集成权限检查
 - CLI `--mode` 参数切换权限模式
-
-当前仍未实现交互式权限确认 UI；对 `NeedsConfirmation` 的场景会在 CLI 查询循环中暂时按拒绝处理，等待后续 TUI 权限对话框接入。
+- TUI 交互式权限确认对话框（模态弹窗，支持 Allow/AlwaysAllow/Deny/AlwaysDeny）
+- 通过 `TuiBridge` oneshot channel 实现 QueryLoop 与 TUI 权限对话框的双向通信
 
 ### 5.4 AppState
 
@@ -220,7 +230,7 @@ pub trait Tool: Send + Sync {
 - `cwd`
 - `total_usage`
 
-后续是否需要引入更明确的会话配置对象或权限上下文，将在迭代 3 的对齐文档中统一说明。
+已在 `SessionSettings` 中扩展会话配置。权限上下文已通过 `PermissionManager` 统一收敛。
 
 ---
 
@@ -229,6 +239,7 @@ pub trait Tool: Send + Sync {
 ```text
 rust-claude-code/
 ├── Cargo.toml              # workspace 根配置
+├── CLAUDE.md               # 项目指令文件
 ├── doc/
 │   ├── requirement.md      # 总需求与迭代计划
 │   └── iteration-3-alignment.md
@@ -241,38 +252,50 @@ rust-claude-code/
 │   │       ├── tool_types.rs
 │   │       ├── permission.rs
 │   │       ├── state.rs
-│   │       └── config.rs
+│   │       ├── config.rs
+│   │       ├── settings.rs      # ClaudeSettings（~/.claude/settings.json）
+│   │       ├── model.rs         # 模型名称标准化与用量阈值
+│   │       ├── claude_md.rs     # CLAUDE.md 发现与加载
+│   │       └── compaction.rs    # token 估算与消息分区
 │   ├── api/                # Anthropic API 客户端
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── client.rs
 │   │       ├── types.rs
-│   │       ├── stream.rs
+│   │       ├── streaming.rs     # SSE 解析与 delta 累积器
 │   │       └── error.rs
-│   ├── tools/              # 工具实现
+│   ├── tools/              # 工具实现（7 个工具）
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
+│   │       ├── tool.rs          # Tool trait 与 ToolContext
 │   │       ├── registry.rs
 │   │       ├── bash.rs
 │   │       ├── file_read.rs
 │   │       ├── file_edit.rs
 │   │       ├── file_write.rs
-│   │       └── todo_write.rs
+│   │       ├── todo_write.rs
+│   │       ├── glob.rs          # GlobTool（文件搜索）
+│   │       └── grep.rs          # GrepTool（内容搜索）
 │   ├── tui/                # TUI 界面
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   │       ├── lib.rs
-│   │       ├── app.rs
-│   │       ├── chat_view.rs
-│   │       ├── input.rs
-│   │       ├── permission_dialog.rs
-│   │       └── todo_panel.rs
+│   │       ├── lib.rs           # TerminalGuard
+│   │       ├── app.rs           # App 状态、事件循环、权限对话框、斜杠命令
+│   │       ├── ui.rs            # 渲染层（聊天区、状态栏、输入框、Todo 面板）
+│   │       ├── events.rs        # AppEvent、ChatMessage、PermissionResponse
+│   │       ├── bridge.rs        # TuiBridge（QueryLoop → TUI 桥接）
+│   │       └── theme.rs         # 主题常量与样式
 │   └── cli/                # CLI 入口
 │       ├── Cargo.toml
 │       └── src/
-│           └── main.rs
+│           ├── main.rs
+│           ├── query_loop.rs    # ModelClient trait、QueryLoop 代理循环
+│           ├── system_prompt.rs # System prompt 组合
+│           ├── session.rs       # 会话持久化
+│           ├── compaction.rs    # CompactionService（LLM 摘要压缩）
+│           └── lib.rs
 ```
 
 ---
@@ -355,7 +378,7 @@ rust-claude-code/
 
 ### 迭代 3：官方设计对齐（迭代 1 + 2）
 
-**状态**: 进行中
+**状态**: 已完成
 
 **定位**:
 
@@ -808,13 +831,13 @@ rust-claude-code/
 
 #### P0：优先落地（高频、刚需、收益最大）
 
-- `GlobTool`
-- `GrepTool`
-- `CLAUDE.md` 加载与 system prompt 注入
-- 上下文压缩（至少先实现基础 compact）
+- ~~`GlobTool`~~ ✅ 已完成（迭代 12）
+- ~~`GrepTool`~~ ✅ 已完成（迭代 12）
+- ~~`CLAUDE.md` 加载与 system prompt 注入~~ ✅ 已完成（迭代 13）
+- ~~上下文压缩（至少先实现基础 compact）~~ ✅ 已完成（迭代 14）
 - Git 基础集成（git root、branch、worktree 感知）
 - TUI Markdown 基础渲染与交互增强
-- 新增高频 slash commands：`/compact`、`/cost`、`/usage`、`/model`、`/diff`、`/config`
+- 新增高频 slash commands：~~`/compact`~~ ✅、~~`/model`~~ ✅、`/cost`、`/usage`、`/diff`、`/config`
 
 #### P1：第二批落地（显著增强工程能力）
 
@@ -903,7 +926,21 @@ rust-claude-code/
 
 ### 迭代 13：项目指令系统（CLAUDE.md）
 
-**状态**: 规划中
+**状态**: 已完成
+
+**完成记录**:
+
+- 已实现 `core` crate 的 `claude_md` 模块（`claude_md.rs`）：
+  - 支持发现全局（`~/.claude/CLAUDE.md`）与项目级 `CLAUDE.md`
+  - 通过 git root 检测确定项目根目录
+  - 支持从 CWD 向上遍历目录查找 `CLAUDE.md`
+  - 叶目录优先（leaf-most priority）的合并策略
+  - 内容截断（默认 30K 字符），防止 system prompt 过大
+- 已在 `cli/src/system_prompt.rs` 中集成 CLAUDE.md 注入：
+  - 组合顺序：核心行为 < 工具描述 < 环境上下文 < CLAUDE.md < 自定义追加
+  - 当无显式 `--system-prompt` 时自动发现并注入
+- 已在 `cli/src/main.rs` 中接入发现流程
+- 验证结果：`cargo test --workspace` 通过
 
 **目标**: 让 Rust 版本支持项目级协作指令，与原版 Claude Code 的项目上下文机制对齐。
 
@@ -927,13 +964,29 @@ rust-claude-code/
 
 ### 迭代 14：长会话能力（基础 Compaction）
 
-**状态**: 规划中
+**状态**: 已完成
+
+**完成记录**:
+
+- 已实现 `core` crate 的 `compaction` 模块（`compaction.rs`）：
+  - token 估算（char_count / 4 启发式）
+  - 消息分区（保留最近上下文 + 提取待压缩历史）
+  - `needs_compaction` 阈值检查
+  - 可配置的 `CompactionConfig`（context window、threshold ratio、preserve ratio、summary max tokens）
+- 已实现 `cli` crate 的 `CompactionService`（`compaction.rs`）：
+  - 基于 LLM 的摘要生成（通过 `ModelClient` 调用 API）
+  - 支持手动 `/compact` 斜杠命令
+  - 支持 QueryLoop 每轮自动压缩（`auto_compact_if_needed`）
+  - 压缩后保留必要对话语义与最近上下文
+- 已在 TUI 中集成 `CompactionStart` / `CompactionComplete` 事件
+- 已补充 compaction 单元测试（threshold 判定、成功压缩、API 失败、消息不足等场景）
+- 验证结果：`cargo test --workspace` 通过
 
 **目标**: 解决长对话上下文不断膨胀的问题，为日常重度使用提供基础保障。
 
 **产出**:
 
-- `services` 或 `cli` 内新增 compact 模块
+- `cli` 内新增 compact 模块，`core` 内新增 compaction 基础设施
 - 支持手动 `/compact` 命令
 - 支持在达到 token 阈值时触发基础压缩
 - 压缩后保留必要对话语义、最近上下文和工具结果摘要

@@ -4,6 +4,7 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use rust_claude_api::AnthropicClient;
 use rust_claude_core::{
+    claude_md,
     config::{Config, ConfigError},
     message::ContentBlock,
     permission::PermissionMode,
@@ -11,7 +12,8 @@ use rust_claude_core::{
     state::AppState,
 };
 use rust_claude_tools::{
-    BashTool, FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool, ToolRegistry,
+    BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, TodoWriteTool,
+    ToolRegistry,
 };
 use rust_claude_tui::{App, TerminalGuard, TuiBridge};
 use tokio::sync::{mpsc, Mutex};
@@ -341,15 +343,24 @@ async fn main() -> Result<()> {
 
     let app_state = Arc::new(Mutex::new(state));
 
-    // 5. Compose system prompt if none explicitly provided
+    // 5. Discover CLAUDE.md files
+    let claude_md_files = claude_md::discover_claude_md(&cwd);
+    if resolved.verbose && !claude_md_files.is_empty() {
+        println!("Discovered {} CLAUDE.md file(s):", claude_md_files.len());
+        for f in &claude_md_files {
+            println!("  - {} ({} chars)", f.path.display(), f.content.len());
+        }
+    }
+
+    // 6. Compose system prompt if none explicitly provided
     if resolved.system_prompt.is_none() {
         let tools_for_prompt = build_filtered_tools(&resolved.allowed_tools, &resolved.disallowed_tools);
-        let composed = system_prompt::build_system_prompt(&cwd, &tools_for_prompt, None);
+        let composed = system_prompt::build_system_prompt(&cwd, &tools_for_prompt, &claude_md_files, None);
         let mut state = app_state.lock().await;
         state.session.system_prompt = Some(composed);
     }
 
-    // 6. Run
+    // 7. Run
     if resolved.print_mode {
         let prompt = cli.prompt.join(" ");
         let client =
@@ -430,6 +441,8 @@ fn build_tools() -> ToolRegistry {
     tools.register(FileReadTool::new());
     tools.register(FileEditTool::new());
     tools.register(FileWriteTool::new());
+    tools.register(GlobTool::new());
+    tools.register(GrepTool::new());
     tools.register(TodoWriteTool::new());
     tools
 }

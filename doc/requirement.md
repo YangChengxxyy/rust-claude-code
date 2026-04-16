@@ -764,3 +764,336 @@ rust-claude-code/
 | `permissions.ts` | 权限类型 | 441 |
 
 所有参考源码位于：`/Users/yangchengxxyy/projects/claude-code-sourcemap/restored-src/src/`
+
+---
+
+## 10. 第二期项目规划（与原版 Claude Code 的功能对齐）
+
+### 10.1 背景
+
+当前 Rust 版本已经完成第一期目标，具备基础可用的对话、工具调用、权限管理、TUI 交互、system prompt、会话持久化与 slash command 能力。
+
+对照原版 Claude Code TypeScript 实现后，当前差距已经不再集中在“能否运行”，而是集中在“是否具备完整工程化能力与生态能力”。因此，第二期项目的目标不再是补齐基础骨架，而是围绕高频实用能力、长会话能力、扩展能力和工程协作能力，逐步把 Rust 版本推进到更接近原版 Claude Code 的可日常重度使用状态。
+
+第二期的规划依据：
+
+- 原版参考源码：`/Users/yangchengxxyy/projects/claude-code-sourcemap/restored-src/src/`
+- 当前 Rust 实现：本仓库 `crates/core`、`crates/api`、`crates/tools`、`crates/cli`、`crates/tui`
+- 差距分析结论：优先补齐高频工具、项目指令系统、上下文压缩、Git 集成、TUI 增强，再逐步推进 hooks、MCP、memory、agent/task/team 等高级能力
+
+### 10.2 第二期总体目标
+
+第二期聚焦以下四类能力：
+
+1. **高频基础能力补齐**
+   - 增加文件搜索、内容搜索、代码导航等高频工具
+   - 增强 slash command、配置系统与 Git 集成
+   - 提升 TUI 的可读性和交互效率
+
+2. **长会话与项目上下文能力**
+   - 支持 `CLAUDE.md` 项目指令加载
+   - 引入上下文压缩（compaction）能力
+   - 为后续 memory / team memory 预留边界
+
+3. **扩展与自动化能力**
+   - 引入 hooks 系统
+   - 支持 MCP 客户端与工具桥接
+   - 为 skills / plugin / remote bridge 预留接口
+
+4. **多代理与任务编排能力**
+   - 引入 task / agent / team 基础抽象
+   - 支持更复杂的 agentic workflow
+
+### 10.3 第二期范围分层
+
+#### P0：优先落地（高频、刚需、收益最大）
+
+- `GlobTool`
+- `GrepTool`
+- `CLAUDE.md` 加载与 system prompt 注入
+- 上下文压缩（至少先实现基础 compact）
+- Git 基础集成（git root、branch、worktree 感知）
+- TUI Markdown 基础渲染与交互增强
+- 新增高频 slash commands：`/compact`、`/cost`、`/usage`、`/model`、`/diff`、`/config`
+
+#### P1：第二批落地（显著增强工程能力）
+
+- `LSPTool`
+- hooks 系统
+- 项目级 `.claude/settings.json`
+- 配置来源合并与验证增强
+- 工具大输出落盘 / 缓存策略
+- 文件状态缓存
+- 更多 slash commands：`/memory`、`/permissions`、`/hooks`、`/session`、`/init`
+
+#### P2：高级能力（接近原版完整生态）
+
+- MCP 客户端与 MCP 工具桥接
+- memory directory 系统（`MEMORY.md`、typed memories）
+- `AgentTool` 与基础 task 系统
+- team / send-message / task orchestration
+- skills / plugin 机制
+- 远程桥接、coordinator、assistant mode 等高级能力
+
+### 10.4 第二期不在首批范围内的内容
+
+以下内容记录为长期方向，但不作为第二期前半段的强制交付项：
+
+- 完整插件市场与插件安装生态
+- mobile / desktop / remote bridge 全量体验
+- auto dream、advisor、assistant perpetual mode
+- 企业级策略配置（managed settings / MDM / policy settings）
+- 原版中大量内部命令与实验性命令的 1:1 复刻
+
+原则上，第二期优先追求“高频可用 + 架构可扩展”，不追求一次性完整复制原版所有边缘能力。
+
+### 10.5 第二期迭代计划
+
+### 迭代 12：搜索工具补齐（Glob + Grep）
+
+**状态**: 已完成
+
+**完成记录**:
+
+- 已实现 `tools` crate 的 `GlobTool`（`glob.rs`）：
+  - 支持 glob pattern 文件搜索（`**/*.rs`、`*.toml` 等）
+  - 支持 `path` 参数指定搜索根目录，默认使用 CWD
+  - 返回按修改时间排序（最近优先）的匹配结果
+  - 标记为 `is_read_only = true`、`is_concurrency_safe = true`
+- 已实现 `tools` crate 的 `GrepTool`（`grep.rs`）：
+  - 支持 regex 内容搜索（使用 `regex` crate）
+  - 支持 `files_with_matches`（默认）和 `content` 两种输出模式
+  - 支持 `-A`/`-B`/`-C` 上下文行参数
+  - 支持 `glob` 文件名过滤和 `type` 文件类型过滤（覆盖 30+ 种常见语言）
+  - 支持 `-i` 大小写不敏感搜索
+  - 支持 `head_limit` 结果限制（默认 250）
+  - 使用 `walkdir` 遍历目录，自动跳过隐藏目录和二进制文件
+  - 标记为 `is_read_only = true`、`is_concurrency_safe = true`
+- 已在 `cli/src/main.rs` 注册两个工具到 `ToolRegistry`
+- 已更新 `cli/src/system_prompt.rs` 的核心 prompt 增加搜索工具使用指引
+- 新增依赖：`glob 0.3`、`walkdir 2`、`regex 1`
+- 已补充完整的单元测试覆盖（GlobTool 5 个 + GrepTool 11 个 + 辅助函数 3 个）
+- 验证结果：`cargo test --workspace` 通过，233 个测试全部通过
+
+**目标**: 补齐最常用的文件搜索与内容搜索工具，显著提升代码库探索效率。
+
+**产出**:
+
+- `tools` crate: `GlobTool`
+  - 支持 glob pattern 文件搜索
+  - 支持相对 / 绝对路径起点
+  - 返回排序后的匹配结果
+- `tools` crate: `GrepTool`
+  - 支持基于 regex 的内容搜索
+  - 支持 path、glob、type、context、head_limit 等常用参数
+  - 支持仅返回文件名 / 返回匹配内容两种模式
+- 工具注册与 QueryLoop 集成
+- system prompt 中增加工具说明
+
+**验收标准**:
+
+- `GlobTool` 能在中大型代码库中正确返回匹配文件
+- `GrepTool` 能正确搜索内容并支持上下文输出
+- 与现有权限系统、工具注册表、QueryLoop 正常协作
+- `cargo test --workspace` 通过
+
+**依赖**: 迭代 11
+
+---
+
+### 迭代 13：项目指令系统（CLAUDE.md）
+
+**状态**: 规划中
+
+**目标**: 让 Rust 版本支持项目级协作指令，与原版 Claude Code 的项目上下文机制对齐。
+
+**产出**:
+
+- `cli` / `core`：支持发现并读取当前目录及父目录中的 `CLAUDE.md`
+- 支持用户级全局指令文件（路径后续按实现方案确定）
+- 将项目指令注入 system prompt 构建流程
+- 明确多份指令文件的合并顺序、截断规则与去重边界
+
+**验收标准**:
+
+- 在有 `CLAUDE.md` 的项目中，system prompt 能稳定包含项目指令
+- 父目录查找逻辑正确，避免重复加载
+- 指令内容不会破坏现有 system prompt 结构
+- 相关单元测试和集成测试通过
+
+**依赖**: 迭代 11
+
+---
+
+### 迭代 14：长会话能力（基础 Compaction）
+
+**状态**: 规划中
+
+**目标**: 解决长对话上下文不断膨胀的问题，为日常重度使用提供基础保障。
+
+**产出**:
+
+- `services` 或 `cli` 内新增 compact 模块
+- 支持手动 `/compact` 命令
+- 支持在达到 token 阈值时触发基础压缩
+- 压缩后保留必要对话语义、最近上下文和工具结果摘要
+- 为后续 micro-compact / session memory compact 预留边界
+
+**验收标准**:
+
+- 长对话场景下可手动触发 compact 并继续正常对话
+- 压缩后消息历史结构仍可被 QueryLoop 正常消费
+- 不破坏现有会话持久化与 TUI 展示逻辑
+- `cargo test --workspace` 通过
+
+**依赖**: 迭代 13
+
+---
+
+### 迭代 15：Git 集成与高频命令增强
+
+**状态**: 规划中
+
+**目标**: 补齐日常工程协作所需的 Git 感知与常用命令入口。
+
+**产出**:
+
+- Git root / canonical root 检测
+- branch 信息读取与状态栏展示
+- worktree 基础识别
+- 新增 slash commands：
+  - `/diff`
+  - `/model`
+  - `/cost`
+  - `/usage`
+  - `/config`
+- 为后续 `/commit`、`/review`、`/worktree` 等命令预留结构
+
+**验收标准**:
+
+- 在 git 仓库内能正确识别仓库根目录与当前分支
+- 高峰命令行为清晰、输出稳定
+- CLI 与 TUI 模式下都可使用这些命令
+- 相关测试通过
+
+**依赖**: 迭代 12
+
+---
+
+### 迭代 16：TUI 可读性与交互增强
+
+**状态**: 规划中
+
+**目标**: 提升终端交互体验，使 Rust 版本更接近原版 Claude Code 的日常使用手感。
+
+**产出**:
+
+- Markdown 基础渲染增强
+  - 标题、列表、代码块、行内代码
+  - 代码块高亮可先做基础版
+- 输入交互增强
+  - 多行输入
+  - 输入历史浏览
+  - 更好的 spinner / 工具状态反馈
+- 工具调用结果展示增强
+  - 折叠 / 展开结构预留
+  - 错误态样式增强
+
+**验收标准**:
+
+- assistant 文本可按基础 Markdown 正常渲染
+- 多行输入与消息浏览体验明显改善
+- 工具调用与流式输出状态清晰
+- 不引入终端恢复问题或明显性能回退
+
+**依赖**: 迭代 10
+
+---
+
+### 迭代 17：工程能力增强（LSP + Hooks + 配置收敛）
+
+**状态**: 规划中
+
+**目标**: 补齐代码导航、自动化扩展点与项目级配置能力。
+
+**产出**:
+
+- `LSPTool`
+  - `goToDefinition`
+  - `findReferences`
+  - `hover`
+  - `documentSymbol`
+- hooks 系统第一版
+  - 先支持 `PreToolUse`、`PostToolUse`、`UserPromptSubmit`
+- 项目级 `.claude/settings.json`
+- settings 合并优先级与校验增强
+- 大输出持久化 / 文件状态缓存的基础版本
+
+**验收标准**:
+
+- 常见语言项目中 LSP 查询可用
+- hook 能在关键节点稳定触发
+- 项目级 settings 与用户级 settings 合并规则清晰
+- 大输出与缓存能力不破坏现有工具行为
+
+**依赖**: 迭代 12, 迭代 13
+
+---
+
+### 迭代 18：高级生态能力基础版（MCP + Memory + Agent/Task）
+
+**状态**: 规划中
+
+**目标**: 为 Rust 版本建立接近原版 Claude Code 生态能力的基础骨架。
+
+**产出**:
+
+- MCP 客户端第一版
+  - 先支持 stdio 传输
+  - 支持 MCP tool 列出与调用
+- memory directory 第一版
+  - `MEMORY.md` 索引
+  - 基础 typed memory 文件结构
+- `AgentTool` / task 基础抽象
+  - 最小可用的 task create/list/update
+  - 为后续 team orchestration 预留协议
+
+**验收标准**:
+
+- 可接入至少一个简单 MCP server 并完成工具调用
+- memory 系统可保存和读取基础记忆项
+- task / agent 基础能力在本地可运行
+- 架构边界清晰，不与现有 QueryLoop/ToolRegistry 强耦合
+
+**依赖**: 迭代 17
+
+### 10.6 第二期依赖关系
+
+```text
+迭代 12 (Glob + Grep) ───────────────┐
+                                    ├── 迭代 15 (Git + 高频命令)
+                                    └── 迭代 17 (LSP + Hooks + 配置收敛) ──┐
+迭代 13 (CLAUDE.md) ──┐                                             │
+                      ├── 迭代 14 (基础 Compaction) ────────────────┤
+                      └── 迭代 17 (LSP + Hooks + 配置收敛) ─────────┤
+迭代 10 (TUI 权限 + Todo) ──────────────────────────────────────────┤
+                                                                    └── 迭代 18 (MCP + Memory + Agent/Task)
+```
+
+可并行推进的组合：
+
+- 迭代 12 + 迭代 13（工具补齐与项目指令互不阻塞）
+- 迭代 15 + 迭代 16（Git/命令增强与 TUI 增强可并行）
+- 迭代 17 的不同子项可在统一设计边界下分阶段推进
+
+### 10.7 第二期完成判定
+
+当满足以下条件时，可认为第二期达到阶段性目标：
+
+- 日常代码库探索不再依赖 Bash 兜底，具备 `Glob` / `Grep` / 基础 `LSP` 能力
+- 项目级 `CLAUDE.md` 能稳定参与 system prompt 构建
+- 长对话具备基础 compact 能力，可持续使用
+- Git 仓库感知与高频 slash commands 足够支撑日常开发流程
+- TUI 在 Markdown 阅读、输入体验、状态反馈上达到可日常使用水平
+- Rust 版本已经具备接入 hooks、MCP、memory、agent/task 的可扩展架构边界
+

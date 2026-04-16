@@ -97,7 +97,7 @@ impl Default for ToolRegistry {
 mod tests {
     use super::*;
     use crate::bash::BashTool;
-    use crate::{FileEditTool, FileReadTool, FileWriteTool, TodoWriteTool};
+    use crate::{FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, TodoWriteTool};
 
     #[test]
     fn test_register_and_get() {
@@ -159,12 +159,14 @@ mod tests {
         registry.register(FileReadTool::new());
         registry.register(FileEditTool::new());
         registry.register(FileWriteTool::new());
+        registry.register(GlobTool::new());
+        registry.register(GrepTool::new());
         registry.register(TodoWriteTool::new());
 
         let names = registry.names();
         assert_eq!(
             names,
-            vec!["Bash", "FileEdit", "FileRead", "FileWrite", "TodoWrite"]
+            vec!["Bash", "FileEdit", "FileRead", "FileWrite", "Glob", "Grep", "TodoWrite"]
         );
     }
 }

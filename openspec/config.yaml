@@ -1,0 +1,19 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Rust, Cargo workspace, async (tokio), ratatui TUI
+  Project: Rust reimplementation of Claude Code CLI
+  Architecture: 5 crates - core (types), api (Anthropic HTTP client), tools (tool implementations), cli (binary + QueryLoop), tui (terminal UI)
+  Conventions: English code/comments, Chinese docs, async-first patterns
+  Testing: cargo test --workspace, integration tests require API key
+  Current state: Iterations 1-11 complete (basic types, API, tools, query loop, permissions, TUI, system prompt, session, slash commands)
+  Next: Iteration 12+ (second phase - search tools, CLAUDE.md, compaction, git integration, TUI enhancement, LSP, hooks, MCP)
+
+rules:
+  proposal:
+    - Keep proposals concise and focused on the iteration goals
+    - Reference the requirement.md iteration plan when applicable
+  tasks:
+    - Each task should be independently testable
+    - Include cargo test verification as part of task completion
+    - Tasks should follow the existing crate architecture

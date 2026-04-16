@@ -2,6 +2,44 @@ use serde::{Deserialize, Serialize};
 
 use rust_claude_core::message::{ContentBlock, Role, StopReason, Usage};
 
+/// Anthropic prompt caching control marker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheControl {
+    pub r#type: String,
+}
+
+impl CacheControl {
+    pub fn ephemeral() -> Self {
+        Self {
+            r#type: "ephemeral".to_string(),
+        }
+    }
+}
+
+/// A structured system prompt block with optional cache control.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemBlock {
+    pub r#type: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+impl SystemBlock {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            r#type: "text".to_string(),
+            text: text.into(),
+            cache_control: None,
+        }
+    }
+
+    pub fn with_cache_control(mut self) -> Self {
+        self.cache_control = Some(CacheControl::ephemeral());
+        self
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateMessageRequest {
     pub model: String,
@@ -20,6 +58,8 @@ pub struct CreateMessageRequest {
     pub stop_sequences: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +96,7 @@ pub enum ApiContent {
 pub enum SystemPrompt {
     Text(String),
     Blocks(Vec<ContentBlock>),
+    StructuredBlocks(Vec<SystemBlock>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +165,7 @@ impl CreateMessageRequest {
             tools: None,
             stop_sequences: None,
             temperature: None,
+            thinking: None,
         }
     }
 
@@ -161,6 +203,11 @@ impl CreateMessageRequest {
         self.stop_sequences = Some(sequences);
         self
     }
+
+    pub fn with_thinking(mut self, thinking: serde_json::Value) -> Self {
+        self.thinking = Some(thinking);
+        self
+    }
 }
 
 impl From<&rust_claude_core::message::Message> for ApiMessage {
@@ -187,6 +234,40 @@ impl From<&str> for SystemPrompt {
 impl From<Vec<ContentBlock>> for SystemPrompt {
     fn from(value: Vec<ContentBlock>) -> Self {
         SystemPrompt::Blocks(value)
+    }
+}
+
+impl From<Vec<SystemBlock>> for SystemPrompt {
+    fn from(value: Vec<SystemBlock>) -> Self {
+        SystemPrompt::StructuredBlocks(value)
+    }
+}
+
+/// Inject `cache_control: { type: "ephemeral" }` on the last content block
+/// of the last message in a serialized messages array.
+///
+/// This modifies the JSON value in-place without changing the core types.
+pub fn inject_cache_control_on_messages(messages: &mut Vec<serde_json::Value>) {
+    if let Some(last_msg) = messages.last_mut() {
+        if let Some(content) = last_msg.get_mut("content") {
+            match content {
+                serde_json::Value::Array(blocks) => {
+                    if let Some(last_block) = blocks.last_mut() {
+                        if let serde_json::Value::Object(map) = last_block {
+                            map.insert(
+                                "cache_control".to_string(),
+                                serde_json::json!({"type": "ephemeral"}),
+                            );
+                        }
+                    }
+                }
+                serde_json::Value::String(_) => {
+                    // Single string content — wrap into block form to add cache_control
+                    // This shouldn't happen in practice as we always use blocks, but handle gracefully
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -426,5 +507,128 @@ mod tests {
         assert!(json.contains("\"system\":[{"));
         assert!(json.contains("\"type\":\"text\""));
         assert!(json.contains("\"type\":\"thinking\""));
+    }
+
+    // -- CacheControl & SystemBlock tests --
+
+    #[test]
+    fn test_cache_control_serialization() {
+        let cc = CacheControl::ephemeral();
+        let json = serde_json::to_string(&cc).unwrap();
+        assert_eq!(json, r#"{"type":"ephemeral"}"#);
+    }
+
+    #[test]
+    fn test_system_block_without_cache_control() {
+        let block = SystemBlock::text("You are helpful");
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"text\":\"You are helpful\""));
+        assert!(!json.contains("cache_control"));
+    }
+
+    #[test]
+    fn test_system_block_with_cache_control() {
+        let block = SystemBlock::text("You are helpful").with_cache_control();
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"cache_control\":{\"type\":\"ephemeral\"}"));
+    }
+
+    #[test]
+    fn test_structured_blocks_system_prompt() {
+        let blocks = vec![
+            SystemBlock::text("Section 1"),
+            SystemBlock::text("Section 2").with_cache_control(),
+        ];
+        let prompt = SystemPrompt::StructuredBlocks(blocks);
+        let json = serde_json::to_string(&prompt).unwrap();
+        // Should be an array of objects
+        assert!(json.starts_with('['));
+        // Only the last block should have cache_control
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(arr[0].get("cache_control").is_none());
+        assert!(arr[1].get("cache_control").is_some());
+    }
+
+    // -- Thinking field tests --
+
+    #[test]
+    fn test_request_with_thinking() {
+        let req = CreateMessageRequest::new("claude-opus-4-6", vec![])
+            .with_thinking(serde_json::json!({"type": "enabled", "budget_tokens": 10000}));
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"thinking\""));
+        assert!(json.contains("\"budget_tokens\":10000"));
+    }
+
+    #[test]
+    fn test_request_without_thinking_omits_field() {
+        let req = CreateMessageRequest::new("claude-opus-4-6", vec![]);
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("\"thinking\""));
+    }
+
+    // -- inject_cache_control_on_messages tests --
+
+    #[test]
+    fn test_inject_cache_control_single_message() {
+        let msg = ApiMessage {
+            role: Role::User,
+            content: ApiContent::Blocks(vec![ContentBlock::text("hello")]),
+        };
+        let mut messages: Vec<serde_json::Value> = vec![serde_json::to_value(&msg).unwrap()];
+        inject_cache_control_on_messages(&mut messages);
+
+        let content = messages[0]["content"].as_array().unwrap();
+        assert!(content[0].get("cache_control").is_some());
+    }
+
+    #[test]
+    fn test_inject_cache_control_multiple_messages() {
+        let msg1 = serde_json::to_value(&ApiMessage {
+            role: Role::User,
+            content: ApiContent::Blocks(vec![ContentBlock::text("first")]),
+        })
+        .unwrap();
+        let msg2 = serde_json::to_value(&ApiMessage {
+            role: Role::Assistant,
+            content: ApiContent::Blocks(vec![ContentBlock::text("second")]),
+        })
+        .unwrap();
+        let mut messages = vec![msg1, msg2];
+        inject_cache_control_on_messages(&mut messages);
+
+        // Only last message should have cache_control
+        let content0 = messages[0]["content"].as_array().unwrap();
+        assert!(content0[0].get("cache_control").is_none());
+        let content1 = messages[1]["content"].as_array().unwrap();
+        assert!(content1[0].get("cache_control").is_some());
+    }
+
+    #[test]
+    fn test_inject_cache_control_multi_block_message() {
+        let msg = serde_json::to_value(&ApiMessage {
+            role: Role::User,
+            content: ApiContent::Blocks(vec![
+                ContentBlock::tool_result("t1", "result1", false),
+                ContentBlock::tool_result("t2", "result2", false),
+            ]),
+        })
+        .unwrap();
+        let mut messages = vec![msg];
+        inject_cache_control_on_messages(&mut messages);
+
+        let content = messages[0]["content"].as_array().unwrap();
+        // Only the last block should have cache_control
+        assert!(content[0].get("cache_control").is_none());
+        assert!(content[1].get("cache_control").is_some());
+    }
+
+    #[test]
+    fn test_inject_cache_control_empty_messages() {
+        let mut messages: Vec<serde_json::Value> = vec![];
+        inject_cache_control_on_messages(&mut messages);
+        assert!(messages.is_empty());
     }
 }

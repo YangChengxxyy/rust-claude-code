@@ -57,6 +57,7 @@ pub enum ContentBlockDelta {
     TextDelta { text: String },
     InputJsonDelta { partial_json: String },
     ThinkingDelta { thinking: String },
+    SignatureDelta { signature: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -75,6 +76,7 @@ pub struct TextDeltaAccumulator {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThinkingDeltaAccumulator {
     thinking: String,
+    signature: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +121,7 @@ impl ThinkingDeltaAccumulator {
     pub fn new() -> Self {
         Self {
             thinking: String::new(),
+            signature: None,
         }
     }
 
@@ -128,6 +131,11 @@ impl ThinkingDeltaAccumulator {
                 self.thinking.push_str(thinking);
                 Ok(())
             }
+            ContentBlockDelta::SignatureDelta { signature } => {
+                let sig = self.signature.get_or_insert_with(String::new);
+                sig.push_str(signature);
+                Ok(())
+            }
             other => Err(ApiError::Stream(format!(
                 "thinking accumulator does not support delta: {other:?}"
             ))),
@@ -135,7 +143,10 @@ impl ThinkingDeltaAccumulator {
     }
 
     pub fn into_content_block(self) -> ContentBlock {
-        ContentBlock::thinking(self.thinking)
+        match self.signature {
+            Some(sig) => ContentBlock::thinking_with_signature(self.thinking, sig),
+            None => ContentBlock::thinking(self.thinking),
+        }
     }
 }
 

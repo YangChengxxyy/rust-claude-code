@@ -1,13 +1,17 @@
 use std::sync::Arc;
 
-use rust_claude_api::{ApiMessage, CreateMessageRequest};
+use rust_claude_core::compaction::needs_compaction;
+
+use rust_claude_api::{ApiMessage, CreateMessageRequest, SystemBlock, SystemPrompt};
 use rust_claude_core::{
     compaction::{
-        estimate_message_tokens, estimate_system_prompt_tokens, needs_compaction,
+        estimate_current_tokens, estimate_message_tokens, estimate_system_prompt_tokens,
         partition_messages, CompactionConfig, CompactionResult,
     },
     message::{ContentBlock, Message, Role},
-    model::{get_runtime_main_loop_model, normalize_model_string_for_api},
+    model::{
+        get_runtime_main_loop_model, get_thinking_config_for_model, normalize_model_string_for_api,
+    },
     state::AppState,
 };
 use tokio::sync::Mutex;
@@ -80,9 +84,10 @@ impl<C: ModelClient> CompactionService<C> {
                         let label = if *is_error { "Error" } else { "Result" };
                         transcript.push_str(&format!("[Tool {label}]: {content}\n\n"));
                     }
-                    ContentBlock::Thinking { thinking } => {
+                    ContentBlock::Thinking { thinking, .. } => {
                         transcript.push_str(&format!("[Thinking]: {thinking}\n\n"));
                     }
+                    ContentBlock::Unknown => {}
                 }
             }
         }
@@ -91,12 +96,22 @@ impl<C: ModelClient> CompactionService<C> {
             "Please summarize the following conversation:\n\n{transcript}"
         )));
 
-        let request = CreateMessageRequest::new(
+        let mut request = CreateMessageRequest::new(
             normalize_model_string_for_api(model),
             vec![user_message],
         )
-            .with_system(COMPACTION_PROMPT.to_string())
-            .with_max_tokens(self.config.summary_max_tokens);
+        .with_max_tokens(self.config.summary_max_tokens);
+
+        // Use structured system prompt with cache_control for compaction requests
+        request.system = Some(SystemPrompt::StructuredBlocks(vec![
+            SystemBlock::text(COMPACTION_PROMPT).with_cache_control(),
+        ]));
+
+        // Enable thinking for compaction summary generation on supported models
+        let thinking_config = get_thinking_config_for_model(model, true);
+        if let Some(thinking_value) = thinking_config.to_api_value(self.config.summary_max_tokens) {
+            request = request.with_thinking(thinking_value);
+        }
 
         let response = self.client.create_message(&request).await?;
 
@@ -125,13 +140,15 @@ impl<C: ModelClient> CompactionService<C> {
         &self,
         app_state: &Arc<Mutex<AppState>>,
     ) -> Result<CompactionResult, CompactionError> {
-        let (messages, system_prompt, permission_mode, model_setting) = {
+        let (messages, system_prompt, permission_mode, model_setting, last_api_usage, last_api_message_index) = {
             let state = app_state.lock().await;
             (
                 state.messages.clone(),
                 state.session.system_prompt.clone(),
                 state.permission_mode,
                 state.session.model_setting.clone(),
+                state.last_api_usage.clone(),
+                state.last_api_message_index,
             )
         };
 
@@ -139,8 +156,12 @@ impl<C: ModelClient> CompactionService<C> {
             return Err(CompactionError::TooFewMessages);
         }
 
-        let estimated_tokens_before =
-            estimate_system_prompt_tokens(&system_prompt) + estimate_message_tokens(&messages);
+        let estimated_tokens_before = estimate_current_tokens(
+            &system_prompt,
+            &messages,
+            last_api_usage.as_ref(),
+            last_api_message_index,
+        );
 
         let (to_compact, to_preserve) = partition_messages(&self.config, &messages);
 
@@ -202,12 +223,23 @@ impl<C: ModelClient> CompactionService<C> {
         &self,
         app_state: &Arc<Mutex<AppState>>,
     ) -> Result<Option<CompactionResult>, CompactionError> {
-        let (messages, system_prompt) = {
+        let (messages, system_prompt, last_api_usage, last_api_message_index) = {
             let state = app_state.lock().await;
-            (state.messages.clone(), state.session.system_prompt.clone())
+            (
+                state.messages.clone(),
+                state.session.system_prompt.clone(),
+                state.last_api_usage.clone(),
+                state.last_api_message_index,
+            )
         };
 
-        if !needs_compaction(&self.config, &system_prompt, &messages) {
+        if !needs_compaction(
+            &self.config,
+            &system_prompt,
+            &messages,
+            last_api_usage.as_ref(),
+            last_api_message_index,
+        ) {
             return Ok(None);
         }
 

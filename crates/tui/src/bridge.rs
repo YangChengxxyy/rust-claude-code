@@ -19,12 +19,30 @@ impl TuiBridge {
         let _ = self.event_tx.send(AppEvent::ThinkingStart).await;
     }
 
+    pub async fn send_thinking_delta(&self, text: &str) {
+        let _ = self
+            .event_tx
+            .send(AppEvent::ThinkingDelta(text.to_string()))
+            .await;
+    }
+
+    pub async fn send_thinking_complete(&self, text: &str) {
+        let _ = self
+            .event_tx
+            .send(AppEvent::ThinkingComplete(text.to_string()))
+            .await;
+    }
+
     pub async fn send_stream_delta(&self, text: &str) {
         let _ = self.event_tx.send(AppEvent::StreamDelta(text.to_string())).await;
     }
 
     pub async fn send_stream_end(&self) {
         let _ = self.event_tx.send(AppEvent::StreamEnd).await;
+    }
+
+    pub async fn send_stream_cancelled(&self) {
+        let _ = self.event_tx.send(AppEvent::StreamCancelled).await;
     }
 
     pub async fn send_tool_use(&self, name: &str, input: &serde_json::Value) {
@@ -48,12 +66,20 @@ impl TuiBridge {
             .await;
     }
 
-    pub async fn send_usage_update(&self, input_tokens: u64, output_tokens: u64) {
+    pub async fn send_usage_update(
+        &self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+    ) {
         let _ = self
             .event_tx
             .send(AppEvent::UsageUpdate {
                 input_tokens,
                 output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
             })
             .await;
     }
@@ -149,6 +175,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_bridge_sends_thinking_delta() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let bridge = TuiBridge::new(tx);
+
+        bridge.send_thinking_delta("reasoning").await;
+
+        match rx.recv().await {
+            Some(AppEvent::ThinkingDelta(text)) => assert_eq!(text, "reasoning"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_bridge_sends_tool_result() {
         let (tx, mut rx) = mpsc::channel(1);
         let bridge = TuiBridge::new(tx);
@@ -177,7 +216,6 @@ mod tests {
                 .await
         });
 
-        // Receive the permission request event and respond
         match rx.recv().await {
             Some(AppEvent::PermissionRequest {
                 tool_name,

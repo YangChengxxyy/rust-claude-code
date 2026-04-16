@@ -12,6 +12,7 @@ pub use streaming::{
     ToolUseDeltaAccumulator,
 };
 pub use types::{
-    AnthropicErrorBody, ApiContent, ApiErrorResponse, ApiMessage, ApiTool, CreateMessageRequest,
-    CreateMessageResponse, RequestMetadata, SystemPrompt,
+    inject_cache_control_on_messages, AnthropicErrorBody, ApiContent, ApiErrorResponse, ApiMessage,
+    ApiTool, CacheControl, CreateMessageRequest, CreateMessageResponse, RequestMetadata,
+    SystemBlock, SystemPrompt,
 };

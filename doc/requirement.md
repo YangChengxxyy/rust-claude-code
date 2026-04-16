@@ -1003,150 +1003,386 @@ rust-claude-code/
 
 ---
 
-### 迭代 15：Git 集成与高频命令增强
+### 迭代 15：API 能力增强（Prompt Caching + Extended Thinking）
 
 **状态**: 规划中
 
-**目标**: 补齐日常工程协作所需的 Git 感知与常用命令入口。
+**目标**: 补齐影响每一次 API 调用的核心能力 — prompt caching 大幅降低成本和延迟，extended thinking 解锁模型深度推理。这两项是 TypeScript 版本的基础设施级功能，当前 Rust 版本完全缺失。
+
+**背景分析**（来自 TS 源码 `claude.ts`、`tokenEstimation.ts`、`thinking.ts`）:
+
+- TS 版本在 system prompt 块和消息上设置 `cache_control: { type: "ephemeral" }`，实现前缀缓存复用
+- Extended thinking 默认开启，支持 adaptive（Opus/Sonnet 4.6）和 budget-based 两种模式
+- Thinking 块需要 `signature` 字段才能在后续 turn 中作为 assistant 消息重新发送
+- Token 计数使用 API response 中的 usage 数据作为主要来源，chars/4 仅作最后兜底
 
 **产出**:
 
-- Git root / canonical root 检测
-- branch 信息读取与状态栏展示
-- worktree 基础识别
-- 新增 slash commands：
-  - `/diff`
-  - `/model`
-  - `/cost`
-  - `/usage`
-  - `/config`
-- 为后续 `/commit`、`/review`、`/worktree` 等命令预留结构
+- `api` crate:
+  - `CreateMessageRequest` 新增 `thinking` 字段（`ThinkingConfig`: disabled / enabled with budget / adaptive）
+  - `SystemPrompt` 支持带 `cache_control` 的结构化块（`SystemBlock { type, text, cache_control }`）
+  - 消息级 `cache_control` 标记 — 在最后一条消息的最后一个内容块上设置
+  - `ContentBlock::Thinking` 增加 `signature: Option<String>` 字段
+  - 响应解析支持 `server_tool_use` 等新块类型（forward-compatible `#[serde(other)]`）
+- `core` crate:
+  - `SessionSettings` 新增 `thinking_enabled: bool`（默认 true）
+  - Token 计数改进：优先使用 API response 的 usage 数据，chars/4 仅作兜底
+  - `CompactionConfig` 使用 usage-based token 计数提升阈值判定精度
+- `cli` crate:
+  - `QueryLoop` 构建请求时注入 thinking 配置（根据模型自动选择 adaptive 或 budget）
+  - `QueryLoop` 构建请求时注入 cache_control 标记
+  - Max tokens recovery：当 stop_reason == MaxTokens 时注入恢复消息继续生成（最多 3 次）
+  - `--thinking` / `--no-thinking` CLI 参数
+- `tui` crate:
+  - Thinking 块展示增强（折叠显示 "Thinking..."，可选展开查看思考内容）
+  - 状态栏显示 cache hit 信息（`cache_read_input_tokens` / 总 input tokens）
 
 **验收标准**:
 
-- 在 git 仓库内能正确识别仓库根目录与当前分支
-- 高峰命令行为清晰、输出稳定
-- CLI 与 TUI 模式下都可使用这些命令
-- 相关测试通过
+- 开启 prompt caching 后，连续对话的 `cache_read_input_tokens` 稳定大于 0
+- Extended thinking 在 Opus/Sonnet 4.6 模型上默认开启且正常工作
+- Thinking 块的 signature 在多轮对话中正确保留和回传
+- Max tokens recovery 能在长输出被截断时自动继续
+- `cargo test --workspace` 通过
 
-**依赖**: 迭代 12
+**依赖**: 迭代 14
 
 ---
 
-### 迭代 16：TUI 可读性与交互增强
+### 迭代 16：TUI 核心交互增强
 
 **状态**: 规划中
 
-**目标**: 提升终端交互体验，使 Rust 版本更接近原版 Claude Code 的日常使用手感。
+**目标**: 解决日常使用中最痛的交互问题 — 单行输入无法粘贴代码、无法浏览输入历史、Markdown 输出不可读。
 
 **产出**:
 
-- Markdown 基础渲染增强
-  - 标题、列表、代码块、行内代码
-  - 代码块高亮可先做基础版
-- 输入交互增强
-  - 多行输入
-  - 输入历史浏览
-  - 更好的 spinner / 工具状态反馈
-- 工具调用结果展示增强
-  - 折叠 / 展开结构预留
-  - 错误态样式增强
+- 输入系统重构
+  - 多行输入支持（Shift+Enter 换行，Enter 提交；粘贴自动检测多行）
+  - 输入历史浏览（Up/Down 导航历史记录，持久化到 `~/.config/rust-claude-code/history`）
+  - 光标移动（Home/End/Ctrl+A/Ctrl+E 行内，Ctrl+左右 按词移动）
+- Markdown 基础渲染
+  - 标题（`#` ~ `###`）加粗或颜色区分
+  - 有序/无序列表缩进
+  - 代码块（` ``` `）带边框渲染，基础语法高亮（基于 `syntect` 或 `tree-sitter-highlight`）
+  - 行内代码（`` ` ``）反色或背景色
+  - **粗体** / *斜体* 基础支持
+- 键盘快捷键
+  - `Escape` 取消当前流式输出
+  - `Ctrl+C` 取消流式 / 空输入时退出
+  - `Ctrl+L` 清屏
+- Thinking 块 UI
+  - 流式显示 "Thinking..." spinner
+  - 完成后折叠为一行摘要（"Thought for Xs"），点击/快捷键可展开
 
 **验收标准**:
 
-- assistant 文本可按基础 Markdown 正常渲染
-- 多行输入与消息浏览体验明显改善
-- 工具调用与流式输出状态清晰
+- 多行代码粘贴后能正确提交
+- Up/Down 可浏览历史输入
+- 代码块有基础语法高亮且不破坏终端
+- Escape 可中断流式输出
 - 不引入终端恢复问题或明显性能回退
 
 **依赖**: 迭代 10
 
 ---
 
-### 迭代 17：工程能力增强（LSP + Hooks + 配置收敛）
+### 迭代 17：配置收敛 + Git 感知 + Slash Commands
 
 **状态**: 规划中
 
-**目标**: 补齐代码导航、自动化扩展点与项目级配置能力。
+**目标**: 统一多来源配置系统，补齐 Git 项目上下文，增加常用 Slash Commands。
 
 **产出**:
 
-- `LSPTool`
-  - `goToDefinition`
-  - `findReferences`
-  - `hover`
-  - `documentSymbol`
-- hooks 系统第一版
-  - 先支持 `PreToolUse`、`PostToolUse`、`UserPromptSubmit`
-- 项目级 `.claude/settings.json`
-- settings 合并优先级与校验增强
-- 大输出持久化 / 文件状态缓存的基础版本
+- 配置系统收敛
+  - 支持项目级 `.claude/settings.json`（与 TS 版本兼容）
+  - Settings 合并优先级：CLI args > env vars > project settings > user settings > global defaults
+  - 支持 `permissions` 字段在 settings 中声明（allow/deny rules）
+  - 配置文件 JSON Schema 校验
+- Git 感知
+  - Git root 检测（用于 CLAUDE.md 发现、权限路径归一化）
+  - Branch 信息读取并展示在 TUI 状态栏
+  - `gitStatus` 快照注入 system prompt（当前分支、是否 clean、最近 commits）
+- Slash Commands 增强
+  - `/diff` — 显示当前 git diff（可选 staged/unstaged）
+  - `/cost` — 显示当前会话累计 token 用量与估算成本
+  - `/config` — 显示当前生效的配置及其来源
+  - `/clear` 增强 — 可选清除消息但保留上下文
+  - 命令注册框架重构 — 为后续动态命令（Skills、MCP）预留扩展点
 
 **验收标准**:
 
-- 常见语言项目中 LSP 查询可用
-- hook 能在关键节点稳定触发
-- 项目级 settings 与用户级 settings 合并规则清晰
-- 大输出与缓存能力不破坏现有工具行为
+- 在有 `.claude/settings.json` 的项目中，配置合并结果正确
+- TUI 状态栏显示 git branch 信息
+- System prompt 包含 git status 上下文
+- 新增 slash commands 在 CLI/TUI 模式下均可用
+- 相关测试通过
 
-**依赖**: 迭代 12, 迭代 13
+**依赖**: 迭代 13, 迭代 14
 
 ---
 
-### 迭代 18：高级生态能力基础版（MCP + Memory + Agent/Task）
+### 迭代 18：Hooks 系统
 
 **状态**: 规划中
 
-**目标**: 为 Rust 版本建立接近原版 Claude Code 生态能力的基础骨架。
+**目标**: 建立自动化扩展点系统，允许用户在关键生命周期节点执行自定义脚本。Hooks 是 MCP、permission 增强等后续功能的基础设施。
+
+**背景分析**（来自 TS 源码 `hooks/`、`settings.json` 配置）:
+
+- TS 版本支持 `PreToolUse`、`PostToolUse`、`Notification`、`UserPromptSubmit`、`Stop` 等 hook 事件
+- Hook 通过 `settings.json` 的 `hooks` 字段配置，支持 shell command 和 matcher 条件
+- Hook 可返回 `approve`/`deny`/`modify` 决策影响工具执行
+- Hook 执行环境包含 tool name、input、output 等上下文变量
 
 **产出**:
 
-- MCP 客户端第一版
-  - 先支持 stdio 传输
-  - 支持 MCP tool 列出与调用
-- memory directory 第一版
-  - `MEMORY.md` 索引
-  - 基础 typed memory 文件结构
-- `AgentTool` / task 基础抽象
-  - 最小可用的 task create/list/update
-  - 为后续 team orchestration 预留协议
+- `core` crate:
+  - `HookEvent` 枚举：`PreToolUse`、`PostToolUse`、`UserPromptSubmit`、`Notification`、`Stop`
+  - `HookConfig` 类型：`event`、`command`、`matcher` (tool name / pattern)、`timeout_ms`
+  - `HookResult`：`Continue`、`Block { reason }`、`Modify { ... }`
+- `cli` crate:
+  - `HookRunner`：根据事件和 matcher 过滤并执行匹配的 hooks
+  - Shell command 执行（通过 `tokio::process::Command`），环境变量注入上下文
+  - Hook 结果处理（block → 阻止工具执行，modify → 修改工具输入）
+  - 超时处理（默认 10s，可配置）
+- `QueryLoop` 集成:
+  - 工具执行前触发 `PreToolUse` hooks
+  - 工具执行后触发 `PostToolUse` hooks
+  - 用户提交输入时触发 `UserPromptSubmit` hooks
+- Settings 集成:
+  - 从 `settings.json` 的 `hooks` 字段加载 hook 配置
+  - 项目级和用户级 hooks 合并
 
 **验收标准**:
 
-- 可接入至少一个简单 MCP server 并完成工具调用
-- memory 系统可保存和读取基础记忆项
-- task / agent 基础能力在本地可运行
-- 架构边界清晰，不与现有 QueryLoop/ToolRegistry 强耦合
+- 配置 PreToolUse hook 后能在工具执行前稳定触发
+- Hook 返回 `block` 时工具执行被阻止
+- Hook 超时不会阻塞主流程
+- hooks 配置格式与 TS 版本兼容
+- 相关测试通过
 
-**依赖**: 迭代 17
+**依赖**: 迭代 17（依赖配置系统收敛）
 
-### 10.6 第二期依赖关系
+---
+
+### 迭代 19：MCP 客户端
+
+**状态**: 规划中
+
+**目标**: 实现 Model Context Protocol 客户端，支持通过 stdio 接入外部工具服务器，大幅扩展可用工具集。
+
+**背景分析**（来自 TS 源码 `services/mcp/`）:
+
+- TS 版本支持 stdio、SSE、StreamableHTTP、WebSocket 四种传输
+- MCP 服务器在 `settings.json` 的 `mcpServers` 字段配置
+- MCP 工具注册到 ToolRegistry，参与 system prompt 和权限检查
+- 支持 OAuth 认证流程（远程服务器）
+
+**产出**:
+
+- `core` crate:
+  - `McpServerConfig` 类型：`command`、`args`、`env`、`cwd`
+  - `McpTool` 类型：`server_name`、`tool_name`、`description`、`input_schema`
+- 新增 `mcp` crate（或在 `tools` 中新增 `mcp` 模块）:
+  - JSON-RPC 2.0 over stdio 实现（spawn subprocess, read/write stdin/stdout）
+  - `initialize` 握手
+  - `tools/list` 获取工具列表
+  - `tools/call` 调用工具
+  - `McpClient` 管理服务器生命周期（启动、重连、关闭）
+  - 多服务器并行管理
+- `tools` crate:
+  - `McpProxyTool` — 将 MCP 工具包装为本地 `Tool` trait 实现
+  - 自动注册到 `ToolRegistry`
+- `cli` crate:
+  - 从 `settings.json` `mcpServers` 加载 MCP 服务器配置
+  - 启动时初始化 MCP 连接，获取工具列表
+  - System prompt 中注入 MCP 工具描述
+- TUI:
+  - `/mcp` slash command — 显示已连接的 MCP 服务器和工具列表
+  - 状态栏显示 MCP 服务器连接状态
+
+**验收标准**:
+
+- 可接入至少一个 stdio MCP server（如 `@anthropic-ai/mcp-server-filesystem`）并完成工具调用
+- MCP 工具参与正常的权限检查流程
+- MCP 服务器崩溃后能优雅处理（日志提示，不影响主流程）
+- 服务器重启后支持重连
+- 相关测试通过
+
+**依赖**: 迭代 18（Hooks 用于 MCP 工具权限集成）
+
+---
+
+### 迭代 20：Agent Tool + Task System
+
+**状态**: 规划中
+
+**目标**: 实现子代理能力，支持将复杂任务分解为子任务并行处理。Agent 是 Claude Code 处理复杂工程任务的核心能力。
+
+**背景分析**（来自 TS 源码 `tools/AgentTool/`、`tasks/`）:
+
+- TS 版本的 AgentTool 会 fork 一个独立的 QueryLoop 作为子代理
+- 子代理有独立的消息历史和工具上下文
+- Task 系统提供 create/list/update/get 操作
+- Task 状态：pending → in_progress → completed
+- 子代理可以被分配 task 并汇报进度
+
+**产出**:
+
+- `tools` crate:
+  - `AgentTool` — spawn 独立 QueryLoop 作为子代理
+    - Input: `prompt`、`description`、`allowed_tools`（可选）
+    - 子代理共享 `AppState` 但有独立消息历史
+    - 子代理执行完毕后返回最终文本作为工具结果
+  - `TaskCreateTool` — 创建任务（subject、description、status）
+  - `TaskListTool` — 列出所有任务及状态
+  - `TaskUpdateTool` — 更新任务状态、添加注释
+  - `TaskGetTool` — 获取任务详情
+- `core` crate:
+  - `Task` 类型：`id`、`subject`、`description`、`status`、`owner`、`blocked_by`
+  - `TaskStore` — 内存中的任务存储，线程安全（`Arc<Mutex<>>`）
+- `tui` crate:
+  - Todo panel 改为 Task panel（复用现有 todo 面板，扩展为 task 视图）
+  - 子代理执行时在 UI 显示进度
+
+**验收标准**:
+
+- AgentTool 能成功 spawn 子代理执行独立任务
+- 子代理可使用文件读写、Bash 等工具
+- Task 工具能正确创建、列出、更新任务
+- 子代理执行不阻塞主对话（异步）
+- 相关测试通过
+
+**依赖**: 迭代 19（Agent 可能使用 MCP 工具）
+
+---
+
+### 迭代 21：LSP Tool + WebFetch/WebSearch
+
+**状态**: 规划中
+
+**目标**: 补齐代码导航和 Web 信息获取能力，扩展工具集的广度。
+
+**产出**:
+
+- `tools` crate — `LspTool`:
+  - 支持操作：`goToDefinition`、`findReferences`、`hover`、`documentSymbol`、`workspaceSymbol`
+  - LSP 服务器生命周期管理（自动发现并启动对应语言的 LSP server）
+  - 支持常见语言：Rust (rust-analyzer)、TypeScript (typescript-language-server)、Python (pyright/pylsp)
+  - LSP 协议通信（JSON-RPC over stdio）
+  - 结果格式化为用户可读的文本
+- `tools` crate — `WebFetchTool`:
+  - Input: `url`、`prompt`（用于内容提取/总结）
+  - HTTP GET + HTML to Markdown 转换
+  - 内容截断（大页面只取前 N 字符）
+  - 基础缓存（15 分钟 TTL）
+- `tools` crate — `WebSearchTool`:
+  - Input: `query`、`allowed_domains`、`blocked_domains`
+  - 接入搜索 API（Brave Search / SearXNG / 可配置）
+  - 返回格式化的搜索结果列表
+
+**验收标准**:
+
+- LSP goToDefinition 在 Rust 项目中能正确跳转到定义
+- WebFetch 能获取并提取网页内容
+- WebSearch 能返回相关搜索结果
+- 所有新工具与现有权限系统和 QueryLoop 正常协作
+- 相关测试通过
+
+**依赖**: 迭代 12
+
+---
+
+### 迭代 22：Memory 系统 + 生态完善
+
+**状态**: 规划中
+
+**目标**: 实现跨会话记忆系统，补齐生态能力的最后一块。Memory 允许 Claude 在多次对话间保持上下文。
+
+**背景分析**（来自 TS 源码 `services/memory/`、system prompt 中的 memory 指令）:
+
+- TS 版本使用 `~/.claude/projects/<project>/memory/` 目录存储记忆文件
+- `MEMORY.md` 作为索引文件，每个记忆是独立的 Markdown 文件（带 frontmatter）
+- 记忆类型：user、feedback、project、reference
+- System prompt 中包含 memory 指令，指导模型何时读写记忆
+- 记忆文件路径注入 system prompt
+
+**产出**:
+
+- `core` crate:
+  - `MemoryConfig`：memory 目录路径、MEMORY.md 路径
+  - `MemoryEntry`：name、description、type、content（frontmatter 解析）
+  - `MemoryIndex`：MEMORY.md 解析与更新
+- `cli` / `tools`:
+  - Memory 目录自动发现（`~/.claude/projects/<project-hash>/memory/`）
+  - MEMORY.md 内容注入 system prompt
+  - 工具执行中支持读写 memory 文件（通过 FileWrite/FileRead，无需专用工具）
+- System prompt 增强:
+  - 注入 memory 管理指令（何时保存、何时读取、何时更新）
+  - 注入 MEMORY.md 索引内容
+- TUI:
+  - `/memory` slash command — 显示当前记忆文件列表
+- 生态完善:
+  - `NotebookEditTool` — 基础 Jupyter notebook 单元格编辑
+  - Image 内容块支持（`ContentBlock::Image` — base64 或 URL）
+  - `--resume` / `-r` 恢复指定会话（不仅是最新会话）
+
+**验收标准**:
+
+- Memory 文件能正确保存和跨会话读取
+- MEMORY.md 索引内容出现在 system prompt 中
+- Model 在适当时机自动保存记忆
+- 相关测试通过
+
+**依赖**: 迭代 17（依赖配置系统和 system prompt 增强）
+
+---
+
+### 10.6 第二期依赖关系（重新设计）
 
 ```text
-迭代 12 (Glob + Grep) ───────────────┐
-                                    ├── 迭代 15 (Git + 高频命令)
-                                    └── 迭代 17 (LSP + Hooks + 配置收敛) ──┐
-迭代 13 (CLAUDE.md) ──┐                                             │
-                      ├── 迭代 14 (基础 Compaction) ────────────────┤
-                      └── 迭代 17 (LSP + Hooks + 配置收敛) ─────────┤
-迭代 10 (TUI 权限 + Todo) ──────────────────────────────────────────┤
-                                                                    └── 迭代 18 (MCP + Memory + Agent/Task)
+迭代 14 (Compaction) ──────────────── 迭代 15 (Prompt Caching + Thinking)
+                                          │
+迭代 10 (TUI 权限) ──────────────── 迭代 16 (TUI 交互增强)
+                                          │
+迭代 13 (CLAUDE.md) + 迭代 14 ──── 迭代 17 (配置 + Git + Commands)
+                                          │
+                                     迭代 18 (Hooks)
+                                          │
+                                     迭代 19 (MCP)
+                                          │
+                                     迭代 20 (Agent + Task)
+                                          │
+迭代 12 (Glob + Grep) ──────────── 迭代 21 (LSP + WebFetch + WebSearch)
+                                          │
+迭代 17 (配置 + Git) ──────────── 迭代 22 (Memory + 生态完善)
 ```
 
 可并行推进的组合：
 
-- 迭代 12 + 迭代 13（工具补齐与项目指令互不阻塞）
-- 迭代 15 + 迭代 16（Git/命令增强与 TUI 增强可并行）
-- 迭代 17 的不同子项可在统一设计边界下分阶段推进
+- 迭代 15 + 迭代 16（API 增强与 TUI 增强互不阻塞）
+- 迭代 21 可在 迭代 18 之后独立推进（LSP/Web 工具不依赖 MCP/Agent）
+- 迭代 22 可在 迭代 20 之后独立推进
 
-### 10.7 第二期完成判定
+### 10.7 第二期完成判定（重新设计）
 
 当满足以下条件时，可认为第二期达到阶段性目标：
 
-- 日常代码库探索不再依赖 Bash 兜底，具备 `Glob` / `Grep` / 基础 `LSP` 能力
-- 项目级 `CLAUDE.md` 能稳定参与 system prompt 构建
-- 长对话具备基础 compact 能力，可持续使用
-- Git 仓库感知与高频 slash commands 足够支撑日常开发流程
-- TUI 在 Markdown 阅读、输入体验、状态反馈上达到可日常使用水平
-- Rust 版本已经具备接入 hooks、MCP、memory、agent/task 的可扩展架构边界
+**基础体验层（迭代 15-17）**:
+- Prompt caching 正常工作，连续对话 cache hit 率 > 80%
+- Extended thinking 默认开启，thinking 块在 TUI 中正确展示
+- 多行输入、输入历史、Markdown 渲染使日常使用体验达到可用水平
+- 项目级配置和 Git 感知正常工作
+
+**扩展能力层（迭代 18-20）**:
+- Hooks 系统能在工具执行前后触发自定义脚本
+- 至少一个 MCP server 可正常接入并完成工具调用
+- Agent 子代理能独立执行任务并返回结果
+
+**生态完善层（迭代 21-22）**:
+- LSP、WebFetch、WebSearch 工具可用
+- Memory 系统支持跨会话记忆保持
+- Rust 版本在日常开发中可替代 TS 版本的核心功能
 

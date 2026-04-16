@@ -34,6 +34,12 @@ pub struct SessionSettings {
     pub system_prompt: Option<String>,
     pub max_tokens: u32,
     pub stream: bool,
+    #[serde(default = "default_thinking_enabled")]
+    pub thinking_enabled: bool,
+}
+
+fn default_thinking_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +52,10 @@ pub struct AppState {
     pub session: SessionSettings,
     pub cwd: std::path::PathBuf,
     pub total_usage: Usage,
+    /// Usage from the most recent API response (for accurate token counting).
+    pub last_api_usage: Option<Usage>,
+    /// Message count at the time of the last API response.
+    pub last_api_message_index: usize,
 }
 
 impl AppState {
@@ -62,6 +72,7 @@ impl AppState {
                 system_prompt: None,
                 max_tokens: 16384,
                 stream: true,
+                thinking_enabled: true,
             },
             cwd,
             total_usage: Usage {
@@ -70,6 +81,8 @@ impl AppState {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
             },
+            last_api_usage: None,
+            last_api_message_index: 0,
         }
     }
 
@@ -84,6 +97,7 @@ impl AppState {
                 system_prompt: config.system_prompt.clone(),
                 max_tokens: config.max_tokens,
                 stream: config.stream,
+                thinking_enabled: true,
             },
             ..Self::new(cwd)
         }
@@ -131,6 +145,12 @@ impl AppState {
     pub fn check_permission(&self, request: PermissionRequest<'_>) -> PermissionCheck {
         self.permission_mode
             .check(request, &self.always_deny_rules, &self.always_allow_rules)
+    }
+
+    /// Record API usage from the most recent response, for usage-based token counting.
+    pub fn update_api_usage(&mut self, usage: Usage) {
+        self.last_api_usage = Some(usage);
+        self.last_api_message_index = self.messages.len();
     }
 
     pub fn conversation_turns(&self) -> usize {
@@ -308,6 +328,7 @@ mod tests {
             system_prompt: Some("Be concise".to_string()),
             max_tokens: 4096,
             stream: false,
+            thinking_enabled: true,
         };
 
         let json = serde_json::to_string(&settings).unwrap();

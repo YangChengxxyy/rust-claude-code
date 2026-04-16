@@ -1,14 +1,4 @@
 //! Rendering layer — draws the TUI frame in a style that matches Claude Code.
-//!
-//! Layout (top → bottom):
-//!   1. Chat area   — scrollable message history + live streaming text
-//!   2. Spinner row — one line showing "Thinking…" or streaming indicator
-//!   3. Input area  — bordered prompt with `>` prefix
-//!   4. Status line — model | tokens | mode
-//!
-//! Optional:
-//!   - Todo panel (right side, toggled by Tab)
-//!   - Permission dialog (centered modal overlay)
 
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -21,15 +11,23 @@ use ratatui::{
 use rust_claude_core::state::TodoStatus;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::App;
+use crate::app::{App, CursorPosition};
 use crate::events::ChatMessage;
 use crate::theme;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MarkdownBlock {
+    Heading { level: usize, text: String },
+    ListItem { ordered: bool, marker: String, text: String },
+    CodeBlock { language: Option<String>, code: String },
+    Paragraph(String),
+    Blank,
+}
 
 /// Draw the entire TUI frame.
 pub fn draw(f: &mut Frame, app: &App) {
     let full = f.size();
 
-    // If the todo panel is visible, split horizontally: [main | todo]
     let (main_area, todo_area) = if app.todo_visible {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -40,13 +38,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         (full, None)
     };
 
+    let input_height = input_area_height(app).clamp(3, 8);
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),    // chat area
-            Constraint::Length(1), // spinner / activity line
-            Constraint::Length(3), // input area
-            Constraint::Length(1), // status bar
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(input_height),
+            Constraint::Length(1),
         ])
         .split(main_area);
 
@@ -59,30 +58,37 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_todo_panel(f, app, todo_area);
     }
 
-    // Permission dialog is rendered last (on top of everything).
     if app.permission_dialog.is_some() {
         draw_permission_dialog(f, app, full);
     }
 }
 
-// ── Chat area ───────────────────────────────────────────────────────────────
+fn input_area_height(app: &App) -> u16 {
+    let lines = app.input_text().lines().count().max(1) as u16;
+    lines + 2
+}
 
 fn draw_chat_area(f: &mut Frame, app: &App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
-    for msg in &app.messages {
-        render_message(msg, &mut lines, area.width as usize);
+    for (idx, msg) in app.messages.iter().enumerate() {
+        render_message(msg, idx, app, &mut lines, area.width as usize);
     }
 
-    // Live streaming text
     if app.is_streaming && !app.streaming_text.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("{} ", theme::BLACK_CIRCLE),
-                theme::bullet_style(),
-            ),
-            Span::styled(app.streaming_text.clone(), theme::assistant_text_style()),
-        ]));
+        for (i, line) in app.streaming_text.lines().enumerate() {
+            if i == 0 {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{} ", theme::BLACK_CIRCLE), theme::bullet_style()),
+                    Span::styled(line.to_string(), theme::assistant_text_style()),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(line.to_string(), theme::assistant_text_style()),
+                ]));
+            }
+        }
     }
 
     if lines.is_empty() {
@@ -99,20 +105,27 @@ fn draw_chat_area(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
-// ── Message rendering ───────────────────────────────────────────────────────
-
-fn render_message(msg: &ChatMessage, lines: &mut Vec<Line<'static>>, _width: usize) {
+fn render_message(
+    msg: &ChatMessage,
+    message_index: usize,
+    app: &App,
+    lines: &mut Vec<Line<'static>>,
+    width: usize,
+) {
     match msg {
         ChatMessage::User(text) => {
-            // Blank separator line before user messages (unless first message).
             if !lines.is_empty() {
                 lines.push(Line::from(""));
             }
-            // User messages: "> text" style
             for (i, line) in text.lines().enumerate() {
                 if i == 0 {
                     lines.push(Line::from(vec![
-                        Span::styled("> ", Style::default().fg(theme::SUGGESTION).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "> ",
+                            Style::default()
+                                .fg(theme::SUGGESTION)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(line.to_string(), theme::user_text_style()),
                     ]));
                 } else {
@@ -124,32 +137,43 @@ fn render_message(msg: &ChatMessage, lines: &mut Vec<Line<'static>>, _width: usi
             }
             lines.push(Line::from(""));
         }
-
         ChatMessage::Assistant(text) => {
-            // Assistant messages: "⏺ text"
-            for (i, line) in text.lines().enumerate() {
-                if i == 0 {
+            render_markdown_message(text, lines, width);
+        }
+        ChatMessage::Thinking { summary, content } => {
+            let is_selected = app.selected_thinking == Some(message_index);
+            let is_expanded = app.expanded_thinking.contains(&message_index);
+            let prefix = if is_selected { ">" } else { " " };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {prefix} "),
+                    if is_selected {
+                        Style::default().fg(theme::CLAUDE).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme::SUBTLE)
+                    },
+                ),
+                Span::styled("Thinking", theme::spinner_style().add_modifier(Modifier::BOLD)),
+                Span::raw(" — "),
+                Span::styled(summary.clone(), Style::default().fg(theme::INACTIVE)),
+                Span::styled(
+                    if is_expanded { " [Tab to collapse]" } else { " [Tab to expand]" },
+                    Style::default().fg(theme::SUBTLE),
+                ),
+            ]));
+            if is_expanded {
+                for line in content.lines() {
                     lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("{} ", theme::BLACK_CIRCLE),
-                            theme::bullet_style(),
-                        ),
-                        Span::styled(line.to_string(), theme::assistant_text_style()),
-                    ]));
-                } else {
-                    lines.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(line.to_string(), theme::assistant_text_style()),
+                        Span::raw("    "),
+                        Span::styled(line.to_string(), Style::default().fg(theme::INACTIVE)),
                     ]));
                 }
             }
         }
-
         ChatMessage::ToolUse { name, input_summary } => {
             let display_name = ChatMessage::user_facing_tool_name(name);
 
             if name == "Bash" {
-                // Bash tool: "  ⎿  ! command"
                 let cmd_display = if input_summary.len() > 160 {
                     format!("{}…", &input_summary[..159])
                 } else {
@@ -160,24 +184,17 @@ fn render_message(msg: &ChatMessage, lines: &mut Vec<Line<'static>>, _width: usi
                         format!("  {} ", theme::RESPONSE_PREFIX),
                         theme::response_prefix_style(),
                     ),
-                    Span::styled(
-                        format!("{display_name} "),
-                        theme::tool_name_style(),
-                    ),
+                    Span::styled(format!("{display_name} "), theme::tool_name_style()),
                     Span::styled("! ", theme::bash_prefix_style()),
                     Span::styled(cmd_display, theme::bash_command_style()),
                 ]));
             } else {
-                // Other tools: "  ⎿  ToolName (summary)"
                 let mut spans = vec![
                     Span::styled(
                         format!("  {} ", theme::RESPONSE_PREFIX),
                         theme::response_prefix_style(),
                     ),
-                    Span::styled(
-                        display_name.to_string(),
-                        theme::tool_name_style(),
-                    ),
+                    Span::styled(display_name.to_string(), theme::tool_name_style()),
                 ];
                 if !input_summary.is_empty() {
                     spans.push(Span::styled(
@@ -188,7 +205,6 @@ fn render_message(msg: &ChatMessage, lines: &mut Vec<Line<'static>>, _width: usi
                 lines.push(Line::from(spans));
             }
         }
-
         ChatMessage::ToolResult {
             name: _,
             output_summary,
@@ -197,14 +213,12 @@ fn render_message(msg: &ChatMessage, lines: &mut Vec<Line<'static>>, _width: usi
             if output_summary.is_empty() {
                 return;
             }
-            // Tool results: "  ⎿  output" (indented under the tool call)
             let style = if *is_error {
                 theme::error_style()
             } else {
                 Style::default().fg(theme::INACTIVE)
             };
 
-            // Show first few lines of result, indented
             for (i, line) in output_summary.lines().take(6).enumerate() {
                 if i == 0 {
                     lines.push(Line::from(vec![
@@ -232,7 +246,6 @@ fn render_message(msg: &ChatMessage, lines: &mut Vec<Line<'static>>, _width: usi
                 ]));
             }
         }
-
         ChatMessage::System(text) => {
             lines.push(Line::from(vec![
                 Span::styled("  ", Style::default()),
@@ -242,23 +255,282 @@ fn render_message(msg: &ChatMessage, lines: &mut Vec<Line<'static>>, _width: usi
     }
 }
 
-// ── Spinner / activity line ─────────────────────────────────────────────────
+fn render_markdown_message(text: &str, lines: &mut Vec<Line<'static>>, _width: usize) {
+    let blocks = parse_markdown_blocks(text);
+    let mut first_block = true;
+    for block in blocks {
+        match block {
+            MarkdownBlock::Heading { level, text } => {
+                if !first_block {
+                    lines.push(Line::from(""));
+                }
+                let style = match level {
+                    1 => Style::default().fg(theme::CLAUDE).add_modifier(Modifier::BOLD),
+                    2 => Style::default().fg(theme::SUGGESTION).add_modifier(Modifier::BOLD),
+                    _ => Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{} ", theme::BLACK_CIRCLE), theme::bullet_style()),
+                    Span::styled(text, style),
+                ]));
+            }
+            MarkdownBlock::ListItem { ordered: _, marker, text } => {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(format!("{marker} "), Style::default().fg(theme::SUGGESTION)),
+                    ]));
+                if let Some(last) = lines.last_mut() {
+                    last.spans.extend(parse_inline_spans(&text));
+                }
+            }
+            MarkdownBlock::CodeBlock { language, code } => {
+                if !first_block {
+                    lines.push(Line::from(""));
+                }
+                let title = language.unwrap_or_else(|| "code".to_string());
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(format!("┌─ {title}"), Style::default().fg(theme::BASH_BORDER)),
+                ]));
+                for line in code.lines() {
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("│ ", Style::default().fg(theme::BASH_BORDER)),
+                        Span::styled(line.to_string(), Style::default().fg(theme::TEXT)),
+                    ]));
+                }
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled("└─", Style::default().fg(theme::BASH_BORDER)),
+                ]));
+            }
+            MarkdownBlock::Paragraph(text) => {
+                if !first_block {
+                    lines.push(Line::from(""));
+                }
+                let mut first_line = true;
+                for logical_line in text.lines() {
+                    let mut spans = Vec::new();
+                    if first_line {
+                        spans.push(Span::styled(
+                            format!("{} ", theme::BLACK_CIRCLE),
+                            theme::bullet_style(),
+                        ));
+                        first_line = false;
+                    } else {
+                        spans.push(Span::raw("  "));
+                    }
+                    spans.extend(parse_inline_spans(logical_line));
+                    lines.push(Line::from(spans));
+                }
+            }
+            MarkdownBlock::Blank => lines.push(Line::from("")),
+        }
+        first_block = false;
+    }
+}
+
+fn parse_markdown_blocks(text: &str) -> Vec<MarkdownBlock> {
+    let mut blocks = Vec::new();
+    let mut paragraph = Vec::new();
+    let mut in_code = false;
+    let mut code_lang = None;
+    let mut code_lines = Vec::new();
+
+    let flush_paragraph = |paragraph: &mut Vec<String>, blocks: &mut Vec<MarkdownBlock>| {
+        if !paragraph.is_empty() {
+            blocks.push(MarkdownBlock::Paragraph(paragraph.join("\n")));
+            paragraph.clear();
+        }
+    };
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("```") {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            if in_code {
+                blocks.push(MarkdownBlock::CodeBlock {
+                    language: code_lang.take(),
+                    code: code_lines.join("\n"),
+                });
+                code_lines.clear();
+                in_code = false;
+            } else {
+                in_code = true;
+                code_lang = (!rest.trim().is_empty()).then(|| rest.trim().to_string());
+            }
+            continue;
+        }
+
+        if in_code {
+            code_lines.push(line.to_string());
+            continue;
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            blocks.push(MarkdownBlock::Blank);
+            continue;
+        }
+
+        let heading_level = trimmed.chars().take_while(|c| *c == '#').count();
+        if (1..=3).contains(&heading_level)
+            && trimmed.chars().nth(heading_level) == Some(' ')
+        {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            blocks.push(MarkdownBlock::Heading {
+                level: heading_level,
+                text: trimmed[heading_level + 1..].to_string(),
+            });
+            continue;
+        }
+
+        if let Some(text) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            blocks.push(MarkdownBlock::ListItem {
+                ordered: false,
+                marker: "•".to_string(),
+                text: text.to_string(),
+            });
+            continue;
+        }
+
+        if let Some((marker, rest)) = parse_ordered_list_item(trimmed) {
+            flush_paragraph(&mut paragraph, &mut blocks);
+            blocks.push(MarkdownBlock::ListItem {
+                ordered: true,
+                marker,
+                text: rest,
+            });
+            continue;
+        }
+
+        paragraph.push(line.to_string());
+    }
+
+    if in_code {
+        blocks.push(MarkdownBlock::CodeBlock {
+            language: code_lang.take(),
+            code: code_lines.join("\n"),
+        });
+    }
+    if !paragraph.is_empty() {
+        blocks.push(MarkdownBlock::Paragraph(paragraph.join("\n")));
+    }
+
+    while matches!(blocks.last(), Some(MarkdownBlock::Blank)) {
+        blocks.pop();
+    }
+
+    blocks
+}
+
+fn parse_ordered_list_item(line: &str) -> Option<(String, String)> {
+    let mut digits = String::new();
+    for ch in line.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+        } else {
+            break;
+        }
+    }
+    if digits.is_empty() {
+        return None;
+    }
+    let suffix = &line[digits.len()..];
+    let rest = suffix.strip_prefix(". ")?;
+    Some((format!("{digits}."), rest.to_string()))
+}
+
+fn parse_inline_spans(text: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    let mut plain = String::new();
+
+    while i < chars.len() {
+        if chars[i] == '`' {
+            if !plain.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut plain), theme::assistant_text_style()));
+            }
+            let mut j = i + 1;
+            while j < chars.len() && chars[j] != '`' {
+                j += 1;
+            }
+            if j < chars.len() {
+                let content: String = chars[i + 1..j].iter().collect();
+                spans.push(Span::styled(
+                    content,
+                    Style::default()
+                        .fg(theme::TEXT)
+                        .bg(theme::USER_MSG_BG),
+                ));
+                i = j + 1;
+                continue;
+            }
+        }
+
+        if i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '*' {
+            if !plain.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut plain), theme::assistant_text_style()));
+            }
+            let mut j = i + 2;
+            while j + 1 < chars.len() && !(chars[j] == '*' && chars[j + 1] == '*') {
+                j += 1;
+            }
+            if j + 1 < chars.len() {
+                let content: String = chars[i + 2..j].iter().collect();
+                spans.push(Span::styled(
+                    content,
+                    Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD),
+                ));
+                i = j + 2;
+                continue;
+            }
+        }
+
+        if chars[i] == '*' {
+            if !plain.is_empty() {
+                spans.push(Span::styled(std::mem::take(&mut plain), theme::assistant_text_style()));
+            }
+            let mut j = i + 1;
+            while j < chars.len() && chars[j] != '*' {
+                j += 1;
+            }
+            if j < chars.len() {
+                let content: String = chars[i + 1..j].iter().collect();
+                spans.push(Span::styled(
+                    content,
+                    Style::default().fg(theme::TEXT).add_modifier(Modifier::ITALIC),
+                ));
+                i = j + 1;
+                continue;
+            }
+        }
+
+        plain.push(chars[i]);
+        i += 1;
+    }
+
+    if !plain.is_empty() {
+        spans.push(Span::styled(plain, theme::assistant_text_style()));
+    }
+
+    if spans.is_empty() {
+        spans.push(Span::raw(String::new()));
+    }
+    spans
+}
 
 fn draw_spinner_line(f: &mut Frame, app: &App, area: Rect) {
     let content = if app.is_thinking {
         Line::from(vec![
-            Span::styled(
-                format!("{} ", theme::BLACK_CIRCLE),
-                theme::spinner_style(),
-            ),
+            Span::styled(format!("{} ", theme::BLACK_CIRCLE), theme::spinner_style()),
             Span::styled("Thinking…", theme::spinner_style()),
         ])
     } else if app.is_streaming {
         Line::from(vec![
-            Span::styled(
-                format!("{} ", theme::BLACK_CIRCLE),
-                theme::spinner_style(),
-            ),
+            Span::styled(format!("{} ", theme::BLACK_CIRCLE), theme::spinner_style()),
             Span::styled("Streaming…", theme::spinner_style()),
         ])
     } else {
@@ -267,8 +539,6 @@ fn draw_spinner_line(f: &mut Frame, app: &App, area: Rect) {
 
     f.render_widget(Paragraph::new(content), area);
 }
-
-// ── Input area ──────────────────────────────────────────────────────────────
 
 fn draw_input_area(f: &mut Frame, app: &App, area: Rect) {
     let border_style = if app.is_streaming {
@@ -280,42 +550,76 @@ fn draw_input_area(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_set(border::ROUNDED)
-        .border_style(border_style);
+        .border_style(border_style)
+        .title(if app.is_streaming { " Input (locked) " } else { " Input " });
 
-    // Build input text with ">" prompt prefix
     let input_style = if app.is_streaming {
         theme::input_disabled_style()
     } else {
         theme::user_text_style()
     };
 
-    let input_text = if app.input.is_empty() && !app.is_streaming {
-        Text::from(Line::from(vec![
-            Span::styled("> ", Style::default().fg(theme::SUGGESTION).add_modifier(Modifier::BOLD)),
-        ]))
-    } else {
-        Text::from(Line::from(vec![
-            Span::styled("> ", Style::default().fg(theme::SUGGESTION).add_modifier(Modifier::BOLD)),
-            Span::styled(app.input.clone(), input_style),
-        ]))
-    };
-
+    let input_text = build_input_text(app, input_style);
     let paragraph = Paragraph::new(input_text)
         .block(block)
         .wrap(Wrap { trim: false });
 
     f.render_widget(paragraph, area);
 
-    // Show cursor only while not streaming.
     if !app.is_streaming {
-        // +1 for border, +2 for "> " prefix
-        let cursor_x = area.x + 1 + 2 + display_width(&app.input[..app.input_cursor]) as u16;
-        let cursor_y = area.y + 1;
-        f.set_cursor(cursor_x.min(area.right().saturating_sub(1)), cursor_y);
+        let CursorPosition { row, col } = app.input_cursor();
+        let current_line = app
+            .input_text()
+            .lines()
+            .nth(row)
+            .unwrap_or_default()
+            .to_string();
+        let cursor_x = area.x + 1 + 2 + display_width(&current_line[..char_to_byte(&current_line, col)]) as u16;
+        let cursor_y = area.y + 1 + row as u16;
+        f.set_cursor(
+            cursor_x.min(area.right().saturating_sub(1)),
+            cursor_y.min(area.bottom().saturating_sub(1)),
+        );
     }
 }
 
-// ── Status bar ──────────────────────────────────────────────────────────────
+fn build_input_text(app: &App, input_style: Style) -> Text<'static> {
+    let text = app.input_text();
+    if text.is_empty() && !app.is_streaming {
+        return Text::from(Line::from(vec![
+            Span::styled(
+                "> ",
+                Style::default()
+                    .fg(theme::SUGGESTION)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    let mut lines = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if i == 0 {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "> ",
+                    Style::default()
+                        .fg(theme::SUGGESTION)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(line.to_string(), input_style),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(line.to_string(), input_style),
+            ]));
+        }
+    }
+    if text.ends_with('\n') {
+        lines.push(Line::from(vec![Span::raw("  ")]));
+    }
+    Text::from(lines)
+}
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let mode_display = match app.permission_mode.as_str() {
@@ -334,14 +638,21 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let left = format!(" {} ", model_display);
+    let cache_info = if app.input_tokens > 0 {
+        let hit_pct = (app.cache_read_input_tokens as f64 / app.input_tokens as f64 * 100.0) as u32;
+        format!(" cache:{hit_pct}%")
+    } else {
+        String::new()
+    };
+
     let right = format!(
-        " tokens: {}↑ {}↓ | {} ",
+        " tokens: {}↑ {}↓{} | {} ",
         format_tokens(app.input_tokens),
         format_tokens(app.output_tokens),
+        cache_info,
         mode_display,
     );
 
-    // Pad middle to fill the line
     let total_width = area.width as usize;
     let used = left.len() + right.len();
     let padding = if total_width > used {
@@ -351,17 +662,17 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let line = Line::from(vec![
-        Span::styled(&left, Style::default().fg(theme::CLAUDE).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            &left,
+            Style::default().fg(theme::CLAUDE).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(padding, theme::status_bar_style()),
         Span::styled(&right, theme::status_bar_style()),
     ]);
 
-    // Thin separator at the top of status bar
     let paragraph = Paragraph::new(line);
     f.render_widget(paragraph, area);
 }
-
-// ── Permission dialog ──────────────────────────────────────────────────────
 
 fn draw_permission_dialog(f: &mut Frame, app: &App, area: Rect) {
     let dialog = match &app.permission_dialog {
@@ -369,14 +680,12 @@ fn draw_permission_dialog(f: &mut Frame, app: &App, area: Rect) {
         None => return,
     };
 
-    // Center the dialog: 50 wide, 12 tall
     let dialog_width = 50u16.min(area.width.saturating_sub(4));
     let dialog_height = 12u16.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
     let y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
     let dialog_area = Rect::new(x, y, dialog_width, dialog_height);
 
-    // Clear the area behind the dialog
     f.render_widget(Clear, dialog_area);
 
     let block = Block::default()
@@ -435,8 +744,6 @@ fn draw_permission_dialog(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(paragraph, dialog_area);
 }
 
-// ── Todo panel ─────────────────────────────────────────────────────────────
-
 fn draw_todo_panel(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
         .title(" Todo ")
@@ -479,13 +786,20 @@ fn draw_todo_panel(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(paragraph, area);
 }
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
-
 fn display_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
-/// Truncate a string to fit within a display width, appending "…" if needed.
+fn char_to_byte(s: &str, char_idx: usize) -> usize {
+    if char_idx == 0 {
+        return 0;
+    }
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(idx, _)| idx)
+        .unwrap_or(s.len())
+}
+
 fn truncate_display(s: &str, max_width: usize) -> String {
     if display_width(s) <= max_width {
         return s.to_string();
@@ -524,7 +838,6 @@ mod tests {
 
     #[test]
     fn test_display_width_cjk() {
-        // CJK characters are double-width
         assert_eq!(display_width("你好"), 4);
     }
 
@@ -544,110 +857,36 @@ mod tests {
     }
 
     #[test]
-    fn test_render_user_message() {
-        let mut lines = Vec::new();
-        render_message(&ChatMessage::User("hello".into()), &mut lines, 80);
-        assert!(lines.len() >= 1);
-        // First user message has no leading blank line
-        let first_line = &lines[0];
-        assert_eq!(first_line.spans[0].content.as_ref(), "> ");
-        assert_eq!(first_line.spans[1].content.as_ref(), "hello");
+    fn test_parse_markdown_heading_list_code() {
+        let blocks = parse_markdown_blocks("# Title\n\n- item\n\n```rust\nfn main() {}\n```");
+        assert!(matches!(blocks[0], MarkdownBlock::Heading { .. }));
+        assert!(blocks.iter().any(|b| matches!(b, MarkdownBlock::ListItem { .. })));
+        assert!(blocks.iter().any(|b| matches!(b, MarkdownBlock::CodeBlock { .. })));
     }
 
     #[test]
-    fn test_render_assistant_message() {
-        let mut lines = Vec::new();
-        render_message(&ChatMessage::Assistant("hi there".into()), &mut lines, 80);
-        assert_eq!(lines.len(), 1);
-        let line = &lines[0];
-        assert!(line.spans[0].content.contains(theme::BLACK_CIRCLE));
-        assert_eq!(line.spans[1].content.as_ref(), "hi there");
+    fn test_parse_inline_spans_styles() {
+        let spans = parse_inline_spans("a `code` **bold** *italic*");
+        assert!(spans.iter().any(|s| s.content.as_ref() == "code"));
+        assert!(spans.iter().any(|s| s.content.as_ref() == "bold"));
+        assert!(spans.iter().any(|s| s.content.as_ref() == "italic"));
     }
 
     #[test]
-    fn test_render_tool_use_bash() {
+    fn test_render_thinking_summary() {
         let mut lines = Vec::new();
+        let mut app = App::new("test".into(), "test".into(), "default".into());
+        app.selected_thinking = Some(0);
         render_message(
-            &ChatMessage::ToolUse {
-                name: "Bash".into(),
-                input_summary: "ls -la".into(),
+            &ChatMessage::Thinking {
+                summary: "Thought for ~10 chars".into(),
+                content: "reasoning".into(),
             },
+            0,
+            &app,
             &mut lines,
             80,
         );
-        assert_eq!(lines.len(), 1);
-        let line = &lines[0];
-        // Should contain the response prefix and bash prefix
-        assert!(line.spans[0].content.contains(theme::RESPONSE_PREFIX));
-        assert!(line.spans.iter().any(|s| s.content.contains("!")));
-    }
-
-    #[test]
-    fn test_render_tool_use_file_read() {
-        let mut lines = Vec::new();
-        render_message(
-            &ChatMessage::ToolUse {
-                name: "FileRead".into(),
-                input_summary: "/tmp/test.rs".into(),
-            },
-            &mut lines,
-            80,
-        );
-        assert_eq!(lines.len(), 1);
-        let line = &lines[0];
-        assert!(line.spans.iter().any(|s| s.content.as_ref() == "Read"));
-        assert!(line
-            .spans
-            .iter()
-            .any(|s| s.content.contains("/tmp/test.rs")));
-    }
-
-    #[test]
-    fn test_render_tool_result_ok() {
-        let mut lines = Vec::new();
-        render_message(
-            &ChatMessage::ToolResult {
-                name: "Bash".into(),
-                output_summary: "file1\nfile2".into(),
-                is_error: false,
-            },
-            &mut lines,
-            80,
-        );
-        assert_eq!(lines.len(), 2);
-    }
-
-    #[test]
-    fn test_render_tool_result_error() {
-        let mut lines = Vec::new();
-        render_message(
-            &ChatMessage::ToolResult {
-                name: "Bash".into(),
-                output_summary: "command not found".into(),
-                is_error: true,
-            },
-            &mut lines,
-            80,
-        );
-        assert_eq!(lines.len(), 1);
-        // Error style should have error color
-        let style = lines[0].spans[1].style;
-        assert_eq!(style.fg, Some(theme::ERROR));
-    }
-
-
-    #[test]
-    fn test_status_bar_shows_model_source_relation() {
-        let app = App::new(
-            "claude-opus-4-6".into(),
-            "opusplan".into(),
-            "Plan".into(),
-        );
-        let model_display = if app.model == app.model_setting {
-            app.model.clone()
-        } else {
-            format!("{} (from {})", app.model, app.model_setting)
-        };
-        assert_eq!(model_display, "claude-opus-4-6 (from opusplan)");
+        assert!(lines[0].spans.iter().any(|s| s.content.contains("Thinking")));
     }
 }

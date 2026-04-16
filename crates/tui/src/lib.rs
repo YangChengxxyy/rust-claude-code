@@ -2,7 +2,7 @@ use std::io::{self, Stdout};
 use std::sync::Once;
 
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -16,7 +16,7 @@ pub mod ui;
 
 pub use app::{App, PermissionDialog};
 pub use bridge::TuiBridge;
-pub use events::{AppEvent, ChatMessage, PermissionResponse};
+pub use events::{AppEvent, ChatMessage, PermissionResponse, UserCommand};
 
 static PANIC_HOOK_ONCE: Once = Once::new();
 
@@ -30,7 +30,12 @@ impl TerminalGuard {
     pub fn new() -> io::Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
         install_panic_hook();
@@ -48,6 +53,7 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
+            DisableBracketedPaste,
             DisableMouseCapture
         );
         let _ = self.terminal.show_cursor();
@@ -60,7 +66,12 @@ fn install_panic_hook() {
         std::panic::set_hook(Box::new(move |panic_info| {
             let _ = disable_raw_mode();
             let mut stdout = io::stdout();
-            let _ = execute!(stdout, LeaveAlternateScreen, DisableMouseCapture);
+            let _ = execute!(
+                stdout,
+                LeaveAlternateScreen,
+                DisableBracketedPaste,
+                DisableMouseCapture
+            );
             default_hook(panic_info);
         }));
     });

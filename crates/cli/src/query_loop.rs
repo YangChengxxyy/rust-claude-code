@@ -4,15 +4,16 @@ use async_trait::async_trait;
 use futures_util::future::join_all;
 use futures_util::StreamExt;
 use rust_claude_api::{
-    ApiError, ApiMessage, ApiTool, ContentBlockAccumulator, CreateMessageRequest,
-    CreateMessageResponse, MessageStream, StreamEvent,
+    inject_cache_control_on_messages, ApiError, ApiMessage, ApiTool, ContentBlockAccumulator,
+    CreateMessageRequest, CreateMessageResponse, MessageStream, StreamEvent, SystemBlock,
+    SystemPrompt,
 };
 use rust_claude_core::{
     compaction::CompactionConfig,
     message::{ContentBlock, Message, StopReason},
     model::{
-        get_runtime_main_loop_model, normalize_model_string_for_api,
-        usage_exceeds_200k_tokens,
+        get_runtime_main_loop_model, get_thinking_config_for_model,
+        normalize_model_string_for_api, usage_exceeds_200k_tokens,
     },
     permission::{PermissionCheck, PermissionRequest},
     state::AppState,
@@ -79,6 +80,10 @@ impl ModelClient for rust_claude_api::AnthropicClient {
     }
 }
 
+const MAX_TOKENS_RECOVERY_LIMIT: usize = 3;
+const MAX_TOKENS_RECOVERY_MESSAGE: &str =
+    "Continue from where you left off. Do not repeat what you already said. Pick up mid-thought if needed. Break remaining work into smaller pieces.";
+
 pub struct QueryLoop<C> {
     client: C,
     tools: ToolRegistry,
@@ -126,6 +131,8 @@ where
             state.add_message(Message::user(user_input));
         }
 
+        let mut max_tokens_recovery_count: usize = 0;
+
         for _ in 0..self.max_rounds {
             // Auto-compaction check before building the request
             if let Some(compaction_config) = &self.compaction_config {
@@ -172,14 +179,55 @@ where
                 bridge.send_stream_end().await;
                 let usage = &response.usage;
                 bridge
-                    .send_usage_update(usage.input_tokens as u64, usage.output_tokens as u64)
+                    .send_usage_update(
+                        usage.input_tokens as u64,
+                        usage.output_tokens as u64,
+                        usage.cache_read_input_tokens as u64,
+                        usage.cache_creation_input_tokens as u64,
+                    )
                     .await;
             }
 
             {
                 let mut state = app_state.lock().await;
                 state.add_assistant_message(assistant_message.clone());
+                // Track API usage for usage-based token counting
+                state.update_api_usage(response.usage.clone());
             }
+
+            // Handle max tokens truncation with recovery
+            if stop_reason == Some(StopReason::MaxTokens) {
+                // If the response has tool_use blocks, execute them first
+                if assistant_message.has_tool_use() {
+                    self.execute_tool_uses(&app_state, &assistant_message).await?;
+                }
+
+                if max_tokens_recovery_count < MAX_TOKENS_RECOVERY_LIMIT {
+                    max_tokens_recovery_count += 1;
+
+                    if let Some(bridge) = &self.bridge {
+                        bridge
+                            .send_error(&format!(
+                                "Output truncated, continuing... (attempt {}/{})",
+                                max_tokens_recovery_count, MAX_TOKENS_RECOVERY_LIMIT
+                            ))
+                            .await;
+                    }
+
+                    // Inject continuation message
+                    {
+                        let mut state = app_state.lock().await;
+                        state.add_message(Message::user(MAX_TOKENS_RECOVERY_MESSAGE));
+                    }
+                    continue;
+                }
+
+                // Exhausted recovery attempts, return truncated result
+                return Ok(assistant_message);
+            }
+
+            // Reset recovery counter on successful non-MaxTokens response
+            max_tokens_recovery_count = 0;
 
             if stop_reason != Some(StopReason::ToolUse) {
                 return Ok(assistant_message);
@@ -234,8 +282,9 @@ where
                             rust_claude_api::ContentBlockDelta::TextDelta { text } => {
                                 bridge.send_stream_delta(text).await;
                             }
-                            rust_claude_api::ContentBlockDelta::ThinkingDelta { .. } => {
+                            rust_claude_api::ContentBlockDelta::ThinkingDelta { thinking } => {
                                 bridge.send_thinking_start().await;
+                                bridge.send_thinking_delta(thinking).await;
                             }
                             _ => {}
                         }
@@ -246,7 +295,13 @@ where
                     ensure_index(&mut accumulators, index);
                     if let Some(accumulator) = accumulators[index].take() {
                         ensure_index(&mut content, index);
-                        content[index] = Some(accumulator.into_content_block().map_err(QueryLoopError::Api)?);
+                        let block = accumulator.into_content_block().map_err(QueryLoopError::Api)?;
+                        if let Some(bridge) = &self.bridge {
+                            if let ContentBlock::Thinking { thinking, .. } = &block {
+                                bridge.send_thinking_complete(thinking).await;
+                            }
+                        }
+                        content[index] = Some(block);
                     }
                 }
                 StreamEvent::MessageDelta { delta, usage: delta_usage } => {
@@ -283,11 +338,25 @@ where
             state.permission_mode,
             exceeds_200k_tokens,
         );
-        let messages = state
+
+        // Serialize messages as JSON values so we can inject cache_control
+        let messages: Vec<ApiMessage> = state
             .messages
             .iter()
             .map(ApiMessage::from)
-            .collect::<Vec<_>>();
+            .collect();
+        let mut serialized_messages: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| serde_json::to_value(m).unwrap_or_default())
+            .collect();
+        inject_cache_control_on_messages(&mut serialized_messages);
+
+        // Convert system prompt to structured blocks with cache_control on last block
+        let system = state.session.system_prompt.as_ref().map(|text| {
+            SystemPrompt::StructuredBlocks(vec![
+                SystemBlock::text(text.as_str()).with_cache_control()
+            ])
+        });
 
         let tools = self
             .tools
@@ -302,11 +371,37 @@ where
             })
             .collect::<Vec<_>>();
 
-        CreateMessageRequest::new(normalize_model_string_for_api(&runtime_model), messages)
-            .with_system_opt(state.session.system_prompt.clone())
-            .with_max_tokens(state.session.max_tokens)
-            .with_tools(tools)
-            .with_stream(state.session.stream)
+        // Determine thinking config based on model
+        let thinking_config = get_thinking_config_for_model(
+            &runtime_model,
+            state.session.thinking_enabled,
+        );
+        let max_tokens = state.session.max_tokens;
+
+        let mut request = CreateMessageRequest::new(
+            normalize_model_string_for_api(&runtime_model),
+            messages,
+        )
+        .with_max_tokens(max_tokens)
+        .with_tools(tools)
+        .with_stream(state.session.stream);
+
+        if let Some(system) = system {
+            request.system = Some(system);
+        }
+
+        // Inject thinking config
+        if let Some(thinking_value) = thinking_config.to_api_value(max_tokens) {
+            request = request.with_thinking(thinking_value);
+        }
+
+        // Replace messages with cache_control-injected versions
+        request.messages = serialized_messages
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect();
+
+        request
     }
 
     /// Check permission for a tool invocation. Returns `None` if allowed,
@@ -563,13 +658,14 @@ mod tests {
                     ContentBlock::Text { text } => Some(rust_claude_api::ContentBlockDelta::TextDelta {
                         text: text.clone(),
                     }),
-                    ContentBlock::Thinking { thinking } => {
+                    ContentBlock::Thinking { thinking, .. } => {
                         Some(rust_claude_api::ContentBlockDelta::ThinkingDelta {
                             thinking: thinking.clone(),
                         })
                     }
                     ContentBlock::ToolUse { .. } => None,
                     ContentBlock::ToolResult { .. } => None,
+                    ContentBlock::Unknown => None,
                 };
 
                 events.push(Ok(StreamEvent::ContentBlockStart {
@@ -721,10 +817,15 @@ mod tests {
 
         let captured = loop_runner.client.captured.lock().await;
         assert_eq!(captured.len(), 1);
-        assert!(matches!(
-            captured[0].system.as_ref(),
-            Some(rust_claude_api::SystemPrompt::Text(text)) if text == "You are concise"
-        ));
+        // System prompt is now converted to StructuredBlocks with cache_control
+        match captured[0].system.as_ref() {
+            Some(rust_claude_api::SystemPrompt::StructuredBlocks(blocks)) => {
+                assert_eq!(blocks.len(), 1);
+                assert_eq!(blocks[0].text, "You are concise");
+                assert!(blocks[0].cache_control.is_some());
+            }
+            other => panic!("expected StructuredBlocks, got: {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -2,17 +2,35 @@ use crossterm::event::KeyEvent;
 use rust_claude_core::compaction::CompactionResult;
 use rust_claude_core::state::TodoItem;
 
+/// Commands emitted by the TUI input layer toward the background worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserCommand {
+    Prompt(String),
+    Compact,
+    SetMode(String),
+    SetModel(String),
+    CancelStream,
+}
+
 /// Events consumed by the TUI application.
 #[derive(Debug)]
 pub enum AppEvent {
     /// Keyboard input from the terminal.
     Key(KeyEvent),
+    /// Bracketed paste input from the terminal.
+    Paste(String),
     /// A chunk of streaming text from the assistant.
     StreamDelta(String),
     /// The assistant finished streaming its response.
     StreamEnd,
+    /// The active stream was cancelled by the user.
+    StreamCancelled,
     /// The model is thinking (extended thinking / reasoning).
     ThinkingStart,
+    /// A chunk of streaming thinking text.
+    ThinkingDelta(String),
+    /// A completed thinking block (used by non-streaming flow).
+    ThinkingComplete(String),
     /// The model began a tool call.
     ToolUseStart {
         name: String,
@@ -30,6 +48,8 @@ pub enum AppEvent {
     UsageUpdate {
         input_tokens: u64,
         output_tokens: u64,
+        cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
     },
     /// Update status bar info.
     StatusUpdate {
@@ -76,6 +96,10 @@ pub enum PermissionResponse {
 pub enum ChatMessage {
     User(String),
     Assistant(String),
+    Thinking {
+        summary: String,
+        content: String,
+    },
     ToolUse {
         name: String,
         input_summary: String,
@@ -94,6 +118,7 @@ impl ChatMessage {
         match self {
             ChatMessage::User(_) => "You: ",
             ChatMessage::Assistant(_) => "Claude: ",
+            ChatMessage::Thinking { .. } => "Thinking: ",
             ChatMessage::ToolUse { .. } => "Tool: ",
             ChatMessage::ToolResult { is_error: true, .. } => "Error: ",
             ChatMessage::ToolResult { .. } => "Result: ",
@@ -107,6 +132,7 @@ impl ChatMessage {
             ChatMessage::User(s)
             | ChatMessage::Assistant(s)
             | ChatMessage::System(s) => s,
+            ChatMessage::Thinking { content, .. } => content,
             ChatMessage::ToolUse { name, input_summary } => {
                 if input_summary.is_empty() {
                     name
@@ -140,6 +166,14 @@ mod tests {
         assert_eq!(ChatMessage::User("hi".into()).prefix(), "You: ");
         assert_eq!(ChatMessage::Assistant("hello".into()).prefix(), "Claude: ");
         assert_eq!(
+            ChatMessage::Thinking {
+                summary: "Thought for ~10 tokens".into(),
+                content: "reasoning".into()
+            }
+            .prefix(),
+            "Thinking: "
+        );
+        assert_eq!(
             ChatMessage::ToolUse {
                 name: "Bash".into(),
                 input_summary: "ls".into()
@@ -171,6 +205,14 @@ mod tests {
     #[test]
     fn test_chat_message_body() {
         assert_eq!(ChatMessage::User("hello".into()).body(), "hello");
+        assert_eq!(
+            ChatMessage::Thinking {
+                summary: "Thought for ~10 tokens".into(),
+                content: "reasoning".into()
+            }
+            .body(),
+            "reasoning"
+        );
         assert_eq!(
             ChatMessage::ToolUse {
                 name: "Bash".into(),

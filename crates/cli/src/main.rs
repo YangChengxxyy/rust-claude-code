@@ -16,7 +16,7 @@ use rust_claude_tools::{
     BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, TodoWriteTool,
     ToolRegistry,
 };
-use rust_claude_tui::{App, TerminalGuard, TuiBridge};
+use rust_claude_tui::{App, TerminalGuard, TuiBridge, UserCommand};
 use tokio::sync::{mpsc, Mutex};
 
 use rust_claude_cli::compaction::CompactionService;
@@ -106,6 +106,14 @@ struct Cli {
     /// Disable streaming
     #[arg(long = "no-stream")]
     no_stream: bool,
+
+    /// Enable extended thinking (default: true for supported models)
+    #[arg(long = "thinking", conflicts_with = "no_thinking")]
+    thinking: bool,
+
+    /// Disable extended thinking
+    #[arg(long = "no-thinking")]
+    no_thinking: bool,
 
     /// Verbose mode
     #[arg(long = "verbose")]
@@ -299,6 +307,12 @@ async fn main() -> Result<()> {
     state.session.system_prompt = resolved.system_prompt.clone();
     state.session.max_tokens = resolved.max_tokens;
     state.session.stream = resolved.stream;
+    // --no-thinking explicitly disables, --thinking explicitly enables, otherwise default (true)
+    if cli.no_thinking {
+        state.session.thinking_enabled = false;
+    } else if cli.thinking {
+        state.session.thinking_enabled = true;
+    }
     state.permission_mode = resolved.permission_mode;
     state.always_allow_rules = resolved.always_allow.clone();
     state.always_deny_rules = resolved.always_deny.clone();
@@ -462,7 +476,7 @@ async fn run_tui(
         .unwrap_or(config.bearer_auth);
 
     let (event_tx, event_rx) = mpsc::channel(128);
-    let (user_tx, mut user_rx) = mpsc::channel::<String>(16);
+    let (user_tx, mut user_rx) = mpsc::channel::<UserCommand>(16);
 
     let bridge = TuiBridge::new(event_tx);
     let worker_bridge = bridge.clone();
@@ -474,190 +488,207 @@ async fn run_tui(
 
     tokio::spawn(async move {
         let compaction_config = CompactionConfig::default();
+        let mut active_query_task: Option<tokio::task::JoinHandle<()>> = None;
 
-        while let Some(prompt) = user_rx.recv().await {
-            if prompt == "[COMPACT_REQUEST]" {
-                let client = match build_client(&config.api_key, base_url.clone(), bearer_auth) {
-                    Ok(client) => client,
-                    Err(error) => {
-                        worker_bridge.send_error(&error.to_string()).await;
-                        continue;
-                    }
-                };
+        while let Some(command) = user_rx.recv().await {
+            match command {
+                UserCommand::Compact => {
+                    let client = match build_client(&config.api_key, base_url.clone(), bearer_auth) {
+                        Ok(client) => client,
+                        Err(error) => {
+                            worker_bridge.send_error(&error.to_string()).await;
+                            continue;
+                        }
+                    };
 
-                worker_bridge.send_compaction_start().await;
-                let service = CompactionService::new(client, compaction_config.clone());
-                match service.force_compact(&worker_state).await {
-                    Ok(result) => {
-                        worker_bridge.send_compaction_complete(result).await;
+                    worker_bridge.send_compaction_start().await;
+                    let service = CompactionService::new(client, compaction_config.clone());
+                    match service.force_compact(&worker_state).await {
+                        Ok(result) => {
+                            worker_bridge.send_compaction_complete(result).await;
+                        }
+                        Err(e) => {
+                            worker_bridge
+                                .send_error(&format!("Compaction failed: {e}"))
+                                .await;
+                        }
                     }
-                    Err(e) => {
+
+                    let state_snapshot = worker_state.lock().await;
+                    let mut session_file = SessionFile::new(
+                        &state_snapshot.session.model,
+                        &state_snapshot.session.model_setting,
+                        &state_snapshot.cwd,
+                    );
+                    session_file.messages = state_snapshot.messages.clone();
+                    drop(state_snapshot);
+                    if let Err(e) = session_file.save() {
                         worker_bridge
-                            .send_error(&format!("Compaction failed: {e}"))
+                            .send_error(&format!("Warning: failed to save session: {e}"))
                             .await;
                     }
                 }
+                UserCommand::SetMode(mode_str) => {
+                    let mode = match mode_str.as_str() {
+                        "default" => PermissionMode::Default,
+                        "accept-edits" => PermissionMode::AcceptEdits,
+                        "bypass" => PermissionMode::BypassPermissions,
+                        "plan" => PermissionMode::Plan,
+                        "dont-ask" => PermissionMode::DontAsk,
+                        _ => {
+                            worker_bridge.send_error("Unknown mode request").await;
+                            continue;
+                        }
+                    };
 
-                let state_snapshot = worker_state.lock().await;
-                let mut session_file = SessionFile::new(
-                    &state_snapshot.session.model,
-                    &state_snapshot.session.model_setting,
-                    &state_snapshot.cwd,
-                );
-                session_file.messages = state_snapshot.messages.clone();
-                drop(state_snapshot);
-                if let Err(e) = session_file.save() {
-                    worker_bridge
-                        .send_error(&format!("Warning: failed to save session: {e}"))
-                        .await;
-                }
-                continue;
-            }
-
-            if let Some(mode_str) = prompt.strip_prefix("[MODE_REQUEST]:") {
-                let mode = match mode_str {
-                    "default" => PermissionMode::Default,
-                    "accept-edits" => PermissionMode::AcceptEdits,
-                    "bypass" => PermissionMode::BypassPermissions,
-                    "plan" => PermissionMode::Plan,
-                    "dont-ask" => PermissionMode::DontAsk,
-                    _ => {
-                        worker_bridge.send_error("Unknown mode request").await;
-                        continue;
-                    }
-                };
-
-                let (runtime_model, model_setting, permission_mode_display) = {
-                    let mut state = worker_state.lock().await;
-                    state.permission_mode = mode;
-                    state.session.model = get_runtime_main_loop_model(
-                        &state.session.model_setting,
-                        state.permission_mode,
-                        state
-                            .most_recent_assistant_usage()
-                            .is_some_and(rust_claude_core::model::usage_exceeds_200k_tokens),
-                    );
-                    (
-                        state.session.model.clone(),
-                        state.session.model_setting.clone(),
-                        format!("{:?}", state.permission_mode),
-                    )
-                };
-
-                worker_bridge
-                    .send_status_update(&runtime_model, &model_setting, &permission_mode_display)
-                    .await;
-                worker_bridge
-                    .send_assistant_message(&format!(
-                        "Permission mode switched to: {mode_str}"
-                    ))
-                    .await;
-                continue;
-            }
-
-            if let Some(model_str) = prompt.strip_prefix("[MODEL_REQUEST]:") {
-                let model_str = model_str.trim();
-                if model_str.is_empty() {
-                    worker_bridge.send_error("Model cannot be empty").await;
-                    continue;
-                }
-
-                let (runtime_model, model_setting, permission_mode_display) = {
-                    let mut state = worker_state.lock().await;
-                    state.session.model_setting = model_str.to_string();
-                    state.session.model = get_runtime_main_loop_model(
-                        &state.session.model_setting,
-                        state.permission_mode,
-                        state
-                            .most_recent_assistant_usage()
-                            .is_some_and(rust_claude_core::model::usage_exceeds_200k_tokens),
-                    );
-                    (
-                        state.session.model.clone(),
-                        state.session.model_setting.clone(),
-                        format!("{:?}", state.permission_mode),
-                    )
-                };
-
-                worker_bridge
-                    .send_status_update(&runtime_model, &model_setting, &permission_mode_display)
-                    .await;
-                worker_bridge
-                    .send_assistant_message(&format!("Model switched to: {model_setting}"))
-                    .await;
-                continue;
-            }
-
-            let client = match build_client(&config.api_key, base_url.clone(), bearer_auth) {
-                Ok(client) => client,
-                Err(error) => {
-                    worker_bridge.send_error(&error.to_string()).await;
-                    continue;
-                }
-            };
-
-            let tools = build_filtered_tools(&allowed_tools, &disallowed_tools);
-            let query_loop = QueryLoop::new(client, tools)
-                .with_bridge(worker_bridge.clone())
-                .with_compaction_config(compaction_config.clone());
-            match query_loop.run(worker_state.clone(), prompt).await {
-                Ok(final_message) => {
-                    let text = final_message
-                        .content
-                        .into_iter()
-                        .filter_map(|block| match block {
-                            ContentBlock::Text { text } => Some(text),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-
-                    if !text.is_empty() {
-                        worker_bridge.send_assistant_message(&text).await;
-                    } else {
-                        worker_bridge.send_assistant_message("(no text content)").await;
-                    }
-
-                    let (usage, runtime_model, model_setting, permission_mode_display) = {
-                        let state = worker_state.lock().await;
+                    let (runtime_model, model_setting, permission_mode_display) = {
+                        let mut state = worker_state.lock().await;
+                        state.permission_mode = mode;
+                        state.session.model = get_runtime_main_loop_model(
+                            &state.session.model_setting,
+                            state.permission_mode,
+                            state
+                                .most_recent_assistant_usage()
+                                .is_some_and(rust_claude_core::model::usage_exceeds_200k_tokens),
+                        );
                         (
-                            state.total_usage.clone(),
-                            get_runtime_main_loop_model(
-                                &state.session.model_setting,
-                                state.permission_mode,
-                                state
-                                    .most_recent_assistant_usage()
-                                    .is_some_and(rust_claude_core::model::usage_exceeds_200k_tokens),
-                            ),
+                            state.session.model.clone(),
                             state.session.model_setting.clone(),
                             format!("{:?}", state.permission_mode),
                         )
                     };
-                    worker_bridge
-                        .send_usage_update(
-                            usage.input_tokens as u64,
-                            usage.output_tokens as u64,
-                        )
-                        .await;
+
                     worker_bridge
                         .send_status_update(&runtime_model, &model_setting, &permission_mode_display)
                         .await;
+                    worker_bridge
+                        .send_assistant_message(&format!("Permission mode switched to: {mode_str}"))
+                        .await;
                 }
-                Err(error) => {
-                    worker_bridge.send_error(&error.to_string()).await;
-                }
-            }
+                UserCommand::SetModel(model_str) => {
+                    if model_str.trim().is_empty() {
+                        worker_bridge.send_error("Model cannot be empty").await;
+                        continue;
+                    }
 
-            let state_snapshot = worker_state.lock().await;
-            let mut session_file = SessionFile::new(
-                &state_snapshot.session.model,
-                &state_snapshot.session.model_setting,
-                &state_snapshot.cwd,
-            );
-            session_file.messages = state_snapshot.messages.clone();
-            drop(state_snapshot);
-            if let Err(e) = session_file.save() {
-                worker_bridge.send_error(&format!("Warning: failed to save session: {e}")).await;
+                    let (runtime_model, model_setting, permission_mode_display) = {
+                        let mut state = worker_state.lock().await;
+                        state.session.model_setting = model_str.trim().to_string();
+                        state.session.model = get_runtime_main_loop_model(
+                            &state.session.model_setting,
+                            state.permission_mode,
+                            state
+                                .most_recent_assistant_usage()
+                                .is_some_and(rust_claude_core::model::usage_exceeds_200k_tokens),
+                        );
+                        (
+                            state.session.model.clone(),
+                            state.session.model_setting.clone(),
+                            format!("{:?}", state.permission_mode),
+                        )
+                    };
+
+                    worker_bridge
+                        .send_status_update(&runtime_model, &model_setting, &permission_mode_display)
+                        .await;
+                    worker_bridge
+                        .send_assistant_message(&format!("Model switched to: {model_setting}"))
+                        .await;
+                }
+                UserCommand::CancelStream => {
+                    if let Some(handle) = active_query_task.take() {
+                        handle.abort();
+                        worker_bridge.send_stream_cancelled().await;
+                    }
+                }
+                UserCommand::Prompt(prompt) => {
+                    let client = match build_client(&config.api_key, base_url.clone(), bearer_auth) {
+                        Ok(client) => client,
+                        Err(error) => {
+                            worker_bridge.send_error(&error.to_string()).await;
+                            continue;
+                        }
+                    };
+
+                    let tools = build_filtered_tools(&allowed_tools, &disallowed_tools);
+                    let query_loop = QueryLoop::new(client, tools)
+                        .with_bridge(worker_bridge.clone())
+                        .with_compaction_config(compaction_config.clone());
+                    let worker_bridge_clone = worker_bridge.clone();
+                    let worker_state_clone = worker_state.clone();
+
+                    let handle = tokio::spawn(async move {
+                        match query_loop.run(worker_state_clone.clone(), prompt).await {
+                            Ok(final_message) => {
+                                let text = final_message
+                                    .content
+                                    .into_iter()
+                                    .filter_map(|block| match block {
+                                        ContentBlock::Text { text } => Some(text),
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+
+                                let (usage, runtime_model, model_setting, permission_mode_display, stream_enabled) = {
+                                    let state = worker_state_clone.lock().await;
+                                    (
+                                        state.total_usage.clone(),
+                                        get_runtime_main_loop_model(
+                                            &state.session.model_setting,
+                                            state.permission_mode,
+                                            state
+                                                .most_recent_assistant_usage()
+                                                .is_some_and(rust_claude_core::model::usage_exceeds_200k_tokens),
+                                        ),
+                                        state.session.model_setting.clone(),
+                                        format!("{:?}", state.permission_mode),
+                                        state.session.stream,
+                                    )
+                                };
+
+                                if !stream_enabled {
+                                    if !text.is_empty() {
+                                        worker_bridge_clone.send_assistant_message(&text).await;
+                                    } else {
+                                        worker_bridge_clone.send_assistant_message("(no text content)").await;
+                                    }
+                                }
+
+                                worker_bridge_clone
+                                    .send_usage_update(
+                                        usage.input_tokens as u64,
+                                        usage.output_tokens as u64,
+                                        usage.cache_read_input_tokens as u64,
+                                        usage.cache_creation_input_tokens as u64,
+                                    )
+                                    .await;
+                                worker_bridge_clone
+                                    .send_status_update(&runtime_model, &model_setting, &permission_mode_display)
+                                    .await;
+                            }
+                            Err(error) => {
+                                worker_bridge_clone.send_error(&error.to_string()).await;
+                            }
+                        }
+
+                        let state_snapshot = worker_state_clone.lock().await;
+                        let mut session_file = SessionFile::new(
+                            &state_snapshot.session.model,
+                            &state_snapshot.session.model_setting,
+                            &state_snapshot.cwd,
+                        );
+                        session_file.messages = state_snapshot.messages.clone();
+                        drop(state_snapshot);
+                        if let Err(e) = session_file.save() {
+                            worker_bridge_clone
+                                .send_error(&format!("Warning: failed to save session: {e}"))
+                                .await;
+                        }
+                    });
+
+                    active_query_task = Some(handle);
+                }
             }
         }
     });
@@ -689,6 +720,8 @@ mod tests {
             disallowed_tools: None,
             max_tokens: None,
             no_stream: false,
+            thinking: false,
+            no_thinking: false,
             verbose: false,
             continue_session: false,
             settings: None,

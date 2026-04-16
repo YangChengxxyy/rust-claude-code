@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::message::{ContentBlock, Message};
+use crate::message::{ContentBlock, Message, Usage};
 
 /// Configuration for conversation compaction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,7 +49,8 @@ fn estimate_content_block_tokens(block: &ContentBlock) -> u32 {
             content,
             ..
         } => tool_use_id.len() + content.len(),
-        ContentBlock::Thinking { thinking } => thinking.len(),
+        ContentBlock::Thinking { thinking, .. } => thinking.len(),
+        ContentBlock::Unknown => 0,
     };
     (char_count as u32) / 4
 }
@@ -74,17 +75,50 @@ pub fn estimate_system_prompt_tokens(system_prompt: &Option<String>) -> u32 {
     }
 }
 
+/// Estimate the current conversation token count using a two-tier approach:
+/// 1. If API usage data is available, use `input_tokens` from the last response
+///    plus chars/4 estimate for any new messages added since.
+/// 2. Fall back to full chars/4 heuristic for the first turn (no API data).
+pub fn estimate_current_tokens(
+    system_prompt: &Option<String>,
+    messages: &[Message],
+    last_api_usage: Option<&Usage>,
+    last_api_message_index: usize,
+) -> u32 {
+    match last_api_usage {
+        Some(usage) if last_api_message_index > 0 => {
+            let base = usage.input_tokens;
+            let new_messages = if last_api_message_index < messages.len() {
+                &messages[last_api_message_index..]
+            } else {
+                &[]
+            };
+            base + estimate_message_tokens(new_messages)
+        }
+        _ => {
+            // First turn fallback: full heuristic
+            estimate_system_prompt_tokens(system_prompt) + estimate_message_tokens(messages)
+        }
+    }
+}
+
 /// Check whether compaction is needed based on the estimated token count.
 pub fn needs_compaction(
     config: &CompactionConfig,
     system_prompt: &Option<String>,
     messages: &[Message],
+    last_api_usage: Option<&Usage>,
+    last_api_message_index: usize,
 ) -> bool {
     if messages.len() <= 4 {
         return false;
     }
-    let total_tokens =
-        estimate_system_prompt_tokens(system_prompt) + estimate_message_tokens(messages);
+    let total_tokens = estimate_current_tokens(
+        system_prompt,
+        messages,
+        last_api_usage,
+        last_api_message_index,
+    );
     let threshold = (config.context_window as f32 * config.threshold_ratio) as u32;
     total_tokens > threshold
 }
@@ -256,7 +290,7 @@ mod tests {
                 )
             })
             .collect();
-        assert!(!needs_compaction(&config, &None, &messages));
+        assert!(!needs_compaction(&config, &None, &messages, None, 0));
     }
 
     #[test]
@@ -278,7 +312,7 @@ mod tests {
             })
             .collect();
         // Total: ~6 * (500+4) = 3024 > 800 (1000 * 0.8)
-        assert!(needs_compaction(&config, &None, &messages));
+        assert!(needs_compaction(&config, &None, &messages, None, 0));
     }
 
     #[test]
@@ -293,7 +327,7 @@ mod tests {
             make_text_message(Role::Assistant, &big_text),
         ];
         // Only 2 messages, should not compact even if above threshold
-        assert!(!needs_compaction(&config, &None, &messages));
+        assert!(!needs_compaction(&config, &None, &messages, None, 0));
     }
 
     // -- partition_messages tests --
@@ -380,5 +414,79 @@ mod tests {
                 assert!(text.starts_with(&format!("msg{}:", messages.len() - 1)));
             }
         }
+    }
+
+    // -- estimate_current_tokens tests --
+
+    #[test]
+    fn test_estimate_current_tokens_no_api_usage() {
+        // First turn: falls back to full chars/4
+        let messages = vec![make_text_message(Role::User, &"a".repeat(4000))];
+        let result = estimate_current_tokens(&None, &messages, None, 0);
+        // 4000/4 + 4 overhead = 1004
+        assert_eq!(result, 1004);
+    }
+
+    #[test]
+    fn test_estimate_current_tokens_with_api_usage_no_new_messages() {
+        let usage = Usage {
+            input_tokens: 15000,
+            output_tokens: 500,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        let messages = vec![
+            make_text_message(Role::User, "hello"),
+            make_text_message(Role::Assistant, "hi"),
+        ];
+        // API was called after 2 messages, no new messages since
+        let result = estimate_current_tokens(&None, &messages, Some(&usage), 2);
+        assert_eq!(result, 15000);
+    }
+
+    #[test]
+    fn test_estimate_current_tokens_with_api_usage_and_new_messages() {
+        let usage = Usage {
+            input_tokens: 15000,
+            output_tokens: 500,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        let messages = vec![
+            make_text_message(Role::User, "hello"),
+            make_text_message(Role::Assistant, "hi"),
+            // New messages after API call:
+            make_text_message(Role::User, &"x".repeat(2000)), // ~500 tokens + 4 overhead
+        ];
+        let result = estimate_current_tokens(&None, &messages, Some(&usage), 2);
+        // 15000 + 504
+        assert_eq!(result, 15504);
+    }
+
+    #[test]
+    fn test_needs_compaction_with_usage_based_counting() {
+        let config = CompactionConfig {
+            context_window: 200_000,
+            threshold_ratio: 0.8,
+            ..Default::default()
+        };
+        let usage = Usage {
+            input_tokens: 155_000,
+            output_tokens: 500,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        // 6 messages, API says 155K tokens, new messages add ~7.5K
+        let text = "a".repeat(10000); // ~2504 tokens per message
+        let messages: Vec<Message> = (0..6)
+            .map(|i| {
+                make_text_message(
+                    if i % 2 == 0 { Role::User } else { Role::Assistant },
+                    &text,
+                )
+            })
+            .collect();
+        // With usage: 155000 + estimate(messages[4..6]) = 155000 + ~5008 = 160008 > 160000 threshold
+        assert!(needs_compaction(&config, &None, &messages, Some(&usage), 4));
     }
 }

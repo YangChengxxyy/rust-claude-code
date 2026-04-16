@@ -36,7 +36,14 @@ pub enum ContentBlock {
         is_error: bool,
     },
     #[serde(rename = "thinking")]
-    Thinking { thinking: String },
+    Thinking {
+        thinking: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+    },
+    /// Catch-all for unknown/future content block types from the API.
+    #[serde(other)]
+    Unknown,
 }
 
 impl ContentBlock {
@@ -71,6 +78,17 @@ impl ContentBlock {
     pub fn thinking(thinking: impl Into<String>) -> Self {
         ContentBlock::Thinking {
             thinking: thinking.into(),
+            signature: None,
+        }
+    }
+
+    pub fn thinking_with_signature(
+        thinking: impl Into<String>,
+        signature: impl Into<String>,
+    ) -> Self {
+        ContentBlock::Thinking {
+            thinking: thinking.into(),
+            signature: Some(signature.into()),
         }
     }
 
@@ -313,5 +331,68 @@ mod tests {
         let parsed: Usage = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.input_tokens, 100);
         assert_eq!(parsed.output_tokens, 50);
+    }
+
+    #[test]
+    fn test_thinking_block_with_signature_roundtrip() {
+        let block = ContentBlock::thinking_with_signature("deep reasoning", "sig_abc123");
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"signature\":\"sig_abc123\""));
+        assert!(json.contains("\"thinking\":\"deep reasoning\""));
+
+        let parsed: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, block);
+        match parsed {
+            ContentBlock::Thinking { thinking, signature } => {
+                assert_eq!(thinking, "deep reasoning");
+                assert_eq!(signature, Some("sig_abc123".to_string()));
+            }
+            _ => panic!("expected Thinking"),
+        }
+    }
+
+    #[test]
+    fn test_thinking_block_without_signature_roundtrip() {
+        let block = ContentBlock::thinking("simple reasoning");
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(!json.contains("signature"));
+
+        let parsed: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, block);
+        match parsed {
+            ContentBlock::Thinking { signature, .. } => {
+                assert_eq!(signature, None);
+            }
+            _ => panic!("expected Thinking"),
+        }
+    }
+
+    #[test]
+    fn test_thinking_block_backward_compat_legacy_json() {
+        // Legacy session file format without signature field
+        let json = r#"{"type":"thinking","thinking":"old reasoning"}"#;
+        let parsed: ContentBlock = serde_json::from_str(json).unwrap();
+        match parsed {
+            ContentBlock::Thinking { thinking, signature } => {
+                assert_eq!(thinking, "old reasoning");
+                assert_eq!(signature, None);
+            }
+            _ => panic!("expected Thinking"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_block_type_deserializes() {
+        let json = r#"{"type":"server_tool_use","id":"srvtool_1","name":"test"}"#;
+        let parsed: ContentBlock = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed, ContentBlock::Unknown);
+    }
+
+    #[test]
+    fn test_unknown_block_does_not_break_known_types() {
+        // Ensure standard types still parse correctly alongside Unknown
+        let text_json = r#"{"type":"text","text":"hello"}"#;
+        let parsed: ContentBlock = serde_json::from_str(text_json).unwrap();
+        assert_eq!(parsed, ContentBlock::text("hello"));
     }
 }

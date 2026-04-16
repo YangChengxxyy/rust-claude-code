@@ -53,4 +53,4 @@
 - [x] 8.1 运行 `cargo test --workspace` 确认所有现有测试和新增测试通过
 - [x] 8.2 运行 `cargo check --workspace` 确认无编译警告
 - [x] 8.3 运行 `cargo clippy --workspace` 确认无 lint 问题（无新增 warning）
-- [ ] 8.4 手动验证：在 TUI 中输入 `/compact` 确认命令可用且显示正确状态消息
+- [x] 8.4 手动验证：在 TUI 中输入 `/compact` 确认命令可用且显示正确状态消息

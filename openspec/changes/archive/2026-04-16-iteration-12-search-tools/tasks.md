@@ -30,4 +30,4 @@
 
 - [x] 5.1 Run `cargo check --workspace` — all crates compile cleanly
 - [x] 5.2 Run `cargo test --workspace` — all existing and new tests pass
-- [ ] 5.3 Manual smoke test: run `cargo run -p rust-claude-cli -- "list all Rust source files in this project"` and verify GlobTool is invoked
+- [x] 5.3 Manual smoke test: run `cargo run -p rust-claude-cli -- "list all Rust source files in this project"` and verify GlobTool is invoked

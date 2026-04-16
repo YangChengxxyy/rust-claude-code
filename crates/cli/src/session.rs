@@ -17,6 +17,9 @@ pub struct SessionFile {
     pub id: String,
     /// Model used in this session.
     pub model: String,
+    /// Original user-specified model setting for this session.
+    #[serde(default)]
+    pub model_setting: String,
     /// Working directory when the session was created.
     pub cwd: String,
     /// When the session was created (ISO 8601).
@@ -29,12 +32,13 @@ pub struct SessionFile {
 
 impl SessionFile {
     /// Create a new session with the given model and working directory.
-    pub fn new(model: &str, cwd: &Path) -> Self {
+    pub fn new(model: &str, model_setting: &str, cwd: &Path) -> Self {
         let now = chrono::Local::now().to_rfc3339();
         let id = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
         SessionFile {
             id,
             model: model.to_string(),
+            model_setting: model_setting.to_string(),
             cwd: cwd.display().to_string(),
             created_at: now.clone(),
             updated_at: now,
@@ -60,8 +64,11 @@ impl SessionFile {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read session file: {}", path.display()))?;
-        let session: SessionFile = serde_json::from_str(&content)
+        let mut session: SessionFile = serde_json::from_str(&content)
             .with_context(|| format!("failed to parse session file: {}", path.display()))?;
+        if session.model_setting.is_empty() {
+            session.model_setting = session.model.clone();
+        }
         Ok(session)
     }
 }
@@ -108,12 +115,13 @@ pub fn load_latest_session() -> Result<Option<SessionFile>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_claude_core::message::{ContentBlock, Message};
+    use rust_claude_core::message::{ContentBlock, Message, Usage};
 
     #[test]
     fn test_session_file_new() {
-        let session = SessionFile::new("claude-test", Path::new("/tmp/test"));
+        let session = SessionFile::new("claude-test", "opusplan", Path::new("/tmp/test"));
         assert_eq!(session.model, "claude-test");
+        assert_eq!(session.model_setting, "opusplan");
         assert_eq!(session.cwd, "/tmp/test");
         assert!(session.messages.is_empty());
         assert!(!session.id.is_empty());
@@ -122,7 +130,7 @@ mod tests {
 
     #[test]
     fn test_session_file_serde_roundtrip() {
-        let mut session = SessionFile::new("claude-test", Path::new("/tmp"));
+        let mut session = SessionFile::new("claude-test", "haiku", Path::new("/tmp"));
         session.messages.push(Message::user("hello"));
         session.messages.push(Message::assistant(vec![
             ContentBlock::text("hi there"),
@@ -132,7 +140,31 @@ mod tests {
         let parsed: SessionFile = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.model, "claude-test");
+        assert_eq!(parsed.model_setting, "haiku");
         assert_eq!(parsed.messages.len(), 2);
+    }
+
+    #[test]
+    fn test_session_file_roundtrip_preserves_assistant_message_usage() {
+        let mut session = SessionFile::new("claude-sonnet-4-6", "opusplan", Path::new("/tmp"));
+        session.messages.push(Message::assistant_with_usage(
+            vec![ContentBlock::text("large assistant turn")],
+            Usage {
+                input_tokens: 150_000,
+                output_tokens: 40_000,
+                cache_creation_input_tokens: 10_001,
+                cache_read_input_tokens: 0,
+            },
+        ));
+
+        let json = serde_json::to_string(&session).unwrap();
+        let parsed: SessionFile = serde_json::from_str(&json).unwrap();
+
+        let usage = parsed.messages[0].usage.as_ref().expect("usage should persist");
+        assert_eq!(usage.input_tokens, 150_000);
+        assert_eq!(usage.output_tokens, 40_000);
+        assert_eq!(usage.cache_creation_input_tokens, 10_001);
+        assert_eq!(usage.cache_read_input_tokens, 0);
     }
 
     #[test]
@@ -142,7 +174,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::fs::create_dir_all(&temp_dir).unwrap();
 
-        let mut session = SessionFile::new("claude-test", Path::new("/tmp"));
+        let mut session = SessionFile::new("claude-test", "best", Path::new("/tmp"));
         session.messages.push(Message::user("test message"));
 
         // Override the session path for testing
@@ -153,10 +185,38 @@ mod tests {
 
         let loaded = SessionFile::load(&path).unwrap();
         assert_eq!(loaded.model, "claude-test");
+        assert_eq!(loaded.model_setting, "best");
         assert_eq!(loaded.messages.len(), 1);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_session_load_backfills_missing_model_setting() {
+        let temp_dir = std::env::temp_dir().join(format!("session-backfill-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let path = temp_dir.join("legacy.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "id": "20260416_120000",
+  "model": "claude-opus-4-6[1m]",
+  "cwd": "/tmp",
+  "created_at": "2026-04-16T12:00:00+08:00",
+  "updated_at": "2026-04-16T12:00:00+08:00",
+  "messages": []
+}"#,
+        )
+        .unwrap();
+
+        let loaded = SessionFile::load(&path).unwrap();
+        assert_eq!(loaded.model_setting, "claude-opus-4-6[1m]");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
 
     #[test]
     fn test_sessions_dir() {

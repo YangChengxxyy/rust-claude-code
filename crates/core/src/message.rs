@@ -87,9 +87,21 @@ impl ContentBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Usage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u32,
+    #[serde(default)]
+    pub cache_read_input_tokens: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 impl Message {
@@ -97,6 +109,7 @@ impl Message {
         Message {
             role: Role::User,
             content: vec![ContentBlock::text(text)],
+            usage: None,
         }
     }
 
@@ -104,6 +117,15 @@ impl Message {
         Message {
             role: Role::Assistant,
             content,
+            usage: None,
+        }
+    }
+
+    pub fn assistant_with_usage(content: Vec<ContentBlock>, usage: Usage) -> Self {
+        Message {
+            role: Role::Assistant,
+            content,
+            usage: Some(usage),
         }
     }
 
@@ -111,6 +133,7 @@ impl Message {
         Message {
             role: Role::User,
             content,
+            usage: None,
         }
     }
 
@@ -124,6 +147,7 @@ impl Message {
         Message {
             role: Role::User,
             content,
+            usage: None,
         }
     }
 
@@ -137,16 +161,6 @@ impl Message {
             .filter_map(|b| b.as_tool_use())
             .collect()
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Usage {
-    pub input_tokens: u32,
-    pub output_tokens: u32,
-    #[serde(default)]
-    pub cache_creation_input_tokens: u32,
-    #[serde(default)]
-    pub cache_read_input_tokens: u32,
 }
 
 #[cfg(test)]
@@ -224,9 +238,11 @@ mod tests {
         let msg = Message::user("Hello, Claude!");
         assert_eq!(msg.role, Role::User);
         assert_eq!(msg.content.len(), 1);
+        assert!(msg.usage.is_none());
 
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"role\":\"user\""));
+        assert!(!json.contains("\"usage\""));
     }
 
     #[test]
@@ -238,6 +254,19 @@ mod tests {
         assert_eq!(msg.role, Role::Assistant);
         assert!(msg.has_tool_use());
         assert_eq!(msg.tool_uses().len(), 1);
+        assert!(msg.usage.is_none());
+    }
+
+    #[test]
+    fn test_message_assistant_with_usage() {
+        let usage = Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: 10,
+            cache_read_input_tokens: 5,
+        };
+        let msg = Message::assistant_with_usage(vec![ContentBlock::text("done")], usage.clone());
+        assert_eq!(msg.usage, Some(usage));
     }
 
     #[test]

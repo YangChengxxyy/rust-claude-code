@@ -1,4 +1,5 @@
 use crossterm::event::KeyEvent;
+use rust_claude_core::compaction::CompactionResult;
 use rust_claude_core::state::TodoItem;
 
 /// Events consumed by the TUI application.
@@ -30,6 +31,12 @@ pub enum AppEvent {
         input_tokens: u64,
         output_tokens: u64,
     },
+    /// Update status bar info.
+    StatusUpdate {
+        model: String,
+        model_setting: String,
+        permission_mode: String,
+    },
     /// An error to display to the user.
     Error(String),
     /// Terminal resize event.
@@ -43,6 +50,12 @@ pub enum AppEvent {
     },
     /// Todo list has been updated.
     TodoUpdate(Vec<TodoItem>),
+    /// Conversation compaction has started.
+    CompactionStart,
+    /// Conversation compaction completed successfully.
+    CompactionComplete {
+        result: CompactionResult,
+    },
 }
 
 /// The user's response to a permission confirmation dialog.

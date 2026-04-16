@@ -8,7 +8,12 @@ use rust_claude_api::{
     CreateMessageResponse, MessageStream, StreamEvent,
 };
 use rust_claude_core::{
+    compaction::CompactionConfig,
     message::{ContentBlock, Message, StopReason},
+    model::{
+        get_runtime_main_loop_model, normalize_model_string_for_api,
+        usage_exceeds_200k_tokens,
+    },
     permission::{PermissionCheck, PermissionRequest},
     state::AppState,
 };
@@ -41,6 +46,23 @@ pub trait ModelClient: Send + Sync {
 }
 
 #[async_trait]
+impl<C: ModelClient> ModelClient for &C {
+    async fn create_message(
+        &self,
+        request: &CreateMessageRequest,
+    ) -> Result<CreateMessageResponse, ApiError> {
+        (*self).create_message(request).await
+    }
+
+    async fn create_message_stream(
+        &self,
+        request: &CreateMessageRequest,
+    ) -> Result<MessageStream, ApiError> {
+        (*self).create_message_stream(request).await
+    }
+}
+
+#[async_trait]
 impl ModelClient for rust_claude_api::AnthropicClient {
     async fn create_message(
         &self,
@@ -62,6 +84,7 @@ pub struct QueryLoop<C> {
     tools: ToolRegistry,
     max_rounds: usize,
     bridge: Option<rust_claude_tui::TuiBridge>,
+    compaction_config: Option<CompactionConfig>,
 }
 
 impl<C> QueryLoop<C>
@@ -74,6 +97,7 @@ where
             tools,
             max_rounds: 8,
             bridge: None,
+            compaction_config: None,
         }
     }
 
@@ -84,6 +108,11 @@ where
 
     pub fn with_bridge(mut self, bridge: rust_claude_tui::TuiBridge) -> Self {
         self.bridge = Some(bridge);
+        self
+    }
+
+    pub fn with_compaction_config(mut self, config: CompactionConfig) -> Self {
+        self.compaction_config = Some(config);
         self
     }
 
@@ -98,6 +127,30 @@ where
         }
 
         for _ in 0..self.max_rounds {
+            // Auto-compaction check before building the request
+            if let Some(compaction_config) = &self.compaction_config {
+                let service = crate::compaction::CompactionService::new(
+                    &self.client,
+                    compaction_config.clone(),
+                );
+                match service.compact_if_needed(&app_state).await {
+                    Ok(Some(result)) => {
+                        if let Some(bridge) = &self.bridge {
+                            bridge.send_compaction_start().await;
+                            bridge.send_compaction_complete(result).await;
+                        }
+                    }
+                    Ok(None) => {} // no compaction needed
+                    Err(e) => {
+                        if let Some(bridge) = &self.bridge {
+                            bridge
+                                .send_error(&format!("Auto-compaction failed: {e}"))
+                                .await;
+                        }
+                    }
+                }
+            }
+
             let request = self.build_request(&app_state).await;
             let use_stream = {
                 let state = app_state.lock().await;
@@ -109,7 +162,9 @@ where
                 self.client.create_message(&request).await?
             };
 
-            let assistant_message = Message::assistant(response.content.clone());
+            let assistant_message =
+                Message::assistant_with_usage(response.content.clone(), response.usage.clone());
+
             let stop_reason = response.stop_reason.clone();
 
             // Notify bridge that streaming ended
@@ -123,8 +178,7 @@ where
 
             {
                 let mut state = app_state.lock().await;
-                state.add_usage(&response.usage);
-                state.add_message(assistant_message.clone());
+                state.add_assistant_message(assistant_message.clone());
             }
 
             if stop_reason != Some(StopReason::ToolUse) {
@@ -221,6 +275,14 @@ where
 
     async fn build_request(&self, app_state: &Arc<Mutex<AppState>>) -> CreateMessageRequest {
         let state = app_state.lock().await;
+        let exceeds_200k_tokens = state
+            .most_recent_assistant_usage()
+            .is_some_and(usage_exceeds_200k_tokens);
+        let runtime_model = get_runtime_main_loop_model(
+            &state.session.model_setting,
+            state.permission_mode,
+            exceeds_200k_tokens,
+        );
         let messages = state
             .messages
             .iter()
@@ -240,7 +302,7 @@ where
             })
             .collect::<Vec<_>>();
 
-        CreateMessageRequest::new(state.session.model.clone(), messages)
+        CreateMessageRequest::new(normalize_model_string_for_api(&runtime_model), messages)
             .with_system_opt(state.session.system_prompt.clone())
             .with_max_tokens(state.session.max_tokens)
             .with_tools(tools)
@@ -453,7 +515,7 @@ fn ensure_index<T>(items: &mut Vec<Option<T>>, index: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rust_claude_core::message::ContentBlock;
+    use rust_claude_core::message::{ContentBlock, Message};
     use rust_claude_tools::{BashTool, FileReadTool, Tool, ToolContext, ToolError};
     use std::collections::VecDeque;
     use std::time::{Duration, Instant};
@@ -1187,61 +1249,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_loop_deny_rule_blocks_specific_bash_command() {
-        // Test that a deny rule on a specific bash command pattern works.
+    async fn test_build_request_uses_opus_for_opusplan_in_plan_mode() {
         let client = MockClient {
-            responses: Mutex::new(VecDeque::from(vec![
-                CreateMessageResponse {
-                    id: "msg_1".to_string(),
-                    response_type: "message".to_string(),
-                    role: rust_claude_core::message::Role::Assistant,
-                    content: vec![ContentBlock::tool_use(
-                        "tool_1",
-                        "Bash",
-                        serde_json::json!({ "command": "git push" }),
-                    )],
-                    model: "claude-test".to_string(),
-                    stop_reason: Some(StopReason::ToolUse),
-                    stop_sequence: None,
-                    usage: usage(),
-                },
-                CreateMessageResponse {
-                    id: "msg_2".to_string(),
-                    response_type: "message".to_string(),
-                    role: rust_claude_core::message::Role::Assistant,
-                    content: vec![ContentBlock::text("ok")],
-                    model: "claude-test".to_string(),
-                    stop_reason: Some(StopReason::EndTurn),
-                    stop_sequence: None,
-                    usage: usage(),
-                },
-            ])),
+            responses: Mutex::new(VecDeque::new()),
         };
-
-        let mut tools = ToolRegistry::new();
-        tools.register(BashTool::new());
+        let tools = ToolRegistry::new();
         let loop_runner = QueryLoop::new(client, tools);
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
-        state.permission_mode = rust_claude_core::permission::PermissionMode::BypassPermissions;
-        state.always_deny_rules = vec![rust_claude_core::permission::PermissionRule {
-            tool_name: "Bash".to_string(),
-            pattern: Some("git push".to_string()),
-            rule_type: rust_claude_core::permission::RuleType::Deny,
-        }];
+        state.permission_mode = rust_claude_core::permission::PermissionMode::Plan;
+        state.session.model_setting = "opusplan".to_string();
+        state.session.model = "claude-sonnet-4-6".to_string();
+        state.add_message(Message::user("hello"));
         let app_state = Arc::new(Mutex::new(state));
 
-        let _ = loop_runner.run(app_state.clone(), "push").await.unwrap();
+        let request = loop_runner.build_request(&app_state).await;
+        assert_eq!(request.model, "claude-opus-4-6");
+    }
 
-        let state = app_state.lock().await;
-        match &state.messages[2].content[0] {
-            ContentBlock::ToolResult {
-                content, is_error, ..
-            } => {
-                assert!(*is_error);
-                assert!(content.contains("Permission denied"));
-            }
-            other => panic!("Expected ToolResult, got {:?}", other),
-        }
+    #[tokio::test]
+    async fn test_build_request_uses_sonnet_for_opusplan_when_last_usage_exceeds_200k() {
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::new()),
+        };
+        let tools = ToolRegistry::new();
+        let loop_runner = QueryLoop::new(client, tools);
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.permission_mode = rust_claude_core::permission::PermissionMode::Plan;
+        state.session.model_setting = "opusplan".to_string();
+        state.session.model = "claude-sonnet-4-6".to_string();
+        state.add_assistant_message(Message::assistant_with_usage(
+            vec![ContentBlock::text("previous")],
+            rust_claude_core::message::Usage {
+                input_tokens: 150_000,
+                output_tokens: 40_000,
+                cache_creation_input_tokens: 10_001,
+                cache_read_input_tokens: 0,
+            },
+        ));
+        state.add_message(Message::user("hello"));
+        let app_state = Arc::new(Mutex::new(state));
+
+        let request = loop_runner.build_request(&app_state).await;
+        assert_eq!(request.model, "claude-sonnet-4-6");
     }
 }

@@ -7,6 +7,7 @@ use rust_claude_core::{
     claude_md,
     config::{Config, ConfigError},
     message::ContentBlock,
+    model::get_runtime_main_loop_model,
     permission::PermissionMode,
     settings::ClaudeSettings,
     state::AppState,
@@ -18,9 +19,11 @@ use rust_claude_tools::{
 use rust_claude_tui::{App, TerminalGuard, TuiBridge};
 use tokio::sync::{mpsc, Mutex};
 
+use rust_claude_cli::compaction::CompactionService;
 use rust_claude_cli::query_loop::QueryLoop;
 use rust_claude_cli::session::{self, SessionFile};
 use rust_claude_cli::system_prompt;
+use rust_claude_core::compaction::CompactionConfig;
 
 // ---------------------------------------------------------------------------
 // CLI argument definitions
@@ -124,6 +127,7 @@ struct Cli {
 struct ResolvedConfig {
     api_key: String,
     model: String,
+    model_setting: String,
     base_url: Option<String>,
     bearer_auth: bool,
     stream: bool,
@@ -163,7 +167,6 @@ fn resolve_config(cli: &Cli, config: Config, settings: &ClaudeSettings) -> Resul
         cli.system_prompt.clone().or(config.system_prompt)
     };
 
-    // Append system prompt
     let append_prompt = if let Some(ref path) = cli.append_system_prompt_file {
         Some(std::fs::read_to_string(path).map_err(|e| {
             anyhow!("failed to read --append-system-prompt-file '{}': {e}", path)
@@ -178,55 +181,46 @@ fn resolve_config(cli: &Cli, config: Config, settings: &ClaudeSettings) -> Resul
         (None, None) => None,
     };
 
-    // --- Model: RUST_CLAUDE_MODEL_OVERRIDE > --model > ANTHROPIC_MODEL > settings.model > config > default ---
-    let model = std::env::var("RUST_CLAUDE_MODEL_OVERRIDE")
-        .ok()
-        .or_else(|| cli.model.clone())
-        .or_else(|| std::env::var("ANTHROPIC_MODEL").ok())
-        .or_else(|| settings.model.clone())
-        .unwrap_or(config.model);
-
-    // --- Base URL: RUST_CLAUDE_BASE_URL > ANTHROPIC_BASE_URL > config ---
-    let base_url = std::env::var("RUST_CLAUDE_BASE_URL")
-        .ok()
-        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
-        .or(config.base_url);
-
-    // --- Bearer auth: RUST_CLAUDE_BEARER_AUTH > config ---
-    let bearer_auth = std::env::var("RUST_CLAUDE_BEARER_AUTH")
-        .ok()
-        .and_then(|v| parse_bool_env(&v))
-        .unwrap_or(config.bearer_auth);
-
-    // --- Stream: RUST_CLAUDE_STREAM > --no-stream > config > default(true) ---
-    let stream = std::env::var("RUST_CLAUDE_STREAM")
-        .ok()
-        .and_then(|v| parse_bool_env(&v))
-        .unwrap_or_else(|| if cli.no_stream { false } else { config.stream });
-
-    // --- Max tokens: --max-tokens > config > default(16384) ---
     let max_tokens = cli.max_tokens.unwrap_or(config.max_tokens);
 
-    // --- Permission mode: --mode > config > Default ---
     let permission_mode = cli
         .mode
         .as_ref()
         .map(|m| m.0.clone())
         .unwrap_or(config.permission_mode);
 
-    // --- Print mode: true when prompt text is provided or -p/--print flag is set ---
+    let model_setting = std::env::var("RUST_CLAUDE_MODEL_OVERRIDE")
+        .ok()
+        .or_else(|| cli.model.clone())
+        .or_else(|| std::env::var("ANTHROPIC_MODEL").ok())
+        .or_else(|| settings.model.clone())
+        .unwrap_or(config.model);
+    let model = get_runtime_main_loop_model(&model_setting, permission_mode, false);
+
+    let base_url = std::env::var("RUST_CLAUDE_BASE_URL")
+        .ok()
+        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
+        .or(config.base_url);
+
+    let bearer_auth = std::env::var("RUST_CLAUDE_BEARER_AUTH")
+        .ok()
+        .and_then(|v| parse_bool_env(&v))
+        .unwrap_or(config.bearer_auth);
+
+    let stream = std::env::var("RUST_CLAUDE_STREAM")
+        .ok()
+        .and_then(|v| parse_bool_env(&v))
+        .unwrap_or_else(|| if cli.no_stream { false } else { config.stream });
+
     let print_mode = cli.print || !cli.prompt.is_empty();
-
-    // --- Output format ---
     let output_json = cli.output_format.as_deref() == Some("json");
-
-    // --- Tool filters ---
     let allowed_tools = cli.allowed_tools.clone().unwrap_or_default();
     let disallowed_tools = cli.disallowed_tools.clone().unwrap_or_default();
 
     Ok(ResolvedConfig {
         api_key: config.api_key,
         model,
+        model_setting,
         base_url,
         bearer_auth,
         stream,
@@ -244,10 +238,6 @@ fn resolve_config(cli: &Cli, config: Config, settings: &ClaudeSettings) -> Resul
     })
 }
 
-// ---------------------------------------------------------------------------
-// Main
-// ---------------------------------------------------------------------------
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -255,24 +245,18 @@ async fn main() -> Result<()> {
 
     println!("rust-claude-code: Rust implementation of Claude Code");
 
-    // 1. Load Claude Code settings.json env (before Config so ANTHROPIC_* can be used)
     let settings = match &cli.settings {
         Some(path) => ClaudeSettings::load_from(std::path::Path::new(path))?,
         None => ClaudeSettings::load().unwrap_or_default(),
     };
     settings.apply_env();
 
-    // 2. Load project config (try apiKeyHelper if no credential found)
     let config = match Config::load() {
         Ok(config) => config,
         Err(ConfigError::MissingApiKey) => {
-            // Try apiKeyHelper from settings.json before giving up
             if let Some(ref helper) = settings.api_key_helper {
                 match run_api_key_helper(helper) {
-                    Ok(credential) => {
-                        // apiKeyHelper output is used as Bearer token (same as Claude Code)
-                        Config::with_credential(credential, true)
-                    }
+                    Ok(credential) => Config::with_credential(credential, true),
                     Err(e) => {
                         eprintln!("apiKeyHelper failed: {e}");
                         return Err(anyhow!(
@@ -289,12 +273,12 @@ async fn main() -> Result<()> {
         Err(error) => return Err(error.into()),
     };
 
-    // 3. Resolve full configuration through priority chain
     let resolved = resolve_config(&cli, config, &settings)?;
 
     if resolved.verbose {
         println!("cwd: {}", cwd.display());
         println!("model: {}", resolved.model);
+        println!("model_setting: {}", resolved.model_setting);
         println!("max_tokens: {}", resolved.max_tokens);
         println!("stream: {}", resolved.stream);
         println!("permission_mode: {:?}", resolved.permission_mode);
@@ -305,31 +289,32 @@ async fn main() -> Result<()> {
             println!("allowed_tools: {:?}", resolved.allowed_tools);
         }
         println!("disallowed_tools: {:?}", resolved.disallowed_tools);
-        println!(
-            "always_allow_rules: {}",
-            resolved.always_allow.len()
-        );
-        println!(
-            "always_deny_rules: {}",
-            resolved.always_deny.len()
-        );
+        println!("always_allow_rules: {}", resolved.always_allow.len());
+        println!("always_deny_rules: {}", resolved.always_deny.len());
     }
 
-    // 4. Build AppState
     let mut state = AppState::new(cwd.clone());
     state.session.model = resolved.model.clone();
+    state.session.model_setting = resolved.model_setting.clone();
     state.session.system_prompt = resolved.system_prompt.clone();
     state.session.max_tokens = resolved.max_tokens;
     state.session.stream = resolved.stream;
-    state.permission_mode = resolved.permission_mode.clone();
+    state.permission_mode = resolved.permission_mode;
     state.always_allow_rules = resolved.always_allow.clone();
     state.always_deny_rules = resolved.always_deny.clone();
 
-    // Load previous session if --continue
     if cli.continue_session {
         match session::load_latest_session() {
             Ok(Some(prev)) => {
                 state.messages = prev.messages;
+                if !prev.model_setting.is_empty() {
+                    state.session.model_setting = prev.model_setting;
+                }
+                state.session.model = get_runtime_main_loop_model(
+                    &state.session.model_setting,
+                    state.permission_mode,
+                    false,
+                );
                 println!("Continuing session {} ({} messages)", prev.id, state.messages.len());
             }
             Ok(None) => {
@@ -343,7 +328,6 @@ async fn main() -> Result<()> {
 
     let app_state = Arc::new(Mutex::new(state));
 
-    // 5. Discover CLAUDE.md files
     let claude_md_files = claude_md::discover_claude_md(&cwd);
     if resolved.verbose && !claude_md_files.is_empty() {
         println!("Discovered {} CLAUDE.md file(s):", claude_md_files.len());
@@ -352,22 +336,23 @@ async fn main() -> Result<()> {
         }
     }
 
-    // 6. Compose system prompt if none explicitly provided
     if resolved.system_prompt.is_none() {
-        let tools_for_prompt = build_filtered_tools(&resolved.allowed_tools, &resolved.disallowed_tools);
-        let composed = system_prompt::build_system_prompt(&cwd, &tools_for_prompt, &claude_md_files, None);
+        let tools_for_prompt =
+            build_filtered_tools(&resolved.allowed_tools, &resolved.disallowed_tools);
+        let composed =
+            system_prompt::build_system_prompt(&cwd, &tools_for_prompt, &claude_md_files, None);
         let mut state = app_state.lock().await;
         state.session.system_prompt = Some(composed);
     }
 
-    // 7. Run
     if resolved.print_mode {
         let prompt = cli.prompt.join(" ");
         let client =
             build_client(&resolved.api_key, resolved.base_url.clone(), resolved.bearer_auth)?;
         let mut tools = build_tools();
         tools.apply_tool_filters(&resolved.allowed_tools, &resolved.disallowed_tools);
-        let mut query_loop = QueryLoop::new(client, tools);
+        let mut query_loop =
+            QueryLoop::new(client, tools).with_compaction_config(CompactionConfig::default());
         if let Some(max_turns) = resolved.max_turns {
             query_loop = query_loop.with_max_rounds(max_turns);
         }
@@ -391,11 +376,6 @@ async fn main() -> Result<()> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Run an apiKeyHelper command and return its stdout as the credential.
 fn run_api_key_helper(command: &str) -> Result<String> {
     let output = std::process::Command::new("sh")
         .arg("-c")
@@ -453,24 +433,24 @@ fn build_filtered_tools(allowed: &[String], disallowed: &[String]) -> ToolRegist
     tools
 }
 
-// ---------------------------------------------------------------------------
-// TUI (interactive) mode
-// ---------------------------------------------------------------------------
-
 async fn run_tui(
     app_state: Arc<Mutex<AppState>>,
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
 ) -> Result<()> {
-    let (model, permission_mode) = {
+    let (model, model_setting, permission_mode) = {
         let state = app_state.lock().await;
         (
-            state.session.model.clone(),
+            get_runtime_main_loop_model(
+                &state.session.model_setting,
+                state.permission_mode,
+                false,
+            ),
+            state.session.model_setting.clone(),
             format!("{:?}", state.permission_mode),
         )
     };
 
-    // Read client config from current env / config
     let config = Config::load().map_err(|e| anyhow!("failed to load config for TUI: {e}"))?;
     let base_url = std::env::var("RUST_CLAUDE_BASE_URL")
         .ok()
@@ -488,8 +468,126 @@ async fn run_tui(
     let worker_bridge = bridge.clone();
     let worker_state = app_state.clone();
 
+    worker_bridge
+        .send_status_update(&model, &model_setting, &permission_mode)
+        .await;
+
     tokio::spawn(async move {
+        let compaction_config = CompactionConfig::default();
+
         while let Some(prompt) = user_rx.recv().await {
+            if prompt == "[COMPACT_REQUEST]" {
+                let client = match build_client(&config.api_key, base_url.clone(), bearer_auth) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        worker_bridge.send_error(&error.to_string()).await;
+                        continue;
+                    }
+                };
+
+                worker_bridge.send_compaction_start().await;
+                let service = CompactionService::new(client, compaction_config.clone());
+                match service.force_compact(&worker_state).await {
+                    Ok(result) => {
+                        worker_bridge.send_compaction_complete(result).await;
+                    }
+                    Err(e) => {
+                        worker_bridge
+                            .send_error(&format!("Compaction failed: {e}"))
+                            .await;
+                    }
+                }
+
+                let state_snapshot = worker_state.lock().await;
+                let mut session_file = SessionFile::new(
+                    &state_snapshot.session.model,
+                    &state_snapshot.session.model_setting,
+                    &state_snapshot.cwd,
+                );
+                session_file.messages = state_snapshot.messages.clone();
+                drop(state_snapshot);
+                if let Err(e) = session_file.save() {
+                    worker_bridge
+                        .send_error(&format!("Warning: failed to save session: {e}"))
+                        .await;
+                }
+                continue;
+            }
+
+            if let Some(mode_str) = prompt.strip_prefix("[MODE_REQUEST]:") {
+                let mode = match mode_str {
+                    "default" => PermissionMode::Default,
+                    "accept-edits" => PermissionMode::AcceptEdits,
+                    "bypass" => PermissionMode::BypassPermissions,
+                    "plan" => PermissionMode::Plan,
+                    "dont-ask" => PermissionMode::DontAsk,
+                    _ => {
+                        worker_bridge.send_error("Unknown mode request").await;
+                        continue;
+                    }
+                };
+
+                let (runtime_model, model_setting, permission_mode_display) = {
+                    let mut state = worker_state.lock().await;
+                    state.permission_mode = mode;
+                    state.session.model = get_runtime_main_loop_model(
+                        &state.session.model_setting,
+                        state.permission_mode,
+                        state
+                            .most_recent_assistant_usage()
+                            .is_some_and(rust_claude_core::model::usage_exceeds_200k_tokens),
+                    );
+                    (
+                        state.session.model.clone(),
+                        state.session.model_setting.clone(),
+                        format!("{:?}", state.permission_mode),
+                    )
+                };
+
+                worker_bridge
+                    .send_status_update(&runtime_model, &model_setting, &permission_mode_display)
+                    .await;
+                worker_bridge
+                    .send_assistant_message(&format!(
+                        "Permission mode switched to: {mode_str}"
+                    ))
+                    .await;
+                continue;
+            }
+
+            if let Some(model_str) = prompt.strip_prefix("[MODEL_REQUEST]:") {
+                let model_str = model_str.trim();
+                if model_str.is_empty() {
+                    worker_bridge.send_error("Model cannot be empty").await;
+                    continue;
+                }
+
+                let (runtime_model, model_setting, permission_mode_display) = {
+                    let mut state = worker_state.lock().await;
+                    state.session.model_setting = model_str.to_string();
+                    state.session.model = get_runtime_main_loop_model(
+                        &state.session.model_setting,
+                        state.permission_mode,
+                        state
+                            .most_recent_assistant_usage()
+                            .is_some_and(rust_claude_core::model::usage_exceeds_200k_tokens),
+                    );
+                    (
+                        state.session.model.clone(),
+                        state.session.model_setting.clone(),
+                        format!("{:?}", state.permission_mode),
+                    )
+                };
+
+                worker_bridge
+                    .send_status_update(&runtime_model, &model_setting, &permission_mode_display)
+                    .await;
+                worker_bridge
+                    .send_assistant_message(&format!("Model switched to: {model_setting}"))
+                    .await;
+                continue;
+            }
+
             let client = match build_client(&config.api_key, base_url.clone(), bearer_auth) {
                 Ok(client) => client,
                 Err(error) => {
@@ -499,7 +597,9 @@ async fn run_tui(
             };
 
             let tools = build_filtered_tools(&allowed_tools, &disallowed_tools);
-            let query_loop = QueryLoop::new(client, tools).with_bridge(worker_bridge.clone());
+            let query_loop = QueryLoop::new(client, tools)
+                .with_bridge(worker_bridge.clone())
+                .with_compaction_config(compaction_config.clone());
             match query_loop.run(worker_state.clone(), prompt).await {
                 Ok(final_message) => {
                     let text = final_message
@@ -518,9 +618,20 @@ async fn run_tui(
                         worker_bridge.send_assistant_message("(no text content)").await;
                     }
 
-                    let usage = {
+                    let (usage, runtime_model, model_setting, permission_mode_display) = {
                         let state = worker_state.lock().await;
-                        state.total_usage.clone()
+                        (
+                            state.total_usage.clone(),
+                            get_runtime_main_loop_model(
+                                &state.session.model_setting,
+                                state.permission_mode,
+                                state
+                                    .most_recent_assistant_usage()
+                                    .is_some_and(rust_claude_core::model::usage_exceeds_200k_tokens),
+                            ),
+                            state.session.model_setting.clone(),
+                            format!("{:?}", state.permission_mode),
+                        )
                     };
                     worker_bridge
                         .send_usage_update(
@@ -528,16 +639,21 @@ async fn run_tui(
                             usage.output_tokens as u64,
                         )
                         .await;
+                    worker_bridge
+                        .send_status_update(&runtime_model, &model_setting, &permission_mode_display)
+                        .await;
                 }
                 Err(error) => {
                     worker_bridge.send_error(&error.to_string()).await;
                 }
             }
 
-            // Save session after each query round
             let state_snapshot = worker_state.lock().await;
-            let mut session_file =
-                SessionFile::new(&state_snapshot.session.model, &state_snapshot.cwd);
+            let mut session_file = SessionFile::new(
+                &state_snapshot.session.model,
+                &state_snapshot.session.model_setting,
+                &state_snapshot.cwd,
+            );
             session_file.messages = state_snapshot.messages.clone();
             drop(state_snapshot);
             if let Err(e) = session_file.save() {
@@ -547,7 +663,68 @@ async fn run_tui(
     });
 
     let mut terminal_guard = TerminalGuard::new()?;
-    let mut app = App::new(model, permission_mode);
+    let mut app = App::new(model, model_setting, permission_mode);
     app.run(terminal_guard.terminal_mut(), event_rx, user_tx).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_config_parses_model_aliases_before_storing_session_model() {
+        let cli = Cli {
+            prompt: vec![],
+            mode: None,
+            model: Some("opus[1m]".to_string()),
+            print: false,
+            output_format: None,
+            max_turns: None,
+            system_prompt: None,
+            system_prompt_file: None,
+            append_system_prompt: None,
+            append_system_prompt_file: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_tokens: None,
+            no_stream: false,
+            verbose: false,
+            continue_session: false,
+            settings: None,
+        };
+        let config = Config::with_credential("test-key".to_string(), false);
+        let settings = ClaudeSettings::default();
+
+        let resolved = resolve_config(&cli, config, &settings).unwrap();
+        assert_eq!(resolved.model_setting, "opus[1m]");
+        assert_eq!(resolved.model, "claude-opus-4-6[1m]");
+    }
+
+    #[test]
+    fn restored_assistant_message_usage_can_drive_opusplan_fallback() {
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.permission_mode = PermissionMode::Plan;
+        state.session.model_setting = "opusplan".to_string();
+        state.add_assistant_message(rust_claude_core::message::Message::assistant_with_usage(
+            vec![ContentBlock::text("previous")],
+            rust_claude_core::message::Usage {
+                input_tokens: 150_000,
+                output_tokens: 40_000,
+                cache_creation_input_tokens: 10_001,
+                cache_read_input_tokens: 0,
+            },
+        ));
+
+        let runtime_model = get_runtime_main_loop_model(
+            &state.session.model_setting,
+            state.permission_mode,
+            state
+                .most_recent_assistant_usage()
+                .is_some_and(rust_claude_core::model::usage_exceeds_200k_tokens),
+        );
+
+        assert_eq!(runtime_model, "claude-sonnet-4-6");
+    }
+}
+

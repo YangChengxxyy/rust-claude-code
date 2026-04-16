@@ -1,3 +1,4 @@
+use rust_claude_core::compaction::CompactionResult;
 use rust_claude_core::state::TodoItem;
 use tokio::sync::{mpsc, oneshot};
 
@@ -64,6 +65,22 @@ impl TuiBridge {
             .await;
     }
 
+    pub async fn send_status_update(
+        &self,
+        model: &str,
+        model_setting: &str,
+        permission_mode: &str,
+    ) {
+        let _ = self
+            .event_tx
+            .send(AppEvent::StatusUpdate {
+                model: model.to_string(),
+                model_setting: model_setting.to_string(),
+                permission_mode: permission_mode.to_string(),
+            })
+            .await;
+    }
+
     pub async fn send_error(&self, message: &str) {
         let _ = self
             .event_tx
@@ -98,6 +115,19 @@ impl TuiBridge {
     /// Notify the TUI that the todo list has been updated.
     pub async fn send_todo_update(&self, todos: Vec<TodoItem>) {
         let _ = self.event_tx.send(AppEvent::TodoUpdate(todos)).await;
+    }
+
+    /// Notify the TUI that compaction has started.
+    pub async fn send_compaction_start(&self) {
+        let _ = self.event_tx.send(AppEvent::CompactionStart).await;
+    }
+
+    /// Notify the TUI that compaction has completed.
+    pub async fn send_compaction_complete(&self, result: CompactionResult) {
+        let _ = self
+            .event_tx
+            .send(AppEvent::CompactionComplete { result })
+            .await;
     }
 }
 

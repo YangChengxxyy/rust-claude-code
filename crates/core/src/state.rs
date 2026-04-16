@@ -30,6 +30,7 @@ pub enum TodoPriority {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSettings {
     pub model: String,
+    pub model_setting: String,
     pub system_prompt: Option<String>,
     pub max_tokens: u32,
     pub stream: bool,
@@ -57,6 +58,7 @@ impl AppState {
             always_deny_rules: Vec::new(),
             session: SessionSettings {
                 model: "claude-sonnet-4-20250514".to_string(),
+                model_setting: "claude-sonnet-4-20250514".to_string(),
                 system_prompt: None,
                 max_tokens: 16384,
                 stream: true,
@@ -78,6 +80,7 @@ impl AppState {
             always_deny_rules: config.always_deny.clone(),
             session: SessionSettings {
                 model: config.model.clone(),
+                model_setting: config.model.clone(),
                 system_prompt: config.system_prompt.clone(),
                 max_tokens: config.max_tokens,
                 stream: config.stream,
@@ -95,6 +98,21 @@ impl AppState {
         self.total_usage.output_tokens += usage.output_tokens;
         self.total_usage.cache_creation_input_tokens += usage.cache_creation_input_tokens;
         self.total_usage.cache_read_input_tokens += usage.cache_read_input_tokens;
+    }
+
+    pub fn add_assistant_message(&mut self, message: Message) {
+        if let Some(usage) = &message.usage {
+            self.add_usage(usage);
+        }
+        self.messages.push(message);
+    }
+
+    pub fn most_recent_assistant_usage(&self) -> Option<&Usage> {
+        self.messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message.role, crate::message::Role::Assistant))
+            .and_then(|message| message.usage.as_ref())
     }
 
     pub fn update_todos(&mut self, todos: Vec<TodoItem>) {
@@ -136,9 +154,11 @@ mod tests {
         assert!(state.always_allow_rules.is_empty());
         assert!(state.always_deny_rules.is_empty());
         assert_eq!(state.session.model, "claude-sonnet-4-20250514");
+        assert_eq!(state.session.model_setting, "claude-sonnet-4-20250514");
         assert!(state.session.system_prompt.is_none());
         assert_eq!(state.session.max_tokens, 16384);
         assert!(state.session.stream);
+        assert!(state.most_recent_assistant_usage().is_none());
     }
 
     #[test]
@@ -154,23 +174,22 @@ mod tests {
     }
 
     #[test]
-    fn test_add_usage() {
+    fn test_add_assistant_message_updates_most_recent_usage() {
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
-        state.add_usage(&Usage {
-            input_tokens: 100,
-            output_tokens: 50,
-            cache_creation_input_tokens: 0,
+        let usage = Usage {
+            input_tokens: 150_000,
+            output_tokens: 30_000,
+            cache_creation_input_tokens: 25_000,
             cache_read_input_tokens: 0,
-        });
-        state.add_usage(&Usage {
-            input_tokens: 200,
-            output_tokens: 75,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-        });
+        };
+        state.add_assistant_message(Message::assistant_with_usage(
+            vec![crate::message::ContentBlock::text("hi")],
+            usage.clone(),
+        ));
 
-        assert_eq!(state.total_usage.input_tokens, 300);
-        assert_eq!(state.total_usage.output_tokens, 125);
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.most_recent_assistant_usage(), Some(&usage));
+        assert_eq!(state.total_usage.input_tokens, 150_000);
     }
 
     #[test]
@@ -270,6 +289,7 @@ mod tests {
 
         assert_eq!(state.permission_mode, PermissionMode::AcceptEdits);
         assert_eq!(state.session.model, "claude-test");
+        assert_eq!(state.session.model_setting, "claude-test");
         assert_eq!(
             state.session.system_prompt.as_deref(),
             Some("You are a test assistant")
@@ -284,6 +304,7 @@ mod tests {
     fn test_session_settings_serde() {
         let settings = SessionSettings {
             model: "claude-test".to_string(),
+            model_setting: "claude-test".to_string(),
             system_prompt: Some("Be concise".to_string()),
             max_tokens: 4096,
             stream: false,
@@ -293,6 +314,7 @@ mod tests {
         let parsed: SessionSettings = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.model, "claude-test");
+        assert_eq!(parsed.model_setting, "claude-test");
         assert_eq!(parsed.system_prompt.as_deref(), Some("Be concise"));
         assert_eq!(parsed.max_tokens, 4096);
         assert!(!parsed.stream);

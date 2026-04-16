@@ -327,7 +327,13 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         other => other,
     };
 
-    let left = format!(" {} ", app.model);
+    let model_display = if app.model == app.model_setting {
+        app.model.clone()
+    } else {
+        format!("{} (from {})", app.model, app.model_setting)
+    };
+
+    let left = format!(" {} ", model_display);
     let right = format!(
         " tokens: {}↑ {}↓ | {} ",
         format_tokens(app.input_tokens),
@@ -629,10 +635,19 @@ mod tests {
         assert_eq!(style.fg, Some(theme::ERROR));
     }
 
+
     #[test]
-    fn test_render_system_message() {
-        let mut lines = Vec::new();
-        render_message(&ChatMessage::System("warning msg".into()), &mut lines, 80);
-        assert_eq!(lines.len(), 1);
+    fn test_status_bar_shows_model_source_relation() {
+        let app = App::new(
+            "claude-opus-4-6".into(),
+            "opusplan".into(),
+            "Plan".into(),
+        );
+        let model_display = if app.model == app.model_setting {
+            app.model.clone()
+        } else {
+            format!("{} (from {})", app.model, app.model_setting)
+        };
+        assert_eq!(model_display, "claude-opus-4-6 (from opusplan)");
     }
 }

@@ -169,7 +169,7 @@
 
 - 已实现基础 TUI 框架：`App` 状态对象、`ChatMessage` / `AppEvent` 事件模型（35+ 事件变体）、渲染层与终端守卫。
 - 已实现顶部状态栏、中间聊天区域、底部输入框的基础布局与样式（`theme.rs`）。
-- 已实现基础键盘交互：Enter 发送、Ctrl+C 退出、Esc 清空/取消、左右移动光标、上下滚动、Home/End、Backspace/Delete。
+- 已实现基础键盘交互：Enter 发送、Ctrl+C 退出、Esc 清空/取消、左右移动光标、Up/Down 历史/多行移动、PageUp/PageDown 聊天区域滚动、Ctrl+Home/Ctrl+End 跳转聊天区域边界、Home/End、Backspace/Delete。
 - 已实现 TUI 事件桥接 `TuiBridge`，支持流式文本（token 级）、工具调用、工具结果、usage 更新、thinking 阶段、压缩事件等。
 - 已实现权限确认对话框（模态弹窗）：居中弹窗显示工具名与参数摘要，支持 Allow(y)/AlwaysAllow(a)/Deny(n)/AlwaysDeny(d) 四选项，方向键导航 + Enter 确认。
 - 已实现 Todo 侧面板（Tab 键切换）：右侧 30 列面板，状态图标（○/◐/●），实时刷新。
@@ -614,7 +614,7 @@ rust-claude-code/
   - 助手消息：左对齐，支持 Markdown 基础渲染（代码块高亮）
   - 工具调用：折叠显示（工具名 + 摘要）
 - 流式输出：实时显示 assistant 正在生成的文本
-- 键盘快捷键：Ctrl+C 退出、Esc 取消当前生成
+- 键盘快捷键：Ctrl+C 退出、Esc 取消当前生成、PageUp/PageDown 滚动聊天区域、Ctrl+Home/Ctrl+End 跳转到最旧/最新聊天内容
 
 **验收标准**:
 

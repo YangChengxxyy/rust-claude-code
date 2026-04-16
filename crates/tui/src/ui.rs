@@ -15,6 +15,95 @@ use crate::app::{App, CursorPosition};
 use crate::events::ChatMessage;
 use crate::theme;
 
+/// Compute the chat viewport area for the current frame layout.
+pub fn chat_viewport_area(app: &App, full: Rect) -> Rect {
+    let (main_area, _) = if app.todo_visible {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(40), Constraint::Length(30)])
+            .split(full);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (full, None)
+    };
+
+    let input_height = input_area_height(app).clamp(3, 8);
+    let areas = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(input_height),
+            Constraint::Length(1),
+        ])
+        .split(main_area);
+
+    areas[0]
+}
+
+/// Build the chat lines exactly as they will be rendered in the viewport.
+pub fn build_chat_lines(app: &App) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line> = Vec::new();
+
+    for (idx, msg) in app.messages.iter().enumerate() {
+        render_message(msg, idx, app, &mut lines);
+    }
+
+    if app.is_streaming && !app.streaming_text.is_empty() {
+        for (i, line) in app.streaming_text.lines().enumerate() {
+            if i == 0 {
+                let line_text = line.to_owned();
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{} ", theme::BLACK_CIRCLE), theme::bullet_style()),
+                    Span::styled(line_text, theme::assistant_text_style()),
+                ]));
+            } else {
+                let line_text = line.to_owned();
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(line_text, theme::assistant_text_style()),
+                ]));
+            }
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  Type a message below to get started.",
+            Style::default().fg(theme::SUBTLE),
+        )));
+    }
+
+    lines
+}
+
+/// Compute the maximum valid scroll offset for the chat viewport.
+pub fn max_chat_scroll_offset(app: &App, viewport_width: u16, viewport_height: u16) -> u16 {
+    if viewport_width == 0 || viewport_height == 0 {
+        return 0;
+    }
+
+    let lines = build_chat_lines(app);
+    let total_visual_lines = count_visual_lines(&lines, viewport_width);
+    total_visual_lines.saturating_sub(viewport_height)
+}
+
+fn count_visual_lines(lines: &[Line<'static>], viewport_width: u16) -> u16 {
+    let width = viewport_width.max(1) as usize;
+    lines
+        .iter()
+        .map(|line| {
+            let line_width = line_display_width(line).max(1);
+            ((line_width.saturating_sub(1) / width) + 1) as u16
+        })
+        .sum()
+}
+
+fn line_display_width(line: &Line<'static>) -> usize {
+    let width: usize = line.spans.iter().map(|span| display_width(span.content.as_ref())).sum();
+    width.max(1)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MarkdownBlock {
     Heading { level: usize, text: String },
@@ -27,6 +116,7 @@ enum MarkdownBlock {
 /// Draw the entire TUI frame.
 pub fn draw(f: &mut Frame, app: &App) {
     let full = f.size();
+    let chat_area = chat_viewport_area(app, full);
 
     let (main_area, todo_area) = if app.todo_visible {
         let chunks = Layout::default()
@@ -49,7 +139,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         ])
         .split(main_area);
 
-    draw_chat_area(f, app, areas[0]);
+    draw_chat_area(f, app, chat_area);
     draw_spinner_line(f, app, areas[1]);
     draw_input_area(f, app, areas[2]);
     draw_status_bar(f, app, areas[3]);
@@ -69,34 +159,7 @@ fn input_area_height(app: &App) -> u16 {
 }
 
 fn draw_chat_area(f: &mut Frame, app: &App, area: Rect) {
-    let mut lines: Vec<Line> = Vec::new();
-
-    for (idx, msg) in app.messages.iter().enumerate() {
-        render_message(msg, idx, app, &mut lines, area.width as usize);
-    }
-
-    if app.is_streaming && !app.streaming_text.is_empty() {
-        for (i, line) in app.streaming_text.lines().enumerate() {
-            if i == 0 {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{} ", theme::BLACK_CIRCLE), theme::bullet_style()),
-                    Span::styled(line.to_string(), theme::assistant_text_style()),
-                ]));
-            } else {
-                lines.push(Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(line.to_string(), theme::assistant_text_style()),
-                ]));
-            }
-        }
-    }
-
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  Type a message below to get started.",
-            Style::default().fg(theme::SUBTLE),
-        )));
-    }
+    let lines = build_chat_lines(app);
 
     let paragraph = Paragraph::new(Text::from(lines))
         .wrap(Wrap { trim: false })
@@ -110,7 +173,6 @@ fn render_message(
     message_index: usize,
     app: &App,
     lines: &mut Vec<Line<'static>>,
-    width: usize,
 ) {
     match msg {
         ChatMessage::User(text) => {
@@ -138,7 +200,7 @@ fn render_message(
             lines.push(Line::from(""));
         }
         ChatMessage::Assistant(text) => {
-            render_markdown_message(text, lines, width);
+            render_markdown_message(text, lines);
         }
         ChatMessage::Thinking { summary, content } => {
             let is_selected = app.selected_thinking == Some(message_index);
@@ -255,7 +317,7 @@ fn render_message(
     }
 }
 
-fn render_markdown_message(text: &str, lines: &mut Vec<Line<'static>>, _width: usize) {
+fn render_markdown_message(text: &str, lines: &mut Vec<Line<'static>>) {
     let blocks = parse_markdown_blocks(text);
     let mut first_block = true;
     for block in blocks {
@@ -599,6 +661,7 @@ fn build_input_text(app: &App, input_style: Style) -> Text<'static> {
     let mut lines = Vec::new();
     for (i, line) in text.lines().enumerate() {
         if i == 0 {
+            let line_text = line.to_owned();
             lines.push(Line::from(vec![
                 Span::styled(
                     "> ",
@@ -606,12 +669,13 @@ fn build_input_text(app: &App, input_style: Style) -> Text<'static> {
                         .fg(theme::SUGGESTION)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(line.to_string(), input_style),
+                Span::styled(line_text, input_style),
             ]));
         } else {
+            let line_text = line.to_owned();
             lines.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(line.to_string(), input_style),
+                Span::styled(line_text, input_style),
             ]));
         }
     }
@@ -885,7 +949,6 @@ mod tests {
             0,
             &app,
             &mut lines,
-            80,
         );
         assert!(lines[0].spans.iter().any(|s| s.content.contains("Thinking")));
     }

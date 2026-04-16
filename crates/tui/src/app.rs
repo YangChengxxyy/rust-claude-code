@@ -5,12 +5,15 @@ use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 use rust_claude_core::state::TodoItem;
 use tokio::sync::mpsc;
 
 use crate::events::{AppEvent, ChatMessage, PermissionResponse, UserCommand};
 use crate::ui;
+
+const CHAT_SCROLL_PAGE_SIZE: u16 = 8;
 
 const MAX_HISTORY_ENTRIES: usize = 500;
 
@@ -253,6 +256,8 @@ pub struct App {
     pub input_buffer: InputBuffer,
     /// Vertical scroll offset in the chat area.
     pub scroll_offset: u16,
+    /// Whether chat viewport should stay pinned to latest output.
+    pub follow_output: bool,
     /// Whether the assistant is currently streaming a response.
     pub is_streaming: bool,
     /// Whether the model is in the "thinking" phase.
@@ -303,6 +308,7 @@ impl App {
             messages: Vec::new(),
             input_buffer: InputBuffer::new(),
             scroll_offset: 0,
+            follow_output: true,
             is_streaming: false,
             is_thinking: false,
             suppress_stream: false,
@@ -340,6 +346,58 @@ impl App {
     fn reset_input_navigation(&mut self) {
         self.history_index = None;
         self.draft_before_history = None;
+    }
+
+    fn max_chat_scroll_offset(&self) -> u16 {
+        let viewport = ui::chat_viewport_area(self, Rect::new(0, 0, 80, 24));
+        ui::max_chat_scroll_offset(self, viewport.width, viewport.height)
+    }
+
+    fn clamp_chat_scroll(&mut self) {
+        let max_offset = self.max_chat_scroll_offset();
+        self.scroll_offset = self.scroll_offset.min(max_offset);
+        if self.scroll_offset >= max_offset {
+            self.scroll_offset = max_offset;
+            self.follow_output = true;
+        }
+    }
+
+    fn jump_chat_to_latest(&mut self) {
+        self.scroll_offset = self.max_chat_scroll_offset();
+        self.follow_output = true;
+    }
+
+    fn jump_chat_to_oldest(&mut self) {
+        self.scroll_offset = 0;
+        self.follow_output = self.max_chat_scroll_offset() == 0;
+    }
+
+    fn scroll_chat_up(&mut self) {
+        let max_offset = self.max_chat_scroll_offset();
+        if max_offset == 0 {
+            self.scroll_offset = 0;
+            self.follow_output = true;
+            return;
+        }
+
+        self.scroll_offset = self.scroll_offset.saturating_sub(CHAT_SCROLL_PAGE_SIZE);
+        self.follow_output = self.scroll_offset >= max_offset;
+    }
+
+    fn scroll_chat_down(&mut self) {
+        let max_offset = self.max_chat_scroll_offset();
+        self.scroll_offset = (self.scroll_offset + CHAT_SCROLL_PAGE_SIZE).min(max_offset);
+        self.follow_output = self.scroll_offset >= max_offset;
+    }
+
+    fn sync_chat_viewport(&mut self) {
+        let max_offset = self.max_chat_scroll_offset();
+        if self.follow_output {
+            self.scroll_offset = max_offset;
+        } else {
+            self.scroll_offset = self.scroll_offset.min(max_offset);
+        }
+        self.follow_output = self.scroll_offset >= max_offset;
     }
 
     fn push_history_entry(&mut self, entry: &str) {
@@ -431,11 +489,14 @@ impl App {
                 self.suppress_stream = false;
                 self.streaming_text.clear();
                 self.streaming_thinking.clear();
+                self.follow_output = true;
+                self.sync_chat_viewport();
             }
             Err(_) => {
                 self.messages.push(ChatMessage::System(
                     "Failed to submit prompt to background worker.".into(),
                 ));
+                self.sync_chat_viewport();
             }
         }
     }
@@ -449,6 +510,7 @@ impl App {
         self.messages.push(ChatMessage::System(
             "Cancelled current response.".into(),
         ));
+        self.sync_chat_viewport();
     }
 
     /// Run the TUI event loop.
@@ -558,6 +620,14 @@ impl App {
         }
 
         match key.code {
+            KeyCode::PageUp => self.scroll_chat_up(),
+            KeyCode::PageDown => self.scroll_chat_down(),
+            KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.jump_chat_to_oldest();
+            }
+            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.jump_chat_to_latest();
+            }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) && !self.is_streaming => {
                 self.input_buffer.insert_newline();
                 self.reset_input_navigation();
@@ -625,6 +695,7 @@ impl App {
             }
             _ => {}
         }
+        self.clamp_chat_scroll();
     }
 
     fn handle_permission_key(&mut self, key: KeyEvent) {
@@ -674,15 +745,23 @@ impl App {
                 self.streaming_text.clear();
                 self.streaming_thinking.clear();
                 self.scroll_offset = 0;
+                self.follow_output = true;
                 self.messages.push(ChatMessage::System("Session cleared.".into()));
+                self.sync_chat_viewport();
             }
             "/compact" => match user_tx.send(UserCommand::Compact).await {
-                Ok(()) => self.messages.push(ChatMessage::System(
-                    "Compacting conversation history...".into(),
-                )),
-                Err(_) => self.messages.push(ChatMessage::System(
-                    "Error: failed to send compact request".into(),
-                )),
+                Ok(()) => {
+                    self.messages.push(ChatMessage::System(
+                        "Compacting conversation history...".into(),
+                    ));
+                    self.sync_chat_viewport();
+                }
+                Err(_) => {
+                    self.messages.push(ChatMessage::System(
+                        "Error: failed to send compact request".into(),
+                    ));
+                    self.sync_chat_viewport();
+                }
             },
             "/mode" => {
                 if parts.len() > 1 {
@@ -697,16 +776,21 @@ impl App {
                                     "Error: failed to send mode change request".into(),
                                 )),
                             }
+                            self.sync_chat_viewport();
                         }
-                        _ => self.messages.push(ChatMessage::System(
-                            "Unknown mode. Valid modes: default, accept-edits, bypass, plan, dont-ask".into(),
-                        )),
+                        _ => {
+                            self.messages.push(ChatMessage::System(
+                                "Unknown mode. Valid modes: default, accept-edits, bypass, plan, dont-ask".into(),
+                            ));
+                            self.sync_chat_viewport();
+                        }
                     }
                 } else {
                     self.messages.push(ChatMessage::System(format!(
                         "Current mode: {}. Usage: /mode <default|accept-edits|bypass|plan|dont-ask>",
                         self.permission_mode
                     )));
+                    self.sync_chat_viewport();
                 }
             }
             "/model" => {
@@ -720,22 +804,30 @@ impl App {
                             "Error: failed to send model change request".into(),
                         )),
                     }
+                    self.sync_chat_viewport();
                 } else {
                     self.messages.push(ChatMessage::System(format!(
                         "Current model setting: {}\nCurrent runtime model: {}",
                         self.model_setting, self.model
                     )));
+                    self.sync_chat_viewport();
                 }
             }
             "/todo" => self.todo_visible = !self.todo_visible,
-            "/help" => self.messages.push(ChatMessage::System(
-                "Available commands:\n  /clear       — Clear current session\n  /compact     — Compact conversation history\n  /mode <mode> — Switch permission mode\n  /model <m>   — Switch model setting\n  /todo        — Toggle todo panel\n  /help        — Show this help\n  /exit        — Exit\n\nEditing:\n  Enter submits\n  Shift+Enter inserts newline\n  Up/Down browse history or move multi-line cursor\n  Ctrl+A/Ctrl+E/Home/End move within line\n  Ctrl+Left/Ctrl+Right move by word\n  Escape or Ctrl+C cancels active stream\n  Ctrl+L redraws the screen\n  Tab toggles latest thinking block".into(),
-            )),
+            "/help" => {
+                self.messages.push(ChatMessage::System(
+                    "Available commands:\n  /clear       — Clear current session\n  /compact     — Compact conversation history\n  /mode <mode> — Switch permission mode\n  /model <m>   — Switch model setting\n  /todo        — Toggle todo panel\n  /help        — Show this help\n  /exit        — Exit\n\nEditing:\n  Enter submits\n  Shift+Enter inserts newline\n  Up/Down browse history or move multi-line cursor\n  PageUp/PageDown scroll chat history\n  Ctrl+Home/Ctrl+End jump to oldest/latest chat content\n  Ctrl+A/Ctrl+E/Home/End move within line\n  Ctrl+Left/Ctrl+Right move by word\n  Escape or Ctrl+C cancels active stream\n  Ctrl+L redraws the screen\n  Tab toggles latest thinking block".into(),
+                ));
+                self.sync_chat_viewport();
+            }
             "/exit" => self.should_quit = true,
-            _ => self.messages.push(ChatMessage::System(format!(
-                "Unknown command: {}. Type /help for available commands.",
-                parts[0]
-            ))),
+            _ => {
+                self.messages.push(ChatMessage::System(format!(
+                    "Unknown command: {}. Type /help for available commands.",
+                    parts[0]
+                )));
+                self.sync_chat_viewport();
+            }
         }
     }
 
@@ -744,10 +836,12 @@ impl App {
             AppEvent::ThinkingStart => {
                 self.is_thinking = true;
                 self.streaming_thinking.clear();
+                self.sync_chat_viewport();
             }
             AppEvent::ThinkingDelta(text) => {
                 self.is_thinking = true;
                 self.streaming_thinking.push_str(&text);
+                self.sync_chat_viewport();
             }
             AppEvent::ThinkingComplete(text) => {
                 self.is_thinking = false;
@@ -765,11 +859,13 @@ impl App {
                     });
                     self.update_selected_thinking();
                 }
+                self.sync_chat_viewport();
             }
             AppEvent::StreamDelta(text) => {
                 if self.is_streaming && !self.suppress_stream {
                     self.is_thinking = false;
                     self.streaming_text.push_str(&text);
+                    self.sync_chat_viewport();
                 }
             }
             AppEvent::StreamEnd => {
@@ -791,7 +887,7 @@ impl App {
                 self.is_streaming = false;
                 self.is_thinking = false;
                 self.suppress_stream = false;
-                self.scroll_offset = 0;
+                self.sync_chat_viewport();
             }
             AppEvent::StreamCancelled => {
                 self.suppress_stream = true;
@@ -799,6 +895,7 @@ impl App {
                 self.is_thinking = false;
                 self.streaming_text.clear();
                 self.streaming_thinking.clear();
+                self.sync_chat_viewport();
             }
             AppEvent::ToolUseStart { name, input } => {
                 self.is_thinking = false;
@@ -807,6 +904,7 @@ impl App {
                     name,
                     input_summary: summary,
                 });
+                self.sync_chat_viewport();
             }
             AppEvent::ToolResult { name, output, is_error } => {
                 let summary = truncate(&output, 200);
@@ -815,6 +913,7 @@ impl App {
                     output_summary: summary,
                     is_error,
                 });
+                self.sync_chat_viewport();
             }
             AppEvent::AssistantMessage(text) => {
                 if !self.suppress_stream {
@@ -825,7 +924,7 @@ impl App {
                 self.is_streaming = false;
                 self.is_thinking = false;
                 self.suppress_stream = false;
-                self.scroll_offset = 0;
+                self.sync_chat_viewport();
             }
             AppEvent::UsageUpdate {
                 input_tokens,
@@ -854,6 +953,7 @@ impl App {
                 self.is_streaming = false;
                 self.is_thinking = false;
                 self.suppress_stream = false;
+                self.sync_chat_viewport();
             }
             AppEvent::PermissionRequest {
                 tool_name,
@@ -873,6 +973,7 @@ impl App {
                 self.messages.push(ChatMessage::System(
                     "Compacting conversation history...".into(),
                 ));
+                self.sync_chat_viewport();
             }
             AppEvent::CompactionComplete { result } => {
                 self.messages.push(ChatMessage::System(format!(
@@ -882,8 +983,10 @@ impl App {
                     result.estimated_tokens_before / 1000,
                     result.estimated_tokens_after / 1000,
                 )));
+                self.sync_chat_viewport();
             }
-            AppEvent::Resize(_, _) | AppEvent::Key(_) | AppEvent::Paste(_) => {}
+            AppEvent::Resize(_, _) => self.clamp_chat_scroll(),
+            AppEvent::Key(_) | AppEvent::Paste(_) => {}
         }
     }
 }
@@ -1068,6 +1171,71 @@ mod tests {
         assert_eq!(app.input_text(), "second");
     }
 
+
+    #[tokio::test]
+    async fn test_page_navigation_preserves_draft() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into());
+        app.input_buffer = InputBuffer::from_text("draft");
+        app.messages = (0..40)
+            .map(|i| ChatMessage::Assistant(format!("message {i}")))
+            .collect();
+        let original_cursor = app.input_cursor();
+        let (tx, _rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::PageUp), &tx).await;
+
+        assert_eq!(app.input_text(), "draft");
+        assert_eq!(app.input_cursor(), original_cursor);
+    }
+
+    #[tokio::test]
+    async fn test_page_down_restores_follow_output_at_bottom() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into());
+        app.messages = (0..80)
+            .map(|i| ChatMessage::Assistant(format!("message {i}")))
+            .collect();
+        app.follow_output = false;
+        app.scroll_offset = 0;
+        let (tx, _rx) = mpsc::channel(1);
+
+        for _ in 0..20 {
+            app.handle_key_event(key(KeyCode::PageDown), &tx).await;
+        }
+
+        assert!(app.follow_output);
+        assert_eq!(app.scroll_offset, app.max_chat_scroll_offset());
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_home_and_end_jump_chat_boundaries() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into());
+        app.messages = (0..80)
+            .map(|i| ChatMessage::Assistant(format!("message {i}")))
+            .collect();
+        let (tx, _rx) = mpsc::channel(1);
+
+        app.handle_key_event(key_ctrl(KeyCode::End), &tx).await;
+        let latest = app.max_chat_scroll_offset();
+        assert_eq!(app.scroll_offset, latest);
+
+        app.handle_key_event(key_ctrl(KeyCode::Home), &tx).await;
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_sync_chat_viewport_preserves_history_view() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into());
+        app.messages = (0..80)
+            .map(|i| ChatMessage::Assistant(format!("message {i}")))
+            .collect();
+        app.follow_output = false;
+        app.scroll_offset = 0;
+
+        app.handle_app_event(AppEvent::AssistantMessage("new message".into()));
+
+        assert_eq!(app.scroll_offset, 0);
+        assert!(!app.follow_output);
+    }
     #[tokio::test]
     async fn test_mode_command_sends_control_message() {
         let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into());

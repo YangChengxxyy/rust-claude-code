@@ -17,6 +17,80 @@ const CHAT_SCROLL_PAGE_SIZE: u16 = 8;
 
 const MAX_HISTORY_ENTRIES: usize = 500;
 
+struct SlashCommandSpec {
+    name: &'static str,
+    usage: &'static str,
+    description: &'static str,
+}
+
+const SLASH_COMMANDS: &[SlashCommandSpec] = &[
+    SlashCommandSpec {
+        name: "/clear",
+        usage: "/clear [keep-context]",
+        description: "Clear transcript (optionally preserve context)",
+    },
+    SlashCommandSpec {
+        name: "/compact",
+        usage: "/compact",
+        description: "Compact conversation history",
+    },
+    SlashCommandSpec {
+        name: "/config",
+        usage: "/config",
+        description: "Show effective config sources",
+    },
+    SlashCommandSpec {
+        name: "/cost",
+        usage: "/cost",
+        description: "Show session token usage and cost estimate",
+    },
+    SlashCommandSpec {
+        name: "/diff",
+        usage: "/diff",
+        description: "Show current git working tree diff",
+    },
+    SlashCommandSpec {
+        name: "/mode",
+        usage: "/mode <mode>",
+        description: "Switch permission mode",
+    },
+    SlashCommandSpec {
+        name: "/model",
+        usage: "/model <model>",
+        description: "Switch model setting",
+    },
+    SlashCommandSpec {
+        name: "/todo",
+        usage: "/todo",
+        description: "Toggle todo panel",
+    },
+    SlashCommandSpec {
+        name: "/help",
+        usage: "/help",
+        description: "Show this help",
+    },
+    SlashCommandSpec {
+        name: "/exit",
+        usage: "/exit",
+        description: "Exit",
+    },
+];
+
+fn slash_command_help_text() -> String {
+    let mut text = String::from("Available commands:\n");
+    for command in SLASH_COMMANDS {
+        text.push_str(&format!("  {:<22} — {}\n", command.usage, command.description));
+    }
+    text.push_str(
+        "\nEditing:\n  Enter submits\n  Shift+Enter inserts newline\n  Up/Down browse history or move multi-line cursor\n  PageUp/PageDown scroll chat history\n  Ctrl+Home/Ctrl+End jump to oldest/latest chat content\n  Ctrl+A/Ctrl+E/Home/End move within line\n  Ctrl+Left/Ctrl+Right move by word\n  Escape or Ctrl+C cancels active stream\n  Ctrl+L redraws the screen\n  Tab toggles latest thinking block",
+    );
+    text
+}
+
+fn has_slash_command(name: &str) -> bool {
+    SLASH_COMMANDS.iter().any(|command| command.name == name)
+}
+
 /// State of the modal permission confirmation dialog.
 pub struct PermissionDialog {
     /// The tool requesting permission.
@@ -281,6 +355,7 @@ pub struct App {
     pub model: String,
     pub model_setting: String,
     pub permission_mode: String,
+    pub git_branch: Option<String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_input_tokens: u64,
@@ -301,7 +376,12 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(model: String, model_setting: String, permission_mode: String) -> Self {
+    pub fn new(
+        model: String,
+        model_setting: String,
+        permission_mode: String,
+        git_branch: Option<String>,
+    ) -> Self {
         let history_path = history_file_path();
         let history = load_history(&history_path);
         App {
@@ -321,6 +401,7 @@ impl App {
             model,
             model_setting,
             permission_mode,
+            git_branch,
             input_tokens: 0,
             output_tokens: 0,
             cache_read_input_tokens: 0,
@@ -738,15 +819,29 @@ impl App {
         self.input_buffer.clear();
         self.reset_input_navigation();
 
-        let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
-        match parts[0] {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        let name = parts.first().copied().unwrap_or("");
+        let arg = parts.get(1).copied();
+
+        match name {
             "/clear" => {
-                self.messages.clear();
-                self.streaming_text.clear();
-                self.streaming_thinking.clear();
-                self.scroll_offset = 0;
-                self.follow_output = true;
-                self.messages.push(ChatMessage::System("Session cleared.".into()));
+                if matches!(arg, Some("keep-context") | Some("preserve-context")) {
+                    self.messages.clear();
+                    self.streaming_text.clear();
+                    self.streaming_thinking.clear();
+                    self.scroll_offset = 0;
+                    self.follow_output = true;
+                    self.messages.push(ChatMessage::System(
+                        "Visible transcript cleared. Conversation context preserved in session state.".into(),
+                    ));
+                } else {
+                    self.messages.clear();
+                    self.streaming_text.clear();
+                    self.streaming_thinking.clear();
+                    self.scroll_offset = 0;
+                    self.follow_output = true;
+                    self.messages.push(ChatMessage::System("Session cleared.".into()));
+                }
                 self.sync_chat_viewport();
             }
             "/compact" => match user_tx.send(UserCommand::Compact).await {
@@ -764,8 +859,7 @@ impl App {
                 }
             },
             "/mode" => {
-                if parts.len() > 1 {
-                    let mode_str = parts[1].trim();
+                if let Some(mode_str) = arg {
                     match mode_str {
                         "default" | "accept-edits" | "bypass" | "plan" | "dont-ask" => {
                             match user_tx.send(UserCommand::SetMode(mode_str.to_string())).await {
@@ -794,8 +888,7 @@ impl App {
                 }
             }
             "/model" => {
-                if parts.len() > 1 {
-                    let model_str = parts[1].trim();
+                if let Some(model_str) = arg {
                     match user_tx.send(UserCommand::SetModel(model_str.to_string())).await {
                         Ok(()) => self.messages.push(ChatMessage::System(format!(
                             "Switching model to: {model_str}"
@@ -814,18 +907,28 @@ impl App {
                 }
             }
             "/todo" => self.todo_visible = !self.todo_visible,
+            "/config" => {
+                let _ = user_tx.send(UserCommand::ShowConfig).await;
+            }
+            "/cost" => {
+                let _ = user_tx.send(UserCommand::ShowCost).await;
+            }
+            "/diff" => {
+                let _ = user_tx.send(UserCommand::ShowDiff).await;
+            }
             "/help" => {
-                self.messages.push(ChatMessage::System(
-                    "Available commands:\n  /clear       — Clear current session\n  /compact     — Compact conversation history\n  /mode <mode> — Switch permission mode\n  /model <m>   — Switch model setting\n  /todo        — Toggle todo panel\n  /help        — Show this help\n  /exit        — Exit\n\nEditing:\n  Enter submits\n  Shift+Enter inserts newline\n  Up/Down browse history or move multi-line cursor\n  PageUp/PageDown scroll chat history\n  Ctrl+Home/Ctrl+End jump to oldest/latest chat content\n  Ctrl+A/Ctrl+E/Home/End move within line\n  Ctrl+Left/Ctrl+Right move by word\n  Escape or Ctrl+C cancels active stream\n  Ctrl+L redraws the screen\n  Tab toggles latest thinking block".into(),
-                ));
+                self.messages
+                    .push(ChatMessage::System(slash_command_help_text()));
                 self.sync_chat_viewport();
             }
             "/exit" => self.should_quit = true,
             _ => {
-                self.messages.push(ChatMessage::System(format!(
-                    "Unknown command: {}. Type /help for available commands.",
-                    parts[0]
-                )));
+                let detail = if has_slash_command(name) {
+                    format!("Command parsing error: {}", name)
+                } else {
+                    format!("Unknown command: {}. Type /help for available commands.", name)
+                };
+                self.messages.push(ChatMessage::System(detail));
                 self.sync_chat_viewport();
             }
         }
@@ -941,10 +1044,23 @@ impl App {
                 model,
                 model_setting,
                 permission_mode,
+                git_branch,
             } => {
                 self.model = model;
                 self.model_setting = model_setting;
                 self.permission_mode = permission_mode;
+                self.git_branch = git_branch;
+            }
+            AppEvent::ConfigInfo {
+                model_source,
+                permission_source,
+                base_url_source,
+            } => {
+                self.messages.push(ChatMessage::System(format!(
+                    "Effective config:\n  model source: {}\n  permissions source: {}\n  base_url source: {}",
+                    model_source, permission_source, base_url_source
+                )));
+                self.sync_chat_viewport();
             }
             AppEvent::Error(msg) => {
                 self.messages.push(ChatMessage::System(msg));
@@ -1097,6 +1213,14 @@ mod tests {
     }
 
     #[test]
+    fn test_help_registry_contains_new_commands() {
+        let help = slash_command_help_text();
+        assert!(help.contains("/config"));
+        assert!(help.contains("/cost"));
+        assert!(help.contains("/diff"));
+    }
+
+    #[test]
     fn test_input_buffer_multiline_insert_and_cursor() {
         let mut buffer = InputBuffer::new();
         buffer.insert_text("hello\nworld");
@@ -1116,14 +1240,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_paste_preserves_multiline_content() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into());
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
         app.handle_paste("line1\r\nline2".into());
         assert_eq!(app.input_text(), "line1\nline2");
     }
 
     #[test]
     fn test_tab_toggles_selected_thinking_expansion() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into());
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
         app.messages.push(ChatMessage::Thinking {
             summary: "Thought for ~10 chars".into(),
             content: "reasoning".into(),
@@ -1139,7 +1263,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ctrl_c_cancels_stream_instead_of_quit() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into());
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
         app.is_streaming = true;
         let (tx, mut rx) = mpsc::channel(1);
         app.handle_key_event(key_ctrl(KeyCode::Char('c')), &tx).await;
@@ -1150,7 +1274,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shift_enter_inserts_newline() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into());
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
         let (tx, _rx) = mpsc::channel(1);
         app.handle_key_event(key(KeyCode::Char('a')), &tx).await;
         app.handle_key_event(key_shift(KeyCode::Enter), &tx).await;
@@ -1160,7 +1284,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_up_down_browse_history() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into());
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
         app.history = vec!["first".into(), "second".into()];
         let (tx, _rx) = mpsc::channel(1);
         app.handle_key_event(key(KeyCode::Up), &tx).await;
@@ -1174,7 +1298,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_page_navigation_preserves_draft() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into());
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
         app.input_buffer = InputBuffer::from_text("draft");
         app.messages = (0..40)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
@@ -1190,7 +1314,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_page_down_restores_follow_output_at_bottom() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into());
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
         app.messages = (0..80)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
             .collect();
@@ -1208,7 +1332,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ctrl_home_and_end_jump_chat_boundaries() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into());
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
         app.messages = (0..80)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
             .collect();
@@ -1224,7 +1348,7 @@ mod tests {
 
     #[test]
     fn test_sync_chat_viewport_preserves_history_view() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into());
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
         app.messages = (0..80)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
             .collect();
@@ -1238,7 +1362,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_mode_command_sends_control_message() {
-        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into());
+        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into(), None);
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/mode plan");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1249,7 +1373,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_command_sends_control_message() {
-        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into());
+        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into(), None);
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/model opus[1m]");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1260,7 +1384,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_command_without_args_shows_setting_and_runtime() {
-        let mut app = App::new("claude-opus-4-6".into(), "opusplan".into(), "Plan".into());
+        let mut app = App::new("claude-opus-4-6".into(), "opusplan".into(), "Plan".into(), None);
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/model");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1276,21 +1400,23 @@ mod tests {
 
     #[test]
     fn test_status_update_changes_displayed_model_and_mode() {
-        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into());
+        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into(), None);
         app.handle_app_event(AppEvent::StatusUpdate {
             model: "claude-opus-4-6".into(),
             model_setting: "opusplan".into(),
             permission_mode: "Plan".into(),
+            git_branch: Some("main".into()),
         });
 
         assert_eq!(app.model, "claude-opus-4-6");
         assert_eq!(app.model_setting, "opusplan");
         assert_eq!(app.permission_mode, "Plan");
+        assert_eq!(app.git_branch.as_deref(), Some("main"));
     }
 
     #[test]
     fn test_thinking_complete_creates_message() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into());
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
         app.handle_app_event(AppEvent::ThinkingComplete("reasoning".into()));
         assert!(matches!(
             app.messages.last(),

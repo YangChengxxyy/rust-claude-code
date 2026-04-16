@@ -55,6 +55,17 @@ fn discover_global_claude_md() -> Option<ClaudeMdFile> {
 /// Stops at the git repository root (directory containing `.git`) or the
 /// filesystem root. Returns files ordered from root-most to leaf-most.
 fn discover_project_claude_md(cwd: &Path) -> Vec<ClaudeMdFile> {
+    project_discovery_dirs(cwd)
+        .into_iter()
+        .filter_map(|dir| read_claude_md(&dir.join("CLAUDE.md")))
+        .collect()
+}
+
+/// Return canonicalized directories to inspect for project-scoped files.
+///
+/// The order is root-most to leaf-most and the walk stops at the git root
+/// (inclusive) when one exists.
+pub fn project_discovery_dirs(cwd: &Path) -> Vec<PathBuf> {
     let cwd = match cwd.canonicalize() {
         Ok(p) => p,
         Err(_) => cwd.to_path_buf(),
@@ -63,13 +74,11 @@ fn discover_project_claude_md(cwd: &Path) -> Vec<ClaudeMdFile> {
     let git_root = find_git_root(&cwd);
     let stop_at = git_root.as_deref();
 
-    // Collect directories from CWD upward
     let mut dirs = Vec::new();
     let mut visited = HashSet::new();
     let mut current = Some(cwd.as_path());
 
     while let Some(dir) = current {
-        // Avoid symlink-induced cycles
         let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         if !visited.insert(canonical.clone()) {
             break;
@@ -77,7 +86,6 @@ fn discover_project_claude_md(cwd: &Path) -> Vec<ClaudeMdFile> {
 
         dirs.push(canonical);
 
-        // Stop at git root (inclusive)
         if let Some(root) = stop_at {
             if dir == root {
                 break;
@@ -87,21 +95,17 @@ fn discover_project_claude_md(cwd: &Path) -> Vec<ClaudeMdFile> {
         current = dir.parent();
     }
 
-    // Reverse so root-most comes first
     dirs.reverse();
-
-    // Read CLAUDE.md from each directory
-    dirs.iter()
-        .filter_map(|dir| read_claude_md(&dir.join("CLAUDE.md")))
-        .collect()
+    dirs
 }
 
 /// Find the git repository root by walking up from `start`.
 ///
 /// Returns the directory containing `.git` (file or directory), or `None` if
 /// not inside a git repository.
-fn find_git_root(start: &Path) -> Option<PathBuf> {
-    let mut current = Some(start);
+pub fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let canonical = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    let mut current = Some(canonical.as_path());
     while let Some(dir) = current {
         if dir.join(".git").exists() {
             return Some(dir.to_path_buf());
@@ -116,7 +120,6 @@ fn find_git_root(start: &Path) -> Option<PathBuf> {
 fn read_claude_md(path: &Path) -> Option<ClaudeMdFile> {
     match std::fs::read_to_string(path) {
         Ok(content) if !content.is_empty() => {
-            // Use canonical path for display if possible
             let display_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
             Some(ClaudeMdFile {
                 path: display_path,
@@ -170,7 +173,6 @@ mod tests {
 
         let results = discover_project_claude_md(&child);
         assert!(results.len() >= 2);
-        // Root-most (parent) first
         assert!(results[results.len() - 2].content.contains("Parent rules"));
         assert!(results[results.len() - 1].content.contains("Child rules"));
         let _ = fs::remove_dir_all(&parent);
@@ -185,7 +187,6 @@ mod tests {
         let sub = root.join("a").join("b");
         fs::create_dir_all(&sub).unwrap();
 
-        // CLAUDE.md inside the repo
         fs::write(root.join("CLAUDE.md"), "Repo root").unwrap();
         fs::write(sub.join("CLAUDE.md"), "Sub dir").unwrap();
 
@@ -223,9 +224,20 @@ mod tests {
     }
 
     #[test]
+    fn test_project_discovery_dirs_use_root_to_leaf_order() {
+        let root = make_temp_dir("dirs");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let leaf = root.join("packages/app");
+        fs::create_dir_all(&leaf).unwrap();
+
+        let dirs = project_discovery_dirs(&leaf);
+        assert_eq!(dirs.first().unwrap().canonicalize().unwrap(), root.canonicalize().unwrap());
+        assert_eq!(dirs.last().unwrap().canonicalize().unwrap(), leaf.canonicalize().unwrap());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn test_discover_claude_md_ordering() {
-        // Global is tested separately since it depends on env vars.
-        // Here we test project ordering.
         let root = make_temp_dir("ordering");
         fs::create_dir_all(root.join(".git")).unwrap();
 
@@ -250,7 +262,6 @@ mod tests {
         let dir = make_temp_dir("global-config");
         fs::write(dir.join("CLAUDE.md"), "Global rules").unwrap();
 
-        // Temporarily set CLAUDE_CONFIG_DIR
         unsafe {
             std::env::set_var("CLAUDE_CONFIG_DIR", dir.to_str().unwrap());
         }
@@ -282,9 +293,7 @@ mod tests {
         }
 
         assert!(results.len() >= 2);
-        // Global should be first
         assert!(results[0].content.contains("Global"));
-        // Project should follow
         assert!(results.iter().any(|f| f.content.contains("Project")));
 
         let _ = fs::remove_dir_all(&config_dir);

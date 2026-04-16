@@ -701,7 +701,12 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         format!("{} (from {})", app.model, app.model_setting)
     };
 
-    let left = format!(" {} ", model_display);
+    let branch_display = app
+        .git_branch
+        .as_ref()
+        .map(|branch| format!(" ⎇ {branch}"))
+        .unwrap_or_default();
+    let left = format!(" {}{} ", model_display, branch_display);
     let cache_info = if app.input_tokens > 0 {
         let hit_pct = (app.cache_read_input_tokens as f64 / app.input_tokens as f64 * 100.0) as u32;
         format!(" cache:{hit_pct}%")
@@ -939,7 +944,7 @@ mod tests {
     #[test]
     fn test_render_thinking_summary() {
         let mut lines = Vec::new();
-        let mut app = App::new("test".into(), "test".into(), "default".into());
+        let mut app = App::new("test".into(), "test".into(), "default".into(), None);
         app.selected_thinking = Some(0);
         render_message(
             &ChatMessage::Thinking {

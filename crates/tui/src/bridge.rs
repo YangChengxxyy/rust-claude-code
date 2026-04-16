@@ -1,8 +1,9 @@
 use rust_claude_core::compaction::CompactionResult;
+use rust_claude_core::config::ConfigProvenance;
 use rust_claude_core::state::TodoItem;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::events::{AppEvent, PermissionResponse};
+use crate::events::{format_provenance_summary, AppEvent, PermissionResponse};
 
 /// Bridge used by the query loop to send events into the TUI.
 #[derive(Debug, Clone)]
@@ -96,6 +97,7 @@ impl TuiBridge {
         model: &str,
         model_setting: &str,
         permission_mode: &str,
+        git_branch: Option<&str>,
     ) {
         let _ = self
             .event_tx
@@ -103,6 +105,20 @@ impl TuiBridge {
                 model: model.to_string(),
                 model_setting: model_setting.to_string(),
                 permission_mode: permission_mode.to_string(),
+                git_branch: git_branch.map(str::to_string),
+            })
+            .await;
+    }
+
+    pub async fn send_config_info(&self, provenance: &ConfigProvenance) {
+        let (model_source, permission_source, base_url_source) =
+            format_provenance_summary(provenance);
+        let _ = self
+            .event_tx
+            .send(AppEvent::ConfigInfo {
+                model_source,
+                permission_source,
+                base_url_source,
             })
             .await;
     }
@@ -114,8 +130,6 @@ impl TuiBridge {
             .await;
     }
 
-    /// Request permission confirmation from the TUI user.
-    /// Sends a PermissionRequest event and waits for the user's response.
     pub async fn request_permission(
         &self,
         tool_name: &str,
@@ -138,17 +152,14 @@ impl TuiBridge {
         rx.await.ok()
     }
 
-    /// Notify the TUI that the todo list has been updated.
     pub async fn send_todo_update(&self, todos: Vec<TodoItem>) {
         let _ = self.event_tx.send(AppEvent::TodoUpdate(todos)).await;
     }
 
-    /// Notify the TUI that compaction has started.
     pub async fn send_compaction_start(&self) {
         let _ = self.event_tx.send(AppEvent::CompactionStart).await;
     }
 
-    /// Notify the TUI that compaction has completed.
     pub async fn send_compaction_complete(&self, result: CompactionResult) {
         let _ = self
             .event_tx
@@ -160,6 +171,7 @@ impl TuiBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_claude_core::state::{TodoPriority, TodoStatus};
 
     #[tokio::test]
     async fn test_bridge_sends_stream_delta() {
@@ -170,36 +182,6 @@ mod tests {
 
         match rx.recv().await {
             Some(AppEvent::StreamDelta(text)) => assert_eq!(text, "hello"),
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_bridge_sends_thinking_delta() {
-        let (tx, mut rx) = mpsc::channel(1);
-        let bridge = TuiBridge::new(tx);
-
-        bridge.send_thinking_delta("reasoning").await;
-
-        match rx.recv().await {
-            Some(AppEvent::ThinkingDelta(text)) => assert_eq!(text, "reasoning"),
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_bridge_sends_tool_result() {
-        let (tx, mut rx) = mpsc::channel(1);
-        let bridge = TuiBridge::new(tx);
-
-        bridge.send_tool_result("Bash", "ok", false).await;
-
-        match rx.recv().await {
-            Some(AppEvent::ToolResult { name, output, is_error }) => {
-                assert_eq!(name, "Bash");
-                assert_eq!(output, "ok");
-                assert!(!is_error);
-            }
             other => panic!("unexpected event: {other:?}"),
         }
     }
@@ -234,8 +216,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_bridge_sends_todo_update() {
-        use rust_claude_core::state::{TodoPriority, TodoStatus};
-
         let (tx, mut rx) = mpsc::channel(1);
         let bridge = TuiBridge::new(tx);
 

@@ -1,6 +1,7 @@
 pub mod claude_md;
 pub mod compaction;
 pub mod config;
+pub mod git;
 pub mod message;
 pub mod model;
 pub mod permission;

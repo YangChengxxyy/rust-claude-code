@@ -5,11 +5,12 @@ use clap::Parser;
 use rust_claude_api::AnthropicClient;
 use rust_claude_core::{
     claude_md,
-    config::{Config, ConfigError},
+    config::{Config, ConfigError, ConfigOverrides, ConfigSource},
+    git::collect_git_context,
     message::ContentBlock,
     model::get_runtime_main_loop_model,
     permission::PermissionMode,
-    settings::ClaudeSettings,
+    settings::{ClaudeSettings, ParsedPermissions, SettingsLayer},
     state::AppState,
 };
 use rust_claude_tools::{
@@ -24,10 +25,6 @@ use rust_claude_cli::query_loop::QueryLoop;
 use rust_claude_cli::session::{self, SessionFile};
 use rust_claude_cli::system_prompt;
 use rust_claude_core::compaction::CompactionConfig;
-
-// ---------------------------------------------------------------------------
-// CLI argument definitions
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 struct ModeArg(PermissionMode);
@@ -52,86 +49,64 @@ impl std::str::FromStr for ModeArg {
 #[derive(Parser, Debug)]
 #[command(name = "rust-claude", about = "Rust implementation of Claude Code")]
 struct Cli {
-    /// Prompt text (non-interactive mode when provided)
     prompt: Vec<String>,
 
-    /// Permission mode: default, accept-edits, bypass, plan, dont-ask
     #[arg(short = 'm', long = "mode")]
     mode: Option<ModeArg>,
 
-    /// Model to use (e.g. claude-sonnet-4-20250514, sonnet, opus)
     #[arg(long = "model")]
     model: Option<String>,
 
-    /// Print response and exit (non-interactive / headless mode)
     #[arg(short = 'p', long = "print")]
     print: bool,
 
-    /// Output format for non-interactive mode: text, json
     #[arg(long = "output-format", value_parser = ["text", "json"])]
     output_format: Option<String>,
 
-    /// Maximum number of agentic turns
     #[arg(long = "max-turns")]
     max_turns: Option<usize>,
 
-    /// Override the system prompt
     #[arg(long = "system-prompt")]
     system_prompt: Option<String>,
 
-    /// Read system prompt from a file
     #[arg(long = "system-prompt-file")]
     system_prompt_file: Option<String>,
 
-    /// Append text to the default system prompt
     #[arg(long = "append-system-prompt")]
     append_system_prompt: Option<String>,
 
-    /// Read append system prompt from a file
     #[arg(long = "append-system-prompt-file")]
     append_system_prompt_file: Option<String>,
 
-    /// Comma-separated list of allowed tool names (e.g. Bash,FileRead)
     #[arg(long = "allowed-tools", value_delimiter = ',')]
     allowed_tools: Option<Vec<String>>,
 
-    /// Comma-separated list of denied tool names (e.g. Bash,FileWrite)
     #[arg(long = "disallowed-tools", value_delimiter = ',')]
     disallowed_tools: Option<Vec<String>>,
 
-    /// Maximum output tokens
     #[arg(long = "max-tokens")]
     max_tokens: Option<u32>,
 
-    /// Disable streaming
     #[arg(long = "no-stream")]
     no_stream: bool,
 
-    /// Enable extended thinking (default: true for supported models)
     #[arg(long = "thinking", conflicts_with = "no_thinking")]
     thinking: bool,
 
-    /// Disable extended thinking
     #[arg(long = "no-thinking")]
     no_thinking: bool,
 
-    /// Verbose mode
     #[arg(long = "verbose")]
     verbose: bool,
 
-    /// Continue the most recent session
     #[arg(long = "continue", short = 'c')]
     continue_session: bool,
 
-    /// Path to a Claude Code settings.json file to load env from
     #[arg(long = "settings")]
     settings: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Resolved configuration (unified priority chain result)
-// ---------------------------------------------------------------------------
-
+#[derive(Debug, Clone)]
 struct ResolvedConfig {
     api_key: String,
     model: String,
@@ -150,6 +125,8 @@ struct ResolvedConfig {
     disallowed_tools: Vec<String>,
     always_allow: Vec<rust_claude_core::permission::PermissionRule>,
     always_deny: Vec<rust_claude_core::permission::PermissionRule>,
+    config: Config,
+    project_settings: Option<SettingsLayer>,
 }
 
 fn parse_bool_env(value: &str) -> Option<bool> {
@@ -160,65 +137,151 @@ fn parse_bool_env(value: &str) -> Option<bool> {
     }
 }
 
-/// Resolve all configuration through the unified priority chain:
-/// RUST_CLAUDE_* env > CLI flags > ANTHROPIC_* env (from settings.json + shell) > settings.json fields > config file > defaults
-fn resolve_config(cli: &Cli, config: Config, settings: &ClaudeSettings) -> Result<ResolvedConfig> {
-    // --- System prompt ---
+fn merge_settings_layers(
+    user_settings: ClaudeSettings,
+    project_settings: Option<&SettingsLayer>,
+) -> ClaudeSettings {
+    match project_settings {
+        Some(layer) => ClaudeSettings::merge(&layer.settings, &user_settings),
+        None => user_settings,
+    }
+}
+
+fn permissions_from_settings(settings: &ClaudeSettings) -> Result<ParsedPermissions> {
+    settings
+        .parsed_permissions()
+        .map_err(|e| anyhow!("invalid permissions in settings: {e}"))
+}
+
+fn resolve_config(
+    cli: &Cli,
+    mut config: Config,
+    user_settings: ClaudeSettings,
+    project_settings: Option<SettingsLayer>,
+) -> Result<ResolvedConfig> {
     if cli.system_prompt.is_some() && cli.system_prompt_file.is_some() {
         return Err(anyhow!("--system-prompt and --system-prompt-file are mutually exclusive"));
     }
-    let system_prompt = if let Some(ref path) = cli.system_prompt_file {
-        Some(std::fs::read_to_string(path).map_err(|e| {
-            anyhow!("failed to read --system-prompt-file '{}': {e}", path)
-        })?)
-    } else {
-        cli.system_prompt.clone().or(config.system_prompt)
-    };
 
-    let append_prompt = if let Some(ref path) = cli.append_system_prompt_file {
-        Some(std::fs::read_to_string(path).map_err(|e| {
-            anyhow!("failed to read --append-system-prompt-file '{}': {e}", path)
-        })?)
-    } else {
-        cli.append_system_prompt.clone()
-    };
-    let system_prompt = match (system_prompt, append_prompt) {
-        (Some(base), Some(append)) => Some(format!("{base}\n\n{append}")),
-        (Some(base), None) => Some(base),
-        (None, Some(append)) => Some(append),
-        (None, None) => None,
-    };
-
-    let max_tokens = cli.max_tokens.unwrap_or(config.max_tokens);
-
-    let permission_mode = cli
-        .mode
+    let merged_settings = merge_settings_layers(user_settings.clone(), project_settings.as_ref());
+    let project_permissions = project_settings
         .as_ref()
-        .map(|m| m.0.clone())
-        .unwrap_or(config.permission_mode);
+        .map(|layer| permissions_from_settings(&layer.settings))
+        .transpose()?;
+    let user_permissions = permissions_from_settings(&user_settings)?;
 
-    let model_setting = std::env::var("RUST_CLAUDE_MODEL_OVERRIDE")
-        .ok()
-        .or_else(|| cli.model.clone())
-        .or_else(|| std::env::var("ANTHROPIC_MODEL").ok())
-        .or_else(|| settings.model.clone())
-        .unwrap_or(config.model);
+    let mut overrides = ConfigOverrides::default();
+
+    if let Some(model) = merged_settings.model.clone() {
+        let source = if project_settings.as_ref().and_then(|layer| layer.settings.model.as_ref()).is_some() {
+            ConfigSource::ProjectSettings
+        } else {
+            ConfigSource::UserConfig
+        };
+        overrides.model.set(model, source);
+    }
+    // Merge user + project permission lists independently for each of allow/deny.
+    // A project that only sets `allow` must not drop the user-scope `deny` rules
+    // (and vice versa). Ordering: user entries first, then project entries.
+    let project_allow = project_permissions
+        .as_ref()
+        .map(|p| p.allow.clone())
+        .unwrap_or_default();
+    let project_deny = project_permissions
+        .as_ref()
+        .map(|p| p.deny.clone())
+        .unwrap_or_default();
+
+    let mut merged_allow = user_permissions.allow.clone();
+    merged_allow.extend(project_allow.iter().cloned());
+    let mut merged_deny = user_permissions.deny.clone();
+    merged_deny.extend(project_deny.iter().cloned());
+
+    // Provenance reflects the most-specific contributing layer: if project
+    // contributed any rules, attribute to ProjectSettings; otherwise UserConfig.
+    if !merged_allow.is_empty() {
+        let source = if !project_allow.is_empty() {
+            ConfigSource::ProjectSettings
+        } else {
+            ConfigSource::UserConfig
+        };
+        overrides.always_allow.set(merged_allow, source);
+    }
+    if !merged_deny.is_empty() {
+        let source = if !project_deny.is_empty() {
+            ConfigSource::ProjectSettings
+        } else {
+            ConfigSource::UserConfig
+        };
+        overrides.always_deny.set(merged_deny, source);
+    }
+
+    if let Some(path) = &cli.system_prompt_file {
+        overrides.system_prompt.set(
+            Some(std::fs::read_to_string(path).map_err(|e| anyhow!("failed to read --system-prompt-file '{}': {e}", path))?),
+            ConfigSource::Cli,
+        );
+    } else if let Some(prompt) = cli.system_prompt.clone() {
+        overrides.system_prompt.set(Some(prompt), ConfigSource::Cli);
+    }
+
+    // Apply low-priority env overrides FIRST (ANTHROPIC_MODEL / ANTHROPIC_BASE_URL).
+    // CLI flags apply afterwards so they win (documented priority in CLAUDE.md:
+    // RUST_CLAUDE_MODEL_OVERRIDE > --model > ANTHROPIC_MODEL > settings > config).
+    if let Ok(model) = std::env::var("ANTHROPIC_MODEL") {
+        overrides.model.set(model, ConfigSource::Env);
+    }
+    if let Ok(base_url) = std::env::var("ANTHROPIC_BASE_URL") {
+        overrides.base_url.set(Some(base_url), ConfigSource::Env);
+    }
+
+    if let Some(max_tokens) = cli.max_tokens {
+        overrides.max_tokens.set(max_tokens, ConfigSource::Cli);
+    }
+    if let Some(mode) = cli.mode.as_ref() {
+        overrides.permission_mode.set(mode.0, ConfigSource::Cli);
+    }
+    if let Some(model) = cli.model.clone() {
+        overrides.model.set(model, ConfigSource::Cli);
+    }
+    if cli.no_stream {
+        overrides.stream.set(false, ConfigSource::Cli);
+    }
+
+    // Highest-priority overrides (RUST_CLAUDE_* escape hatches) apply last so they
+    // beat both CLI flags and ANTHROPIC_* env variables.
+    if let Ok(model) = std::env::var("RUST_CLAUDE_MODEL_OVERRIDE") {
+        overrides.model.set(model, ConfigSource::Env);
+    }
+    if let Ok(base_url) = std::env::var("RUST_CLAUDE_BASE_URL") {
+        overrides.base_url.set(Some(base_url), ConfigSource::Env);
+    }
+    if let Ok(stream) = std::env::var("RUST_CLAUDE_STREAM") {
+        if let Some(value) = parse_bool_env(&stream) {
+            overrides.stream.set(value, ConfigSource::Env);
+        }
+    }
+    if let Ok(bearer) = std::env::var("RUST_CLAUDE_BEARER_AUTH") {
+        if let Some(value) = parse_bool_env(&bearer) {
+            overrides.bearer_auth.set(value, ConfigSource::Env);
+        }
+    }
+
+    if let Some(append_path) = &cli.append_system_prompt_file {
+        let append = std::fs::read_to_string(append_path)
+            .map_err(|e| anyhow!("failed to read --append-system-prompt-file '{}': {e}", append_path))?;
+        let base = overrides.system_prompt.value.clone().flatten().or_else(|| config.system_prompt.clone()).unwrap_or_default();
+        overrides.system_prompt.set(Some(if base.is_empty() { append } else { format!("{base}\n\n{append}") }), ConfigSource::Cli);
+    } else if let Some(append) = &cli.append_system_prompt {
+        let base = overrides.system_prompt.value.clone().flatten().or_else(|| config.system_prompt.clone()).unwrap_or_default();
+        overrides.system_prompt.set(Some(if base.is_empty() { append.clone() } else { format!("{base}\n\n{append}") }), ConfigSource::Cli);
+    }
+
+    config = config.apply_overrides(overrides);
+
+    let model_setting = config.model.clone();
+    let permission_mode = config.permission_mode;
     let model = get_runtime_main_loop_model(&model_setting, permission_mode, false);
-
-    let base_url = std::env::var("RUST_CLAUDE_BASE_URL")
-        .ok()
-        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
-        .or(config.base_url);
-
-    let bearer_auth = std::env::var("RUST_CLAUDE_BEARER_AUTH")
-        .ok()
-        .and_then(|v| parse_bool_env(&v))
-        .unwrap_or(config.bearer_auth);
-
-    let stream = std::env::var("RUST_CLAUDE_STREAM")
-        .ok()
-        .and_then(|v| parse_bool_env(&v))
-        .unwrap_or_else(|| if cli.no_stream { false } else { config.stream });
 
     let print_mode = cli.print || !cli.prompt.is_empty();
     let output_json = cli.output_format.as_deref() == Some("json");
@@ -226,14 +289,14 @@ fn resolve_config(cli: &Cli, config: Config, settings: &ClaudeSettings) -> Resul
     let disallowed_tools = cli.disallowed_tools.clone().unwrap_or_default();
 
     Ok(ResolvedConfig {
-        api_key: config.api_key,
+        api_key: config.api_key.clone(),
         model,
         model_setting,
-        base_url,
-        bearer_auth,
-        stream,
-        max_tokens,
-        system_prompt,
+        base_url: config.base_url.clone(),
+        bearer_auth: config.bearer_auth,
+        stream: config.stream,
+        max_tokens: config.max_tokens,
+        system_prompt: config.system_prompt.clone(),
         permission_mode,
         max_turns: cli.max_turns,
         verbose: cli.verbose,
@@ -241,8 +304,10 @@ fn resolve_config(cli: &Cli, config: Config, settings: &ClaudeSettings) -> Resul
         output_json,
         allowed_tools,
         disallowed_tools,
-        always_allow: config.always_allow,
-        always_deny: config.always_deny,
+        always_allow: config.always_allow.clone(),
+        always_deny: config.always_deny.clone(),
+        config,
+        project_settings,
     })
 }
 
@@ -253,16 +318,22 @@ async fn main() -> Result<()> {
 
     println!("rust-claude-code: Rust implementation of Claude Code");
 
-    let settings = match &cli.settings {
+    let user_settings = match &cli.settings {
         Some(path) => ClaudeSettings::load_from(std::path::Path::new(path))?,
         None => ClaudeSettings::load().unwrap_or_default(),
     };
-    settings.apply_env();
+    user_settings.apply_env();
+
+    let project_settings = ClaudeSettings::load_project(&cwd)?;
+    if let Some(layer) = &project_settings {
+        layer.settings.apply_env();
+    }
 
     let config = match Config::load() {
         Ok(config) => config,
         Err(ConfigError::MissingApiKey) => {
-            if let Some(ref helper) = settings.api_key_helper {
+            let merged_settings = merge_settings_layers(user_settings.clone(), project_settings.as_ref());
+            if let Some(ref helper) = merged_settings.api_key_helper {
                 match run_api_key_helper(helper) {
                     Ok(credential) => Config::with_credential(credential, true),
                     Err(e) => {
@@ -281,7 +352,7 @@ async fn main() -> Result<()> {
         Err(error) => return Err(error.into()),
     };
 
-    let resolved = resolve_config(&cli, config, &settings)?;
+    let resolved = resolve_config(&cli, config, user_settings, project_settings)?;
 
     if resolved.verbose {
         println!("cwd: {}", cwd.display());
@@ -291,6 +362,11 @@ async fn main() -> Result<()> {
         println!("stream: {}", resolved.stream);
         println!("permission_mode: {:?}", resolved.permission_mode);
         println!("max_turns: {:?}", resolved.max_turns);
+        println!("model_source: {}", resolved.config.provenance.model);
+        println!("permissions_source: {} / {}", resolved.config.provenance.always_allow, resolved.config.provenance.always_deny);
+        if let Some(layer) = &resolved.project_settings {
+            println!("project_settings: {}", layer.path.display());
+        }
         if resolved.allowed_tools.is_empty() {
             println!("allowed_tools: (all)");
         } else {
@@ -307,7 +383,8 @@ async fn main() -> Result<()> {
     state.session.system_prompt = resolved.system_prompt.clone();
     state.session.max_tokens = resolved.max_tokens;
     state.session.stream = resolved.stream;
-    // --no-thinking explicitly disables, --thinking explicitly enables, otherwise default (true)
+    state.config_provenance = resolved.config.provenance.clone();
+    state.git_context = collect_git_context(&cwd);
     if cli.no_thinking {
         state.session.thinking_enabled = false;
     } else if cli.thinking {
@@ -351,22 +428,25 @@ async fn main() -> Result<()> {
     }
 
     if resolved.system_prompt.is_none() {
-        let tools_for_prompt =
-            build_filtered_tools(&resolved.allowed_tools, &resolved.disallowed_tools);
-        let composed =
-            system_prompt::build_system_prompt(&cwd, &tools_for_prompt, &claude_md_files, None);
+        let tools_for_prompt = build_filtered_tools(&resolved.allowed_tools, &resolved.disallowed_tools);
+        let git_context = { app_state.lock().await.git_context.clone() };
+        let composed = system_prompt::build_system_prompt(
+            &cwd,
+            &tools_for_prompt,
+            &claude_md_files,
+            git_context.as_ref(),
+            None,
+        );
         let mut state = app_state.lock().await;
         state.session.system_prompt = Some(composed);
     }
 
     if resolved.print_mode {
         let prompt = cli.prompt.join(" ");
-        let client =
-            build_client(&resolved.api_key, resolved.base_url.clone(), resolved.bearer_auth)?;
+        let client = build_client(&resolved.api_key, resolved.base_url.clone(), resolved.bearer_auth)?;
         let mut tools = build_tools();
         tools.apply_tool_filters(&resolved.allowed_tools, &resolved.disallowed_tools);
-        let mut query_loop =
-            QueryLoop::new(client, tools).with_compaction_config(CompactionConfig::default());
+        let mut query_loop = QueryLoop::new(client, tools).with_compaction_config(CompactionConfig::default());
         if let Some(max_turns) = resolved.max_turns {
             query_loop = query_loop.with_max_rounds(max_turns);
         }
@@ -386,7 +466,7 @@ async fn main() -> Result<()> {
     } else {
         let allowed_tools = resolved.allowed_tools.clone();
         let disallowed_tools = resolved.disallowed_tools.clone();
-        run_tui(app_state, allowed_tools, disallowed_tools).await
+        run_tui(app_state, resolved.config.clone(), allowed_tools, disallowed_tools).await
     }
 }
 
@@ -449,31 +529,22 @@ fn build_filtered_tools(allowed: &[String], disallowed: &[String]) -> ToolRegist
 
 async fn run_tui(
     app_state: Arc<Mutex<AppState>>,
+    config: Config,
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
 ) -> Result<()> {
-    let (model, model_setting, permission_mode) = {
+    let (model, model_setting, permission_mode, git_branch) = {
         let state = app_state.lock().await;
         (
-            get_runtime_main_loop_model(
-                &state.session.model_setting,
-                state.permission_mode,
-                false,
-            ),
+            get_runtime_main_loop_model(&state.session.model_setting, state.permission_mode, false),
             state.session.model_setting.clone(),
             format!("{:?}", state.permission_mode),
+            state.git_context.as_ref().map(|g| g.branch.clone()),
         )
     };
 
-    let config = Config::load().map_err(|e| anyhow!("failed to load config for TUI: {e}"))?;
-    let base_url = std::env::var("RUST_CLAUDE_BASE_URL")
-        .ok()
-        .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok())
-        .or(config.base_url);
-    let bearer_auth = std::env::var("RUST_CLAUDE_BEARER_AUTH")
-        .ok()
-        .and_then(|v| parse_bool_env(&v))
-        .unwrap_or(config.bearer_auth);
+    let base_url = config.base_url.clone();
+    let bearer_auth = config.bearer_auth;
 
     let (event_tx, event_rx) = mpsc::channel(128);
     let (user_tx, mut user_rx) = mpsc::channel::<UserCommand>(16);
@@ -483,7 +554,7 @@ async fn run_tui(
     let worker_state = app_state.clone();
 
     worker_bridge
-        .send_status_update(&model, &model_setting, &permission_mode)
+        .send_status_update(&model, &model_setting, &permission_mode, git_branch.as_deref())
         .await;
 
     tokio::spawn(async move {
@@ -504,14 +575,8 @@ async fn run_tui(
                     worker_bridge.send_compaction_start().await;
                     let service = CompactionService::new(client, compaction_config.clone());
                     match service.force_compact(&worker_state).await {
-                        Ok(result) => {
-                            worker_bridge.send_compaction_complete(result).await;
-                        }
-                        Err(e) => {
-                            worker_bridge
-                                .send_error(&format!("Compaction failed: {e}"))
-                                .await;
-                        }
+                        Ok(result) => worker_bridge.send_compaction_complete(result).await,
+                        Err(e) => worker_bridge.send_error(&format!("Compaction failed: {e}")).await,
                     }
 
                     let state_snapshot = worker_state.lock().await;
@@ -541,7 +606,7 @@ async fn run_tui(
                         }
                     };
 
-                    let (runtime_model, model_setting, permission_mode_display) = {
+                    let (runtime_model, model_setting, permission_mode_display, git_branch) = {
                         let mut state = worker_state.lock().await;
                         state.permission_mode = mode;
                         state.session.model = get_runtime_main_loop_model(
@@ -555,11 +620,17 @@ async fn run_tui(
                             state.session.model.clone(),
                             state.session.model_setting.clone(),
                             format!("{:?}", state.permission_mode),
+                            state.git_context.as_ref().map(|g| g.branch.clone()),
                         )
                     };
 
                     worker_bridge
-                        .send_status_update(&runtime_model, &model_setting, &permission_mode_display)
+                        .send_status_update(
+                            &runtime_model,
+                            &model_setting,
+                            &permission_mode_display,
+                            git_branch.as_deref(),
+                        )
                         .await;
                     worker_bridge
                         .send_assistant_message(&format!("Permission mode switched to: {mode_str}"))
@@ -571,7 +642,7 @@ async fn run_tui(
                         continue;
                     }
 
-                    let (runtime_model, model_setting, permission_mode_display) = {
+                    let (runtime_model, model_setting, permission_mode_display, git_branch) = {
                         let mut state = worker_state.lock().await;
                         state.session.model_setting = model_str.trim().to_string();
                         state.session.model = get_runtime_main_loop_model(
@@ -585,15 +656,82 @@ async fn run_tui(
                             state.session.model.clone(),
                             state.session.model_setting.clone(),
                             format!("{:?}", state.permission_mode),
+                            state.git_context.as_ref().map(|g| g.branch.clone()),
                         )
                     };
 
                     worker_bridge
-                        .send_status_update(&runtime_model, &model_setting, &permission_mode_display)
+                        .send_status_update(
+                            &runtime_model,
+                            &model_setting,
+                            &permission_mode_display,
+                            git_branch.as_deref(),
+                        )
                         .await;
                     worker_bridge
                         .send_assistant_message(&format!("Model switched to: {model_setting}"))
                         .await;
+                }
+                UserCommand::ShowConfig => {
+                    let provenance = { worker_state.lock().await.config_provenance.clone() };
+                    worker_bridge.send_config_info(&provenance).await;
+                }
+                UserCommand::ShowCost => {
+                    let state = worker_state.lock().await;
+                    let usage = &state.total_usage;
+                    let est = (usage.input_tokens as f64 * 0.000_003_f64)
+                        + (usage.output_tokens as f64 * 0.000_015_f64);
+                    worker_bridge
+                        .send_assistant_message(&format!(
+                            "Session usage:\n  input_tokens: {}\n  output_tokens: {}\n  cache_read_input_tokens: {}\n  cache_creation_input_tokens: {}\n  estimated_cost_usd: ${:.4}",
+                            usage.input_tokens,
+                            usage.output_tokens,
+                            usage.cache_read_input_tokens,
+                            usage.cache_creation_input_tokens,
+                            est
+                        ))
+                        .await;
+                }
+                UserCommand::ShowDiff => {
+                    let cwd = { worker_state.lock().await.cwd.clone() };
+                    // Run blocking git work off the async runtime so it doesn't
+                    // stall the TUI event loop or other tasks.
+                    let cwd_for_blocking = cwd.clone();
+                    let (git_context, message) = tokio::task::spawn_blocking(move || {
+                        let git_context = collect_git_context(&cwd_for_blocking);
+                        let message = if let Some(git) = &git_context {
+                            let output = std::process::Command::new("git")
+                                .arg("diff")
+                                .current_dir(&git.repo_root)
+                                .output();
+                            match output {
+                                Ok(output) if output.status.success() => {
+                                    let diff = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                                    if diff.is_empty() {
+                                        "No working tree changes to display.".to_string()
+                                    } else {
+                                        diff
+                                    }
+                                }
+                                Ok(output) => format!(
+                                    "git diff failed: {}",
+                                    String::from_utf8_lossy(&output.stderr).trim()
+                                ),
+                                Err(e) => format!("git diff failed: {e}"),
+                            }
+                        } else {
+                            "No Git repository available.".to_string()
+                        };
+                        (git_context, message)
+                    })
+                    .await
+                    .unwrap_or_else(|e| (None, format!("git task join failed: {e}")));
+
+                    {
+                        let mut state = worker_state.lock().await;
+                        state.git_context = git_context;
+                    }
+                    worker_bridge.send_assistant_message(&message).await;
                 }
                 UserCommand::CancelStream => {
                     if let Some(handle) = active_query_task.take() {
@@ -630,8 +768,30 @@ async fn run_tui(
                                     .collect::<Vec<_>>()
                                     .join("\n");
 
-                                let (usage, runtime_model, model_setting, permission_mode_display, stream_enabled) = {
-                                    let state = worker_state_clone.lock().await;
+                                // Gather git context off the async runtime, outside
+                                // any mutex, so the blocking subprocess calls don't
+                                // stall the executor. We only hold the lock to read
+                                // cwd, release it, then reacquire once to write the
+                                // fresh context and collect the other fields.
+                                let cwd_snapshot = {
+                                    worker_state_clone.lock().await.cwd.clone()
+                                };
+                                let new_git_context = tokio::task::spawn_blocking(move || {
+                                    collect_git_context(&cwd_snapshot)
+                                })
+                                .await
+                                .unwrap_or(None);
+
+                                let (
+                                    usage,
+                                    runtime_model,
+                                    model_setting,
+                                    permission_mode_display,
+                                    stream_enabled,
+                                    git_branch,
+                                ) = {
+                                    let mut state = worker_state_clone.lock().await;
+                                    state.git_context = new_git_context;
                                     (
                                         state.total_usage.clone(),
                                         get_runtime_main_loop_model(
@@ -644,6 +804,7 @@ async fn run_tui(
                                         state.session.model_setting.clone(),
                                         format!("{:?}", state.permission_mode),
                                         state.session.stream,
+                                        state.git_context.as_ref().map(|g| g.branch.clone()),
                                     )
                                 };
 
@@ -651,7 +812,9 @@ async fn run_tui(
                                     if !text.is_empty() {
                                         worker_bridge_clone.send_assistant_message(&text).await;
                                     } else {
-                                        worker_bridge_clone.send_assistant_message("(no text content)").await;
+                                        worker_bridge_clone
+                                            .send_assistant_message("(no text content)")
+                                            .await;
                                     }
                                 }
 
@@ -664,7 +827,12 @@ async fn run_tui(
                                     )
                                     .await;
                                 worker_bridge_clone
-                                    .send_status_update(&runtime_model, &model_setting, &permission_mode_display)
+                                    .send_status_update(
+                                        &runtime_model,
+                                        &model_setting,
+                                        &permission_mode_display,
+                                        git_branch.as_deref(),
+                                    )
                                     .await;
                             }
                             Err(error) => {
@@ -694,7 +862,7 @@ async fn run_tui(
     });
 
     let mut terminal_guard = TerminalGuard::new()?;
-    let mut app = App::new(model, model_setting, permission_mode);
+    let mut app = App::new(model, model_setting, permission_mode, git_branch);
     app.run(terminal_guard.terminal_mut(), event_rx, user_tx).await?;
     Ok(())
 }
@@ -702,9 +870,56 @@ async fn run_tui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    /// Tests in this module mutate process-global env variables
+    /// (`ANTHROPIC_MODEL`, `RUST_CLAUDE_MODEL_OVERRIDE`, etc.). Rust runs tests
+    /// in parallel, so we serialize every test that reads/writes these
+    /// variables through a single shared lock.
+    fn env_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    /// RAII guard that clears `ANTHROPIC_MODEL` and `RUST_CLAUDE_MODEL_OVERRIDE`
+    /// for the duration of a test and restores them on drop.
+    struct EnvReset {
+        anthropic_model: Option<String>,
+        override_model: Option<String>,
+    }
+
+    impl EnvReset {
+        fn new() -> Self {
+            let anthropic_model = std::env::var("ANTHROPIC_MODEL").ok();
+            let override_model = std::env::var("RUST_CLAUDE_MODEL_OVERRIDE").ok();
+            unsafe {
+                std::env::remove_var("ANTHROPIC_MODEL");
+                std::env::remove_var("RUST_CLAUDE_MODEL_OVERRIDE");
+            }
+            Self { anthropic_model, override_model }
+        }
+    }
+
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.anthropic_model {
+                    Some(v) => std::env::set_var("ANTHROPIC_MODEL", v),
+                    None => std::env::remove_var("ANTHROPIC_MODEL"),
+                }
+                match &self.override_model {
+                    Some(v) => std::env::set_var("RUST_CLAUDE_MODEL_OVERRIDE", v),
+                    None => std::env::remove_var("RUST_CLAUDE_MODEL_OVERRIDE"),
+                }
+            }
+        }
+    }
 
     #[test]
-    fn resolve_config_parses_model_aliases_before_storing_session_model() {
+    fn resolve_config_prefers_cli_over_project_and_user() {
+        let _g = env_lock();
+        let _reset = EnvReset::new();
+
         let cli = Cli {
             prompt: vec![],
             mode: None,
@@ -727,37 +942,165 @@ mod tests {
             settings: None,
         };
         let config = Config::with_credential("test-key".to_string(), false);
-        let settings = ClaudeSettings::default();
+        let user_settings = ClaudeSettings {
+            model: Some("user-model".into()),
+            ..Default::default()
+        };
+        let project_settings = Some(SettingsLayer {
+            path: std::path::PathBuf::from("/repo/.claude/settings.json"),
+            settings: ClaudeSettings {
+                model: Some("project-model".into()),
+                ..Default::default()
+            },
+        });
 
-        let resolved = resolve_config(&cli, config, &settings).unwrap();
+        let resolved = resolve_config(&cli, config, user_settings, project_settings).unwrap();
         assert_eq!(resolved.model_setting, "opus[1m]");
         assert_eq!(resolved.model, "claude-opus-4-6[1m]");
+        assert_eq!(resolved.config.provenance.model, ConfigSource::Cli);
     }
 
     #[test]
-    fn restored_assistant_message_usage_can_drive_opusplan_fallback() {
-        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
-        state.permission_mode = PermissionMode::Plan;
-        state.session.model_setting = "opusplan".to_string();
-        state.add_assistant_message(rust_claude_core::message::Message::assistant_with_usage(
-            vec![ContentBlock::text("previous")],
-            rust_claude_core::message::Usage {
-                input_tokens: 150_000,
-                output_tokens: 40_000,
-                cache_creation_input_tokens: 10_001,
-                cache_read_input_tokens: 0,
+    fn resolve_config_uses_project_permissions() {
+        let _g = env_lock();
+        let _reset = EnvReset::new();
+
+        let cli = Cli {
+            prompt: vec![],
+            mode: None,
+            model: None,
+            print: false,
+            output_format: None,
+            max_turns: None,
+            system_prompt: None,
+            system_prompt_file: None,
+            append_system_prompt: None,
+            append_system_prompt_file: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_tokens: None,
+            no_stream: false,
+            thinking: false,
+            no_thinking: false,
+            verbose: false,
+            continue_session: false,
+            settings: None,
+        };
+        let config = Config::with_credential("test-key".to_string(), false);
+        let project_settings = Some(SettingsLayer {
+            path: std::path::PathBuf::from("/repo/.claude/settings.json"),
+            settings: ClaudeSettings {
+                permissions: rust_claude_core::settings::SettingsPermissions {
+                    allow: vec!["Bash(git status *)".into()],
+                    deny: vec![],
+                },
+                ..Default::default()
             },
-        ));
+        });
 
-        let runtime_model = get_runtime_main_loop_model(
-            &state.session.model_setting,
-            state.permission_mode,
-            state
-                .most_recent_assistant_usage()
-                .is_some_and(rust_claude_core::model::usage_exceeds_200k_tokens),
-        );
+        let resolved = resolve_config(&cli, config, ClaudeSettings::default(), project_settings).unwrap();
+        assert_eq!(resolved.always_allow.len(), 1);
+        assert_eq!(resolved.config.provenance.always_allow, ConfigSource::ProjectSettings);
+    }
 
-        assert_eq!(runtime_model, "claude-sonnet-4-6");
+    fn default_cli() -> Cli {
+        Cli {
+            prompt: vec![],
+            mode: None,
+            model: None,
+            print: false,
+            output_format: None,
+            max_turns: None,
+            system_prompt: None,
+            system_prompt_file: None,
+            append_system_prompt: None,
+            append_system_prompt_file: None,
+            allowed_tools: None,
+            disallowed_tools: None,
+            max_tokens: None,
+            no_stream: false,
+            thinking: false,
+            no_thinking: false,
+            verbose: false,
+            continue_session: false,
+            settings: None,
+        }
+    }
+
+    /// Regression: user-scope `deny` rules must survive when a project-scope
+    /// settings file only contributes `allow` rules.
+    #[test]
+    fn resolve_config_merges_user_deny_with_project_allow() {
+        let _g = env_lock();
+        let _reset = EnvReset::new();
+
+        let cli = default_cli();
+        let config = Config::with_credential("test-key".to_string(), false);
+        let user_settings = ClaudeSettings {
+            permissions: rust_claude_core::settings::SettingsPermissions {
+                allow: vec![],
+                deny: vec!["Bash(rm *)".into()],
+            },
+            ..Default::default()
+        };
+        let project_settings = Some(SettingsLayer {
+            path: std::path::PathBuf::from("/repo/.claude/settings.json"),
+            settings: ClaudeSettings {
+                permissions: rust_claude_core::settings::SettingsPermissions {
+                    allow: vec!["Bash(git status *)".into()],
+                    deny: vec![],
+                },
+                ..Default::default()
+            },
+        });
+
+        let resolved = resolve_config(&cli, config, user_settings, project_settings).unwrap();
+        // Both layers contribute to the respective lists.
+        assert_eq!(resolved.always_allow.len(), 1, "project allow preserved");
+        assert_eq!(resolved.always_deny.len(), 1, "user deny preserved");
+        // Allow provenance points at the project (it's the sole contributor),
+        // deny provenance points at the user (it's the sole contributor).
+        assert_eq!(resolved.config.provenance.always_allow, ConfigSource::ProjectSettings);
+        assert_eq!(resolved.config.provenance.always_deny, ConfigSource::UserConfig);
+    }
+
+    /// Regression for the priority chain: `--model` must beat `ANTHROPIC_MODEL`
+    /// when both are present.
+    #[test]
+    fn resolve_config_cli_model_beats_anthropic_model_env() {
+        let _g = env_lock();
+        let _reset = EnvReset::new();
+        // SAFETY: test-only, serialized by env_lock above.
+        unsafe { std::env::set_var("ANTHROPIC_MODEL", "env-model") };
+
+        let mut cli = default_cli();
+        cli.model = Some("opus[1m]".to_string());
+
+        let config = Config::with_credential("test-key".to_string(), false);
+        let resolved =
+            resolve_config(&cli, config, ClaudeSettings::default(), None).unwrap();
+
+        assert_eq!(resolved.model_setting, "opus[1m]");
+        assert_eq!(resolved.config.provenance.model, ConfigSource::Cli);
+    }
+
+    /// `RUST_CLAUDE_MODEL_OVERRIDE` must still beat both CLI `--model` and
+    /// `ANTHROPIC_MODEL` (top of the documented priority chain).
+    #[test]
+    fn resolve_config_rust_claude_model_override_beats_cli() {
+        let _g = env_lock();
+        let _reset = EnvReset::new();
+        unsafe { std::env::set_var("RUST_CLAUDE_MODEL_OVERRIDE", "override-model") };
+
+        let mut cli = default_cli();
+        cli.model = Some("opus[1m]".to_string());
+
+        let config = Config::with_credential("test-key".to_string(), false);
+        let resolved =
+            resolve_config(&cli, config, ClaudeSettings::default(), None).unwrap();
+
+        assert_eq!(resolved.model_setting, "override-model");
+        assert_eq!(resolved.config.provenance.model, ConfigSource::Env);
     }
 }
 

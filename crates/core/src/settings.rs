@@ -1,9 +1,11 @@
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Representation of `~/.claude/settings.json`.
-/// Reads `env`, `model`, and `apiKeyHelper` fields.
+use crate::permission::{PermissionError, PermissionRule, RuleType};
+
+/// Representation of `~/.claude/settings.json` or project `.claude/settings.json`.
+/// Reads `env`, `model`, `apiKeyHelper`, and `permissions` fields.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ClaudeSettings {
     #[serde(default)]
@@ -16,6 +18,29 @@ pub struct ClaudeSettings {
     /// Script/command that outputs an API credential to stdout.
     #[serde(default, rename = "apiKeyHelper")]
     pub api_key_helper: Option<String>,
+
+    #[serde(default)]
+    pub permissions: SettingsPermissions,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SettingsPermissions {
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ParsedPermissions {
+    pub allow: Vec<PermissionRule>,
+    pub deny: Vec<PermissionRule>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SettingsLayer {
+    pub path: PathBuf,
+    pub settings: ClaudeSettings,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -26,6 +51,8 @@ pub enum SettingsError {
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("permission parse error: {0}")]
+    Permission(#[from] PermissionError),
 }
 
 impl ClaudeSettings {
@@ -38,13 +65,40 @@ impl ClaudeSettings {
 
     /// Load settings from a custom path.
     /// Returns an empty settings object if the file does not exist.
-    pub fn load_from(path: &std::path::Path) -> Result<Self, SettingsError> {
+    pub fn load_from(path: &Path) -> Result<Self, SettingsError> {
         if path.exists() {
             let content = std::fs::read_to_string(path)?;
             let settings: ClaudeSettings = serde_json::from_str(&content)?;
             Ok(settings)
         } else {
             Ok(ClaudeSettings::default())
+        }
+    }
+
+    pub fn load_layer_from(path: &Path) -> Result<Option<SettingsLayer>, SettingsError> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        let settings = Self::load_from(path)?;
+        Ok(Some(SettingsLayer {
+            path: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
+            settings,
+        }))
+    }
+
+    pub fn discover_project_settings(cwd: &Path) -> Option<PathBuf> {
+        crate::claude_md::project_discovery_dirs(cwd)
+            .into_iter()
+            .find_map(|dir| {
+                let path = dir.join(".claude").join("settings.json");
+                path.exists().then_some(path)
+            })
+    }
+
+    pub fn load_project(cwd: &Path) -> Result<Option<SettingsLayer>, SettingsError> {
+        match Self::discover_project_settings(cwd) {
+            Some(path) => Self::load_layer_from(&path),
+            None => Ok(None),
         }
     }
 
@@ -66,6 +120,47 @@ impl ClaudeSettings {
                     std::env::set_var(key, value);
                 }
             }
+        }
+    }
+
+    pub fn parsed_permissions(&self) -> Result<ParsedPermissions, SettingsError> {
+        let allow = self
+            .permissions
+            .allow
+            .iter()
+            .map(|rule| PermissionRule::parse(rule, RuleType::Allow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let deny = self
+            .permissions
+            .deny
+            .iter()
+            .map(|rule| PermissionRule::parse(rule, RuleType::Deny))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ParsedPermissions { allow, deny })
+    }
+
+    pub fn merge(high: &ClaudeSettings, low: &ClaudeSettings) -> ClaudeSettings {
+        let mut env = low.env.clone();
+        env.extend(high.env.clone());
+
+        // Permission lists from each layer are concatenated rather than replaced.
+        // Dropping the lower layer's deny rules when the higher layer adds any
+        // allow/deny entries would silently weaken security (e.g. a project's
+        // allow list erasing the user's global deny list). The deny-before-allow
+        // precedence is enforced by `PermissionManager`, not by list order.
+        let mut allow = low.permissions.allow.clone();
+        allow.extend(high.permissions.allow.iter().cloned());
+        let mut deny = low.permissions.deny.clone();
+        deny.extend(high.permissions.deny.iter().cloned());
+
+        ClaudeSettings {
+            env,
+            model: high.model.clone().or_else(|| low.model.clone()),
+            api_key_helper: high
+                .api_key_helper
+                .clone()
+                .or_else(|| low.api_key_helper.clone()),
+            permissions: SettingsPermissions { allow, deny },
         }
     }
 }
@@ -129,14 +224,13 @@ mod tests {
     fn test_apply_env_sets_missing_keys() {
         let mut env = HashMap::new();
         let test_key = "RUST_CLAUDE_TEST_SETTINGS_APPLY_KEY";
-        // Ensure key is not set
         std::env::remove_var(test_key);
-        env.insert(
-            test_key.to_string(),
-            "from-settings".to_string(),
-        );
+        env.insert(test_key.to_string(), "from-settings".to_string());
 
-        let settings = ClaudeSettings { env, ..Default::default() };
+        let settings = ClaudeSettings {
+            env,
+            ..Default::default()
+        };
         settings.apply_env();
 
         assert_eq!(std::env::var(test_key).unwrap(), "from-settings");
@@ -151,10 +245,102 @@ mod tests {
         let mut env = HashMap::new();
         env.insert(test_key.to_string(), "from-settings".to_string());
 
-        let settings = ClaudeSettings { env, ..Default::default() };
+        let settings = ClaudeSettings {
+            env,
+            ..Default::default()
+        };
         settings.apply_env();
 
         assert_eq!(std::env::var(test_key).unwrap(), "from-shell");
         std::env::remove_var(test_key);
+    }
+
+    #[test]
+    fn test_parse_permissions() {
+        let settings = ClaudeSettings {
+            permissions: SettingsPermissions {
+                allow: vec!["Bash(git status *)".into()],
+                deny: vec!["FileWrite".into()],
+            },
+            ..Default::default()
+        };
+
+        let parsed = settings.parsed_permissions().unwrap();
+        assert_eq!(parsed.allow.len(), 1);
+        assert_eq!(parsed.deny.len(), 1);
+        assert_eq!(parsed.allow[0].tool_name, "Bash");
+        assert_eq!(parsed.deny[0].tool_name, "FileWrite");
+    }
+
+    #[test]
+    fn test_discover_project_settings_uses_git_boundary() {
+        let root = make_temp_dir("project-settings");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(".claude")).unwrap();
+        fs::write(root.join(".claude/settings.json"), "{}").unwrap();
+        let subdir = root.join("nested/app");
+        fs::create_dir_all(&subdir).unwrap();
+
+        let found = ClaudeSettings::discover_project_settings(&subdir).unwrap();
+        assert!(found.ends_with(".claude/settings.json"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_merge_prefers_high_priority_fields() {
+        let mut low_env = HashMap::new();
+        low_env.insert("A".into(), "1".into());
+        let mut high_env = HashMap::new();
+        high_env.insert("B".into(), "2".into());
+
+        let low = ClaudeSettings {
+            env: low_env,
+            model: Some("low".into()),
+            permissions: SettingsPermissions {
+                allow: vec!["FileRead".into()],
+                deny: vec![],
+            },
+            ..Default::default()
+        };
+        let high = ClaudeSettings {
+            env: high_env,
+            model: Some("high".into()),
+            permissions: SettingsPermissions {
+                allow: vec!["Bash".into()],
+                deny: vec![],
+            },
+            ..Default::default()
+        };
+
+        let merged = ClaudeSettings::merge(&high, &low);
+        assert_eq!(merged.model.as_deref(), Some("high"));
+        assert_eq!(merged.env.get("A").map(String::as_str), Some("1"));
+        assert_eq!(merged.env.get("B").map(String::as_str), Some("2"));
+        // Both layers' allow entries are preserved; low-layer first, high-layer after.
+        assert_eq!(merged.permissions.allow, vec!["FileRead", "Bash"]);
+    }
+
+    #[test]
+    fn test_merge_preserves_user_deny_when_project_only_sets_allow() {
+        // Regression: a project `.claude/settings.json` that only defines `allow`
+        // entries must not drop the user-scope `deny` rules.
+        let user = ClaudeSettings {
+            permissions: SettingsPermissions {
+                allow: vec![],
+                deny: vec!["Bash(rm *)".into()],
+            },
+            ..Default::default()
+        };
+        let project = ClaudeSettings {
+            permissions: SettingsPermissions {
+                allow: vec!["Bash(git status *)".into()],
+                deny: vec![],
+            },
+            ..Default::default()
+        };
+
+        let merged = ClaudeSettings::merge(&project, &user);
+        assert_eq!(merged.permissions.deny, vec!["Bash(rm *)"]);
+        assert_eq!(merged.permissions.allow, vec!["Bash(git status *)"]);
     }
 }

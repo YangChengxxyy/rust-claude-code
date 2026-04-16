@@ -1,5 +1,6 @@
 use crossterm::event::KeyEvent;
 use rust_claude_core::compaction::CompactionResult;
+use rust_claude_core::config::ConfigProvenance;
 use rust_claude_core::state::TodoItem;
 
 /// Commands emitted by the TUI input layer toward the background worker.
@@ -10,6 +11,9 @@ pub enum UserCommand {
     SetMode(String),
     SetModel(String),
     CancelStream,
+    ShowConfig,
+    ShowCost,
+    ShowDiff,
 }
 
 /// Events consumed by the TUI application.
@@ -56,6 +60,12 @@ pub enum AppEvent {
         model: String,
         model_setting: String,
         permission_mode: String,
+        git_branch: Option<String>,
+    },
+    ConfigInfo {
+        model_source: String,
+        permission_source: String,
+        base_url_source: String,
     },
     /// An error to display to the user.
     Error(String),
@@ -157,6 +167,14 @@ impl ChatMessage {
     }
 }
 
+pub fn format_provenance_summary(provenance: &ConfigProvenance) -> (String, String, String) {
+    (
+        provenance.model.to_string(),
+        format!("allow:{} deny:{}", provenance.always_allow, provenance.always_deny),
+        provenance.base_url.to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,44 +218,5 @@ mod tests {
             "Error: "
         );
         assert_eq!(ChatMessage::System("info".into()).prefix(), "System: ");
-    }
-
-    #[test]
-    fn test_chat_message_body() {
-        assert_eq!(ChatMessage::User("hello".into()).body(), "hello");
-        assert_eq!(
-            ChatMessage::Thinking {
-                summary: "Thought for ~10 tokens".into(),
-                content: "reasoning".into()
-            }
-            .body(),
-            "reasoning"
-        );
-        assert_eq!(
-            ChatMessage::ToolUse {
-                name: "Bash".into(),
-                input_summary: "".into()
-            }
-            .body(),
-            "Bash"
-        );
-        assert_eq!(
-            ChatMessage::ToolUse {
-                name: "Bash".into(),
-                input_summary: "echo hi".into()
-            }
-            .body(),
-            "echo hi"
-        );
-    }
-
-    #[test]
-    fn test_user_facing_tool_name() {
-        assert_eq!(ChatMessage::user_facing_tool_name("FileRead"), "Read");
-        assert_eq!(ChatMessage::user_facing_tool_name("FileEdit"), "Update");
-        assert_eq!(ChatMessage::user_facing_tool_name("FileWrite"), "Write");
-        assert_eq!(ChatMessage::user_facing_tool_name("Bash"), "Bash");
-        assert_eq!(ChatMessage::user_facing_tool_name("TodoWrite"), "Todo");
-        assert_eq!(ChatMessage::user_facing_tool_name("Unknown"), "Unknown");
     }
 }

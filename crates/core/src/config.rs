@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +23,8 @@ pub struct Config {
     pub always_deny: Vec<crate::permission::PermissionRule>,
     #[serde(default = "default_true")]
     pub stream: bool,
+    #[serde(default)]
+    pub provenance: ConfigProvenance,
 }
 
 fn default_model() -> String {
@@ -34,6 +37,58 @@ fn default_max_tokens() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigSource {
+    Default,
+    UserConfig,
+    ProjectSettings,
+    Env,
+    Cli,
+}
+
+impl fmt::Display for ConfigSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            ConfigSource::Default => "default",
+            ConfigSource::UserConfig => "user-config",
+            ConfigSource::ProjectSettings => "project-settings",
+            ConfigSource::Env => "env",
+            ConfigSource::Cli => "cli",
+        };
+        write!(f, "{label}")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigProvenance {
+    pub model: ConfigSource,
+    pub base_url: ConfigSource,
+    pub bearer_auth: ConfigSource,
+    pub system_prompt: ConfigSource,
+    pub max_tokens: ConfigSource,
+    pub permission_mode: ConfigSource,
+    pub always_allow: ConfigSource,
+    pub always_deny: ConfigSource,
+    pub stream: ConfigSource,
+}
+
+impl Default for ConfigProvenance {
+    fn default() -> Self {
+        Self {
+            model: ConfigSource::Default,
+            base_url: ConfigSource::Default,
+            bearer_auth: ConfigSource::Default,
+            system_prompt: ConfigSource::Default,
+            max_tokens: ConfigSource::Default,
+            permission_mode: ConfigSource::Default,
+            always_allow: ConfigSource::Default,
+            always_deny: ConfigSource::Default,
+            stream: ConfigSource::Default,
+        }
+    }
 }
 
 impl Config {
@@ -50,6 +105,35 @@ impl Config {
                 None => Self::resolve_credential_from_env(raw.bearer_auth)?,
             };
 
+            let mut provenance = ConfigProvenance::default();
+            if raw.model.is_some() {
+                provenance.model = ConfigSource::UserConfig;
+            }
+            if raw.base_url.is_some() {
+                provenance.base_url = ConfigSource::UserConfig;
+            }
+            if raw.bearer_auth.is_some() {
+                provenance.bearer_auth = ConfigSource::UserConfig;
+            }
+            if raw.system_prompt.is_some() {
+                provenance.system_prompt = ConfigSource::UserConfig;
+            }
+            if raw.max_tokens.is_some() {
+                provenance.max_tokens = ConfigSource::UserConfig;
+            }
+            if raw.permission_mode.is_some() {
+                provenance.permission_mode = ConfigSource::UserConfig;
+            }
+            if raw.always_allow.is_some() {
+                provenance.always_allow = ConfigSource::UserConfig;
+            }
+            if raw.always_deny.is_some() {
+                provenance.always_deny = ConfigSource::UserConfig;
+            }
+            if raw.stream.is_some() {
+                provenance.stream = ConfigSource::UserConfig;
+            }
+
             Ok(Config {
                 api_key,
                 model: raw.model.unwrap_or_else(default_model),
@@ -61,6 +145,7 @@ impl Config {
                 always_allow: raw.always_allow.unwrap_or_default(),
                 always_deny: raw.always_deny.unwrap_or_default(),
                 stream: raw.stream.unwrap_or_else(default_true),
+                provenance,
             })
         } else {
             let (api_key, bearer_auth) = Self::resolve_credential_from_env(None)?;
@@ -76,6 +161,7 @@ impl Config {
                 always_allow: Vec::new(),
                 always_deny: Vec::new(),
                 stream: true,
+                provenance: ConfigProvenance::default(),
             })
         }
     }
@@ -129,6 +215,7 @@ impl Config {
             always_allow: Vec::new(),
             always_deny: Vec::new(),
             stream: true,
+            provenance: ConfigProvenance::default(),
         }
     }
 
@@ -139,6 +226,78 @@ impl Config {
 
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
+        self
+    }
+
+    pub fn default_provenance() -> ConfigProvenance {
+        ConfigProvenance::default()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedField<T> {
+    pub value: Option<T>,
+    pub source: Option<ConfigSource>,
+}
+
+impl<T> ResolvedField<T> {
+    pub fn set(&mut self, value: T, source: ConfigSource) {
+        self.value = Some(value);
+        self.source = Some(source);
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConfigOverrides {
+    pub model: ResolvedField<String>,
+    pub base_url: ResolvedField<Option<String>>,
+    pub bearer_auth: ResolvedField<bool>,
+    pub system_prompt: ResolvedField<Option<String>>,
+    pub max_tokens: ResolvedField<u32>,
+    pub permission_mode: ResolvedField<crate::permission::PermissionMode>,
+    pub always_allow: ResolvedField<Vec<crate::permission::PermissionRule>>,
+    pub always_deny: ResolvedField<Vec<crate::permission::PermissionRule>>,
+    pub stream: ResolvedField<bool>,
+}
+
+impl Config {
+    pub fn apply_overrides(mut self, overrides: ConfigOverrides) -> Self {
+        if let Some(value) = overrides.model.value {
+            self.model = value;
+            self.provenance.model = overrides.model.source.unwrap_or(ConfigSource::Default);
+        }
+        if let Some(value) = overrides.base_url.value {
+            self.base_url = value;
+            self.provenance.base_url = overrides.base_url.source.unwrap_or(ConfigSource::Default);
+        }
+        if let Some(value) = overrides.bearer_auth.value {
+            self.bearer_auth = value;
+            self.provenance.bearer_auth = overrides.bearer_auth.source.unwrap_or(ConfigSource::Default);
+        }
+        if let Some(value) = overrides.system_prompt.value {
+            self.system_prompt = value;
+            self.provenance.system_prompt = overrides.system_prompt.source.unwrap_or(ConfigSource::Default);
+        }
+        if let Some(value) = overrides.max_tokens.value {
+            self.max_tokens = value;
+            self.provenance.max_tokens = overrides.max_tokens.source.unwrap_or(ConfigSource::Default);
+        }
+        if let Some(value) = overrides.permission_mode.value {
+            self.permission_mode = value;
+            self.provenance.permission_mode = overrides.permission_mode.source.unwrap_or(ConfigSource::Default);
+        }
+        if let Some(value) = overrides.always_allow.value {
+            self.always_allow = value;
+            self.provenance.always_allow = overrides.always_allow.source.unwrap_or(ConfigSource::Default);
+        }
+        if let Some(value) = overrides.always_deny.value {
+            self.always_deny = value;
+            self.provenance.always_deny = overrides.always_deny.source.unwrap_or(ConfigSource::Default);
+        }
+        if let Some(value) = overrides.stream.value {
+            self.stream = value;
+            self.provenance.stream = overrides.stream.source.unwrap_or(ConfigSource::Default);
+        }
         self
     }
 }
@@ -280,6 +439,7 @@ mod tests {
             always_allow: vec![],
             always_deny: vec![],
             stream: false,
+            provenance: ConfigProvenance::default(),
         };
 
         let json = serde_json::to_string_pretty(&config).unwrap();

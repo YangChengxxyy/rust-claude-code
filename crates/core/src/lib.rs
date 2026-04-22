@@ -3,6 +3,7 @@ pub mod compaction;
 pub mod config;
 pub mod git;
 pub mod hooks;
+pub mod memory;
 pub mod mcp_config;
 pub mod message;
 pub mod model;

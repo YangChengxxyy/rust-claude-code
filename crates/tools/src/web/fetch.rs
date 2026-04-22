@@ -1,5 +1,27 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
+
+use regex::Regex;
+
+// Pre-compiled regexes for html_to_text — compiled once, reused on every call.
+static RE_SCRIPT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)<script.*?</script>").unwrap());
+static RE_STYLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)<style.*?</style>").unwrap());
+static RE_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)<[^>]+>").unwrap());
+static RE_WHITESPACE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[ \t\x0B\f\r]+").unwrap());
+
+// Shared HTTP client — reuses connection pool across fetches.
+static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent("rust-claude/0.1")
+        .build()
+        .expect("failed to build HTTP client")
+});
 
 #[derive(Debug, Clone)]
 pub struct WebPage {
@@ -30,28 +52,28 @@ impl WebCache {
 }
 
 pub async fn fetch_url(url: &str) -> Result<String, reqwest::Error> {
-    let response = reqwest::Client::new().get(url).send().await?;
+    let response = HTTP_CLIENT
+        .get(url)
+        .send()
+        .await?
+        .error_for_status()?;
     response.text().await
 }
 
 pub fn html_to_text(html: &str) -> String {
-    // Minimal first pass: strip scripts/styles/tags and collapse whitespace.
-    let without_scripts = regex::Regex::new(r"(?is)<script.*?</script>")
-        .unwrap()
-        .replace_all(html, " ");
-    let without_styles = regex::Regex::new(r"(?is)<style.*?</style>")
-        .unwrap()
-        .replace_all(&without_scripts, " ");
-    let without_tags = regex::Regex::new(r"(?is)<[^>]+>")
-        .unwrap()
-        .replace_all(&without_styles, " ");
+    // Strip scripts, styles, tags, then collapse whitespace.
+    let without_scripts = RE_SCRIPT.replace_all(html, " ");
+    let without_styles = RE_STYLE.replace_all(&without_scripts, " ");
+    let without_tags = RE_TAG.replace_all(&without_styles, " ");
     let decoded = without_tags
         .replace("&nbsp;", " ")
         .replace("&amp;", "&")
         .replace("&lt;", "<")
-        .replace("&gt;", ">");
-    regex::Regex::new(r"[ \t\x0B\f\r]+")
-        .unwrap()
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'");
+    RE_WHITESPACE
         .replace_all(&decoded, " ")
         .to_string()
         .lines()

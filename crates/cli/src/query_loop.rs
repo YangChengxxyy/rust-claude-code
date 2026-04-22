@@ -9,6 +9,7 @@ use rust_claude_api::{
 };
 use rust_claude_core::{
     compaction::CompactionConfig,
+    memory,
     message::{ContentBlock, Message, StopReason},
     model::{
         get_runtime_main_loop_model, get_thinking_config_for_model,
@@ -322,6 +323,28 @@ where
             state.permission_mode,
             exceeds_200k_tokens,
         );
+        let cwd = state.cwd.clone();
+        let user_text = state
+            .messages
+            .iter()
+            .rev()
+            .find_map(|msg| {
+                if matches!(msg.role, rust_claude_core::message::Role::User) {
+                    msg.content.iter().find_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+        let scanned_memory = memory::discover_memory_store(&cwd)
+            .and_then(|store| memory::scan_memory_store(&store).ok());
+        let relevant_memories = scanned_memory
+            .as_ref()
+            .map(|scanned| memory::select_relevant_memories(scanned, &user_text, 5))
+            .unwrap_or_default();
 
         // Serialize messages as JSON values so we can inject cache_control
         let messages: Vec<ApiMessage> = state
@@ -337,8 +360,15 @@ where
 
         // Convert system prompt to structured blocks with cache_control on last block
         let system = state.session.system_prompt.as_ref().map(|text| {
+            let mut full_prompt = text.clone();
+            if let Some(extra) = memory::build_relevant_memories_section(&relevant_memories) {
+                if !full_prompt.is_empty() {
+                    full_prompt.push_str("\n\n");
+                }
+                full_prompt.push_str(&extra);
+            }
             SystemPrompt::StructuredBlocks(vec![
-                SystemBlock::text(text.as_str()).with_cache_control()
+                SystemBlock::text(full_prompt).with_cache_control()
             ])
         });
 
@@ -676,6 +706,7 @@ mod tests {
                             thinking: thinking.clone(),
                         })
                     }
+                    ContentBlock::Image { .. } => None,
                     ContentBlock::ToolUse { .. } => None,
                     ContentBlock::ToolResult { .. } => None,
                     ContentBlock::Unknown => None,

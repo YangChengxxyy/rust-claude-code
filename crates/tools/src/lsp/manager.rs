@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use rust_claude_mcp::jsonrpc::JsonRpcRequest;
+use rust_claude_mcp::jsonrpc::{JsonRpcNotification, JsonRpcRequest};
 use tokio::sync::Mutex;
 
 use super::error::LspError;
@@ -16,7 +17,7 @@ pub struct LspSessionKey {
 }
 
 pub struct LspManager {
-    sessions: Mutex<HashMap<LspSessionKey, LspTransport>>,
+    sessions: Mutex<HashMap<LspSessionKey, Arc<LspTransport>>>,
 }
 
 impl LspManager {
@@ -38,19 +39,35 @@ impl LspManager {
         if !sessions.contains_key(&key) {
             let server = discover_server_command(language);
             let transport = LspTransport::start(&server, cwd)?;
+
+            // LSP spec: send initialize request and wait for response.
             let init = LspRequest::initialize(cwd);
             let request = JsonRpcRequest::new(init.method, Some(init.params));
             transport.send_request(&request).await?;
-            sessions.insert(key.clone(), transport);
+
+            // LSP spec: send `initialized` notification after receiving initialize response.
+            let initialized = JsonRpcNotification {
+                jsonrpc: "2.0".into(),
+                method: "initialized".into(),
+                params: Some(serde_json::json!({})),
+            };
+            transport.send_notification(&initialized).await?;
+
+            sessions.insert(key.clone(), Arc::new(transport));
         }
         Ok(key)
     }
 
     pub async fn request(&self, key: &LspSessionKey, request: LspRequest) -> Result<serde_json::Value, LspError> {
-        let sessions = self.sessions.lock().await;
-        let transport = sessions
-            .get(key)
-            .ok_or_else(|| LspError::Protocol("LSP session not initialized".into()))?;
+        // Clone the Arc to release the lock before sending the request,
+        // so concurrent LSP requests are not serialized.
+        let transport = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .get(key)
+                .cloned()
+                .ok_or_else(|| LspError::Protocol("LSP session not initialized".into()))?
+        };
         let rpc = JsonRpcRequest::new(request.method, Some(request.params));
         transport.send_request(&rpc).await
     }

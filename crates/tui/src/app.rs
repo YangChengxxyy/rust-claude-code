@@ -55,6 +55,11 @@ const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         description: "Switch permission mode",
     },
     SlashCommandSpec {
+        name: "/memory",
+        usage: "/memory [remember|forget] ...",
+        description: "Inspect or maintain current memory store",
+    },
+    SlashCommandSpec {
         name: "/model",
         usage: "/model <model>",
         description: "Switch model setting",
@@ -916,6 +921,56 @@ impl App {
                     self.sync_chat_viewport();
                 }
             }
+            "/memory" => {
+                match arg {
+                    None => {
+                        let _ = user_tx.send(UserCommand::ShowMemory).await;
+                    }
+                    Some("remember") => {
+                        if parts.len() < 6 {
+                            self.messages.push(ChatMessage::System(
+                                "Usage: /memory remember <type> <path> <title> <description> <body>".into(),
+                            ));
+                            self.sync_chat_viewport();
+                        } else {
+                            let memory_type = parts[2].to_string();
+                            let path = parts[3].to_string();
+                            let title = parts[4].to_string();
+                            let description = parts[5].to_string();
+                            let body = parts[6..].join(" ");
+                            let _ = user_tx
+                                .send(UserCommand::RememberMemory {
+                                    memory_type,
+                                    path,
+                                    title,
+                                    description,
+                                    body,
+                                })
+                                .await;
+                        }
+                    }
+                    Some("forget") => {
+                        if parts.len() < 3 {
+                            self.messages.push(ChatMessage::System(
+                                "Usage: /memory forget <path>".into(),
+                            ));
+                            self.sync_chat_viewport();
+                        } else {
+                            let _ = user_tx
+                                .send(UserCommand::ForgetMemory {
+                                    path: parts[2].to_string(),
+                                })
+                                .await;
+                        }
+                    }
+                    Some(_) => {
+                        self.messages.push(ChatMessage::System(
+                            "Usage: /memory [remember|forget] ...".into(),
+                        ));
+                        self.sync_chat_viewport();
+                    }
+                }
+            }
             "/todo" => self.todo_visible = !self.todo_visible,
             "/config" => {
                 let _ = user_tx.send(UserCommand::ShowConfig).await;
@@ -1156,6 +1211,31 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
                 .unwrap_or("(unknown)");
             format!("{path} (write)")
         }
+        "Lsp" => {
+            let op = input
+                .get("operation")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let path = input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if path.is_empty() {
+                op.to_string()
+            } else {
+                format!("{op} {path}")
+            }
+        }
+        "WebFetch" => input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate(s, 100))
+            .unwrap_or_default(),
+        "WebSearch" => input
+            .get("query")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate(s, 100))
+            .unwrap_or_default(),
         _ => truncate(&input.to_string(), 80),
     }
 }
@@ -1418,6 +1498,100 @@ mod tests {
             Some(ChatMessage::System(msg))
                 if msg.contains("Current model setting: opusplan")
                     && msg.contains("Current runtime model: claude-opus-4-6")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_memory_command_sends_show_memory() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text("/memory");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        let sent = rx.recv().await.unwrap();
+        assert_eq!(sent, UserCommand::ShowMemory);
+    }
+
+    #[tokio::test]
+    async fn test_memory_remember_command_sends_payload() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text(
+            "/memory remember feedback feedback/testing.md Testing Use-real-db Use real database",
+        );
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        let sent = rx.recv().await.unwrap();
+        assert_eq!(
+            sent,
+            UserCommand::RememberMemory {
+                memory_type: "feedback".into(),
+                path: "feedback/testing.md".into(),
+                title: "Testing".into(),
+                description: "Use-real-db".into(),
+                body: "Use real database".into(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_forget_command_sends_payload() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text("/memory forget feedback/testing.md");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        let sent = rx.recv().await.unwrap();
+        assert_eq!(
+            sent,
+            UserCommand::ForgetMemory {
+                path: "feedback/testing.md".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_remember_without_args_shows_usage() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text("/memory remember");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        assert!(rx.try_recv().is_err());
+        assert!(matches!(
+            app.messages.last(),
+            Some(ChatMessage::System(msg))
+                if msg.contains("Usage: /memory remember")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_memory_forget_without_args_shows_usage() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text("/memory forget");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        assert!(rx.try_recv().is_err());
+        assert!(matches!(
+            app.messages.last(),
+            Some(ChatMessage::System(msg))
+                if msg.contains("Usage: /memory forget")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_memory_unknown_subcommand_shows_usage() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text("/memory bogus");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        assert!(rx.try_recv().is_err());
+        assert!(matches!(
+            app.messages.last(),
+            Some(ChatMessage::System(msg))
+                if msg.contains("Usage: /memory [remember|forget]")
         ));
     }
 

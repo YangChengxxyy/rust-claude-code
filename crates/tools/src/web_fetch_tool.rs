@@ -40,6 +40,14 @@ impl WebFetchTool {
 
 #[async_trait]
 impl Tool for WebFetchTool {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> ToolInfo {
         ToolInfo {
             name: "WebFetch".to_string(),

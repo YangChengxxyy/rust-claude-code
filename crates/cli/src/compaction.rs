@@ -87,6 +87,17 @@ impl<C: ModelClient> CompactionService<C> {
                     ContentBlock::Thinking { thinking, .. } => {
                         transcript.push_str(&format!("[Thinking]: {thinking}\n\n"));
                     }
+                    ContentBlock::Image { source } => {
+                        let description = match source {
+                            rust_claude_core::message::ImageSource::Base64 { media_type, .. } => {
+                                format!("embedded {media_type} image")
+                            }
+                            rust_claude_core::message::ImageSource::Url { url } => {
+                                format!("image at {url}")
+                            }
+                        };
+                        transcript.push_str(&format!("[{role_label} - Image]: {description}\n\n"));
+                    }
                     ContentBlock::Unknown => {}
                 }
             }

@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::process::Stdio;
 
-use rust_claude_mcp::jsonrpc::{check_response, parse_response, write_message, JsonRpcRequest};
+use rust_claude_mcp::jsonrpc::{check_response, parse_response, write_message, JsonRpcRequest, JsonRpcNotification};
 use tokio::io::BufReader;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -26,7 +26,7 @@ impl LspTransport {
         cmd.args(&server.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .current_dir(cwd);
 
         let mut child = cmd
@@ -83,6 +83,15 @@ impl LspTransport {
         })
         .await
         .map_err(|_| LspError::Timeout)?
+    }
+
+    /// Send a JSON-RPC notification (no id, no response expected).
+    pub async fn send_notification(&self, notification: &JsonRpcNotification) -> Result<(), LspError> {
+        let body = serde_json::to_vec(notification)?;
+        let mut stdin = self.stdin.lock().await;
+        write_message(&mut *stdin, &body)
+            .await
+            .map_err(|e| LspError::Protocol(e.to_string()))
     }
 
     pub async fn shutdown(&mut self) {

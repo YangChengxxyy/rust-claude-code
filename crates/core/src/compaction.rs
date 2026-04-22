@@ -50,6 +50,10 @@ fn estimate_content_block_tokens(block: &ContentBlock) -> u32 {
             ..
         } => tool_use_id.len() + content.len(),
         ContentBlock::Thinking { thinking, .. } => thinking.len(),
+        ContentBlock::Image { source } => match source {
+            crate::message::ImageSource::Base64 { media_type, data } => media_type.len() + data.len(),
+            crate::message::ImageSource::Url { url } => url.len(),
+        },
         ContentBlock::Unknown => 0,
     };
     (char_count as u32) / 4

@@ -15,6 +15,17 @@ pub enum UserCommand {
     ShowCost,
     ShowDiff,
     ShowHooks,
+    ShowMemory,
+    RememberMemory {
+        memory_type: String,
+        path: String,
+        title: String,
+        description: String,
+        body: String,
+    },
+    ForgetMemory {
+        path: String,
+    },
     ShowMcp,
 }
 
@@ -170,6 +181,9 @@ impl ChatMessage {
             "FileWrite" => "Write",
             "Task" => "Task",
             "TodoWrite" => "Task",
+            "Lsp" => "LSP",
+            "WebFetch" => "Fetch",
+            "WebSearch" => "Search",
             other => other,
         }
     }

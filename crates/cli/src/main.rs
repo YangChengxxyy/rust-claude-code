@@ -8,6 +8,7 @@ use rust_claude_core::{
     config::{Config, ConfigError, ConfigOverrides, ConfigSource},
     git::collect_git_context,
     hooks::HooksConfig,
+    memory,
     mcp_config::McpServersConfig,
     message::ContentBlock,
     model::get_runtime_main_loop_model,
@@ -18,7 +19,7 @@ use rust_claude_core::{
 use rust_claude_mcp::{McpManager, McpManagerConfig};
 use rust_claude_tools::{
     AgentContext, AgentTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
-    GrepTool, LspTool, TaskTool, ToolRegistry, WebFetchTool, WebSearchTool,
+    GrepTool, LspTool, NotebookEditTool, TaskTool, ToolRegistry, WebFetchTool, WebSearchTool,
     register_mcp_tools,
 };
 use rust_claude_tui::{App, TerminalGuard, TuiBridge, UserCommand};
@@ -106,6 +107,9 @@ struct Cli {
 
     #[arg(long = "continue", short = 'c')]
     continue_session: bool,
+
+    #[arg(long = "resume", short = 'r')]
+    resume_session: Option<String>,
 
     #[arg(long = "settings")]
     settings: Option<String>,
@@ -403,7 +407,24 @@ async fn main() -> Result<()> {
     state.always_allow_rules = resolved.always_allow.clone();
     state.always_deny_rules = resolved.always_deny.clone();
 
-    if cli.continue_session {
+    if let Some(session_id) = &cli.resume_session {
+        match session::load_session_by_id(session_id) {
+            Ok(Some(prev)) => {
+                state.messages = prev.messages;
+                if !prev.model_setting.is_empty() {
+                    state.session.model_setting = prev.model_setting;
+                }
+                state.session.model = get_runtime_main_loop_model(
+                    &state.session.model_setting,
+                    state.permission_mode,
+                    false,
+                );
+                println!("Resumed session {} ({} messages)", prev.id, state.messages.len());
+            }
+            Ok(None) => return Err(anyhow!("session '{}' not found", session_id)),
+            Err(e) => return Err(anyhow!("failed to load session '{}': {e}", session_id)),
+        }
+    } else if cli.continue_session {
         match session::load_latest_session() {
             Ok(Some(prev)) => {
                 state.messages = prev.messages;
@@ -429,6 +450,8 @@ async fn main() -> Result<()> {
     let app_state = Arc::new(Mutex::new(state));
 
     let claude_md_files = claude_md::discover_claude_md(&cwd);
+    let memory_store = memory::discover_memory_store(&cwd)
+        .and_then(|store| memory::scan_memory_store(&store).ok());
     if resolved.verbose && !claude_md_files.is_empty() {
         println!("Discovered {} CLAUDE.md file(s):", claude_md_files.len());
         for f in &claude_md_files {
@@ -479,10 +502,16 @@ async fn main() -> Result<()> {
         register_mcp_tools(&mut tools_for_prompt, &mcp_manager);
         tools_for_prompt.apply_tool_filters(&resolved.allowed_tools, &resolved.disallowed_tools);
         let git_context = { app_state.lock().await.git_context.clone() };
+        let relevant_memories = memory_store
+            .as_ref()
+            .map(|scanned| memory::select_relevant_memories(scanned, "session start", 5))
+            .unwrap_or_default();
         let composed = system_prompt::build_system_prompt(
             &cwd,
             &tools_for_prompt,
             &claude_md_files,
+            memory_store.as_ref(),
+            &relevant_memories,
             git_context.as_ref(),
             None,
         );
@@ -659,6 +688,111 @@ fn format_mcp_status(manager: &McpManager) -> String {
     text
 }
 
+fn format_memory_status(cwd: &std::path::Path) -> String {
+    let Some(store) = memory::discover_memory_store(cwd) else {
+        return "No memory store is available for the current project.".to_string();
+    };
+
+    match memory::scan_memory_store(&store) {
+        Ok(scanned) => {
+            let mut text = format!(
+                "Memory store:\n  project_root: {}\n  memory_dir: {}\n  entrypoint: {}\n  entries: {}",
+                scanned.store.project_root.display(),
+                scanned.store.memory_dir.display(),
+                scanned.store.entrypoint.display(),
+                scanned.entries.len()
+            );
+
+            if scanned.entries.is_empty() {
+                text.push_str("\n\nNo memory entries found.");
+            } else {
+                text.push_str("\n\nVisible memories:\n");
+                for entry in scanned.entries.iter().take(10) {
+                    let memory_type = entry
+                        .frontmatter
+                        .memory_type
+                        .map(|t| t.as_str().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let description = entry
+                        .frontmatter
+                        .description
+                        .as_deref()
+                        .unwrap_or("(no description)");
+                    text.push_str(&format!(
+                        "- [{}] {} — {} ({} days old)\n",
+                        memory_type, entry.relative_path, description, entry.freshness_days
+                    ));
+                }
+            }
+
+            if let Some(index) = scanned.index {
+                text.push_str(&format!(
+                    "\nEntrypoint loaded: {}{}",
+                    index.path.display(),
+                    if index.truncated {
+                        " (truncated for prompt use)"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+
+            text
+        }
+        Err(e) => format!("Failed to inspect memory store: {e}"),
+    }
+}
+
+fn remember_memory(
+    cwd: &std::path::Path,
+    memory_type: &str,
+    path: &str,
+    title: &str,
+    description: &str,
+    body: &str,
+) -> String {
+    let Some(store) = memory::discover_memory_store(cwd) else {
+        return "No memory store is available for the current project.".to_string();
+    };
+
+    let Some(parsed_type) = memory::MemoryType::parse(memory_type) else {
+        return format!("Unknown memory type '{}'. Valid types: user, feedback, project, reference", memory_type);
+    };
+
+    let request = memory::MemoryWriteRequest {
+        relative_path: path.to_string(),
+        frontmatter: memory::MemoryFrontmatter {
+            name: Some(title.to_string()),
+            description: Some(description.to_string()),
+            memory_type: Some(parsed_type),
+            extra: std::collections::HashMap::new(),
+        },
+        body: body.to_string(),
+    };
+
+    match memory::write_memory_entry(&store, &request) {
+        Ok(written) => format!(
+            "Saved memory '{}' to {} and updated {}",
+            title,
+            written.display(),
+            store.entrypoint.display()
+        ),
+        Err(e) => format!("Failed to save memory: {e}"),
+    }
+}
+
+fn forget_memory(cwd: &std::path::Path, path: &str) -> String {
+    let Some(store) = memory::discover_memory_store(cwd) else {
+        return "No memory store is available for the current project.".to_string();
+    };
+
+    match memory::remove_memory_entry(&store, path) {
+        Ok(true) => format!("Removed memory {} and updated {}", path, store.entrypoint.display()),
+        Ok(false) => format!("Memory {} was not found", path),
+        Err(e) => format!("Failed to forget memory: {e}"),
+    }
+}
+
 fn build_tools() -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     tools.register(AgentTool::new());
@@ -669,6 +803,7 @@ fn build_tools() -> ToolRegistry {
     tools.register(GlobTool::new());
     tools.register(GrepTool::new());
     tools.register(LspTool::new());
+    tools.register(NotebookEditTool::new());
     tools.register(TaskTool::new());
     tools.register(WebFetchTool::new());
     tools.register(WebSearchTool::new());
@@ -870,6 +1005,35 @@ async fn run_tui(
                         }
                         _ => "No hooks configured".to_string(),
                     };
+                    worker_bridge.send_assistant_message(&msg).await;
+                }
+                UserCommand::ShowMemory => {
+                    let cwd = { worker_state.lock().await.cwd.clone() };
+                    let msg = tokio::task::spawn_blocking(move || format_memory_status(&cwd))
+                        .await
+                        .unwrap_or_else(|e| format!("memory task join failed: {e}"));
+                    worker_bridge.send_assistant_message(&msg).await;
+                }
+                UserCommand::RememberMemory {
+                    memory_type,
+                    path,
+                    title,
+                    description,
+                    body,
+                } => {
+                    let cwd = { worker_state.lock().await.cwd.clone() };
+                    let msg = tokio::task::spawn_blocking(move || {
+                        remember_memory(&cwd, &memory_type, &path, &title, &description, &body)
+                    })
+                    .await
+                    .unwrap_or_else(|e| format!("memory remember task join failed: {e}"));
+                    worker_bridge.send_assistant_message(&msg).await;
+                }
+                UserCommand::ForgetMemory { path } => {
+                    let cwd = { worker_state.lock().await.cwd.clone() };
+                    let msg = tokio::task::spawn_blocking(move || forget_memory(&cwd, &path))
+                        .await
+                        .unwrap_or_else(|e| format!("memory forget task join failed: {e}"));
                     worker_bridge.send_assistant_message(&msg).await;
                 }
                 UserCommand::ShowDiff => {
@@ -1130,6 +1294,7 @@ mod tests {
             no_thinking: false,
             verbose: false,
             continue_session: false,
+            resume_session: None,
             settings: None,
         };
         let config = Config::with_credential("test-key".to_string(), false);
@@ -1175,6 +1340,7 @@ mod tests {
             no_thinking: false,
             verbose: false,
             continue_session: false,
+            resume_session: None,
             settings: None,
         };
         let config = Config::with_credential("test-key".to_string(), false);
@@ -1214,6 +1380,7 @@ mod tests {
             no_thinking: false,
             verbose: false,
             continue_session: false,
+            resume_session: None,
             settings: None,
         }
     }

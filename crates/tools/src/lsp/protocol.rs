@@ -41,11 +41,17 @@ pub struct LspSymbol {
 
 impl LspRequest {
     pub fn initialize(root: &Path) -> Self {
+        // Ensure root is absolute so the URI gets the triple-slash form file:///…
+        let abs = if root.is_absolute() {
+            root.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(root)
+        };
         Self {
             method: "initialize".to_string(),
             params: serde_json::json!({
                 "processId": null,
-                "rootUri": format!("file://{}", root.display()),
+                "rootUri": format!("file://{}", abs.display()),
                 "capabilities": {}
             }),
         }

@@ -112,6 +112,14 @@ pub fn load_latest_session() -> Result<Option<SessionFile>> {
     Ok(Some(session))
 }
 
+pub fn load_session_by_id(session_id: &str) -> Result<Option<SessionFile>> {
+    let path = sessions_dir().join(format!("{}.json", session_id));
+    if !path.exists() {
+        return Ok(None);
+    }
+    Ok(Some(SessionFile::load(&path)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

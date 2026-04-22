@@ -43,6 +43,7 @@ fn format_blocks(blocks: &[ContentBlock]) -> String {
                 format!("[tool_result:{}:{} {}]", tool_use_id, status, content)
             }
             ContentBlock::Thinking { thinking, .. } => format!("[thinking {}]", thinking),
+            ContentBlock::Image { .. } => "[image block]".to_string(),
             ContentBlock::Unknown => "[unknown block]".to_string(),
         })
         .collect::<Vec<_>>()

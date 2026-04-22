@@ -33,8 +33,15 @@ impl LspTool {
         }
     }
 
-    fn file_uri(path: &std::path::Path) -> String {
-        format!("file://{}", path.display())
+    /// Build a `file://` URI from a path, ensuring it is absolute so the URI
+    /// has the correct three-slash form (`file:///path/to/file`).
+    fn file_uri(path: &std::path::Path, cwd: &std::path::Path) -> String {
+        let abs = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+        format!("file://{}", abs.display())
     }
 
     fn require_position(input: &LspToolInput) -> Result<(u32, u32), ToolError> {
@@ -82,6 +89,14 @@ impl LspTool {
 
 #[async_trait]
 impl Tool for LspTool {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> ToolInfo {
         ToolInfo {
             name: "Lsp".to_string(),
@@ -127,7 +142,7 @@ impl Tool for LspTool {
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 let value = self.manager
-                    .request(&key, LspRequest::go_to_definition(&Self::file_uri(path), line, character))
+                    .request(&key, LspRequest::go_to_definition(&Self::file_uri(path, &cwd), line, character))
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 Self::format_locations(value)?
@@ -143,7 +158,7 @@ impl Tool for LspTool {
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 let value = self.manager
-                    .request(&key, LspRequest::find_references(&Self::file_uri(path), line, character))
+                    .request(&key, LspRequest::find_references(&Self::file_uri(path, &cwd), line, character))
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 Self::format_locations(value)?
@@ -159,7 +174,7 @@ impl Tool for LspTool {
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 let value = self.manager
-                    .request(&key, LspRequest::hover(&Self::file_uri(path), line, character))
+                    .request(&key, LspRequest::hover(&Self::file_uri(path, &cwd), line, character))
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 serde_json::to_string_pretty(&value)
@@ -175,7 +190,7 @@ impl Tool for LspTool {
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 let value = self.manager
-                    .request(&key, LspRequest::document_symbol(&Self::file_uri(path)))
+                    .request(&key, LspRequest::document_symbol(&Self::file_uri(path, &cwd)))
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 serde_json::to_string_pretty(&value)

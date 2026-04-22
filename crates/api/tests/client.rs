@@ -26,6 +26,7 @@ async fn create_message_with_real_api_key() {
         rust_claude_core::message::ContentBlock::ToolUse { .. }
         | rust_claude_core::message::ContentBlock::ToolResult { .. }
         | rust_claude_core::message::ContentBlock::Thinking { .. }
+        | rust_claude_core::message::ContentBlock::Image { .. }
         | rust_claude_core::message::ContentBlock::Unknown => true,
     }));
 }

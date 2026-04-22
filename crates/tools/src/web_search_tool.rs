@@ -39,6 +39,11 @@ impl WebSearchTool {
         }
     }
 
+    /// Check if a URL's host matches the allowed/blocked domain lists.
+    ///
+    /// Matching requires the host to be either an exact match or a subdomain
+    /// (e.g. `sub.example.com` matches `example.com`, but `evil-example.com`
+    /// does not).
     fn domain_allowed(url: &str, allowed: &[String], blocked: &[String]) -> bool {
         let host = url
             .split("//")
@@ -48,18 +53,31 @@ impl WebSearchTool {
             .next()
             .unwrap_or(url);
 
-        if blocked.iter().any(|domain| host.ends_with(domain)) {
+        if blocked.iter().any(|domain| Self::domain_matches(host, domain)) {
             return false;
         }
         if allowed.is_empty() {
             return true;
         }
-        allowed.iter().any(|domain| host.ends_with(domain))
+        allowed.iter().any(|domain| Self::domain_matches(host, domain))
+    }
+
+    /// Return true if `host` is exactly `domain` or is a subdomain of `domain`.
+    fn domain_matches(host: &str, domain: &str) -> bool {
+        host == domain || host.ends_with(&format!(".{}", domain))
     }
 }
 
 #[async_trait]
 impl Tool for WebSearchTool {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+
+    fn is_concurrency_safe(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> ToolInfo {
         ToolInfo {
             name: "WebSearch".to_string(),
@@ -128,18 +146,39 @@ mod tests {
 
     #[test]
     fn domain_filter_logic() {
+        // Exact match allowed
         assert!(WebSearchTool::domain_allowed(
             "https://docs.rs/foo",
             &vec!["docs.rs".into()],
             &[]
         ));
+        // Subdomain match allowed
+        assert!(WebSearchTool::domain_allowed(
+            "https://sub.docs.rs/foo",
+            &vec!["docs.rs".into()],
+            &[]
+        ));
+        // Not in allowed list
         assert!(!WebSearchTool::domain_allowed(
             "https://example.com/foo",
             &vec!["docs.rs".into()],
             &[]
         ));
+        // Blocked domain
         assert!(!WebSearchTool::domain_allowed(
             "https://example.com/foo",
+            &[],
+            &vec!["example.com".into()]
+        ));
+        // Subdomain spoofing must NOT match (evil-example.com != example.com)
+        assert!(WebSearchTool::domain_allowed(
+            "https://evil-example.com/foo",
+            &[],
+            &vec!["example.com".into()]
+        ));
+        // But a real subdomain IS blocked
+        assert!(!WebSearchTool::domain_allowed(
+            "https://sub.example.com/foo",
             &[],
             &vec!["example.com".into()]
         ));

@@ -41,9 +41,25 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
+    #[serde(rename = "image")]
+    Image {
+        source: ImageSource,
+    },
     /// Catch-all for unknown/future content block types from the API.
     #[serde(other)]
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageSource {
+    Base64 {
+        media_type: String,
+        data: String,
+    },
+    Url {
+        url: String,
+    },
 }
 
 impl ContentBlock {
@@ -89,6 +105,21 @@ impl ContentBlock {
         ContentBlock::Thinking {
             thinking: thinking.into(),
             signature: Some(signature.into()),
+        }
+    }
+
+    pub fn image_base64(media_type: impl Into<String>, data: impl Into<String>) -> Self {
+        ContentBlock::Image {
+            source: ImageSource::Base64 {
+                media_type: media_type.into(),
+                data: data.into(),
+            },
+        }
+    }
+
+    pub fn image_url(url: impl Into<String>) -> Self {
+        ContentBlock::Image {
+            source: ImageSource::Url { url: url.into() },
         }
     }
 
@@ -247,6 +278,26 @@ mod tests {
         let json = serde_json::to_string(&block).unwrap();
         assert!(json.contains("\"type\":\"thinking\""));
 
+        let parsed: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, block);
+    }
+
+    #[test]
+    fn test_content_block_image_base64_serde() {
+        let block = ContentBlock::image_base64("image/png", "ZmFrZQ==");
+        let json = serde_json::to_string(&block).unwrap();
+        assert!(json.contains("\"type\":\"image\""));
+        assert!(json.contains("\"source\""));
+        assert!(json.contains("\"media_type\":\"image/png\""));
+
+        let parsed: ContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, block);
+    }
+
+    #[test]
+    fn test_content_block_image_url_serde() {
+        let block = ContentBlock::image_url("https://example.com/a.png");
+        let json = serde_json::to_string(&block).unwrap();
         let parsed: ContentBlock = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, block);
     }

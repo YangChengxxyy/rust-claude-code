@@ -9,6 +9,10 @@
 
 use rust_claude_core::claude_md::ClaudeMdFile;
 use rust_claude_core::git::GitContextSnapshot;
+use rust_claude_core::memory::{
+    build_memory_contract_prompt, build_relevant_memories_section, RelevantMemory,
+    ScannedMemoryStore,
+};
 use rust_claude_tools::ToolRegistry;
 use std::path::Path;
 
@@ -20,6 +24,8 @@ pub fn build_system_prompt(
     cwd: &Path,
     tools: &ToolRegistry,
     claude_md_files: &[ClaudeMdFile],
+    memory_store: Option<&ScannedMemoryStore>,
+    relevant_memories: &[RelevantMemory],
     git_context: Option<&GitContextSnapshot>,
     custom_append: Option<&str>,
 ) -> String {
@@ -33,6 +39,14 @@ pub fn build_system_prompt(
     }
 
     parts.push(build_environment_section(cwd));
+
+    if let Some(memory_section) = build_memory_section(memory_store) {
+        parts.push(memory_section);
+    }
+
+    if let Some(relevant_memory_section) = build_relevant_memories_section(relevant_memories) {
+        parts.push(relevant_memory_section);
+    }
 
     if let Some(git_section) = build_git_context_section(git_context) {
         parts.push(git_section);
@@ -87,6 +101,30 @@ fn build_tool_section(tools: &ToolRegistry) -> String {
     }
 
     lines.join("\n")
+}
+
+fn build_memory_section(memory_store: Option<&ScannedMemoryStore>) -> Option<String> {
+    let memory = memory_store?;
+    let mut lines = vec![build_memory_contract_prompt(), String::new(), "# memoryStore".to_string(), String::new()];
+    lines.push(format!("- memory_dir: {}", memory.store.memory_dir.display()));
+    lines.push(format!("- entrypoint: {}", memory.store.entrypoint.display()));
+    lines.push(format!("- entry_count: {}", memory.entries.len()));
+
+    if let Some(index) = &memory.index {
+        lines.push(String::new());
+        lines.push(format!(
+            "Contents of {} (user auto-memory entrypoint):\n\n{}{}",
+            index.path.display(),
+            index.content.trim(),
+            if index.truncated {
+                "\n\n(truncated due to size limits)"
+            } else {
+                ""
+            }
+        ));
+    }
+
+    Some(lines.join("\n"))
 }
 
 fn build_claude_md_section(files: &[ClaudeMdFile]) -> String {
@@ -184,7 +222,7 @@ mod tests {
     fn test_build_system_prompt_contains_core() {
         let cwd = PathBuf::from("/tmp/test");
         let tools = ToolRegistry::new();
-        let prompt = build_system_prompt(&cwd, &tools, &[], None, None);
+        let prompt = build_system_prompt(&cwd, &tools, &[], None, &[], None, None);
         assert!(prompt.contains("AI assistant"));
         assert!(prompt.contains("software engineering"));
     }
@@ -193,7 +231,7 @@ mod tests {
     fn test_build_system_prompt_contains_environment() {
         let cwd = PathBuf::from("/tmp/test");
         let tools = ToolRegistry::new();
-        let prompt = build_system_prompt(&cwd, &tools, &[], None, None);
+        let prompt = build_system_prompt(&cwd, &tools, &[], None, &[], None, None);
         assert!(prompt.contains("/tmp/test"));
         assert!(prompt.contains("Date:"));
     }
@@ -204,7 +242,7 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(BashTool::new());
         tools.register(FileReadTool::new());
-        let prompt = build_system_prompt(&cwd, &tools, &[], None, None);
+        let prompt = build_system_prompt(&cwd, &tools, &[], None, &[], None, None);
         assert!(prompt.contains("Bash"));
         assert!(prompt.contains("FileRead"));
         assert!(prompt.contains("Available Tools"));
@@ -214,7 +252,7 @@ mod tests {
     fn test_build_system_prompt_with_custom_append() {
         let cwd = PathBuf::from("/tmp/test");
         let tools = ToolRegistry::new();
-        let prompt = build_system_prompt(&cwd, &tools, &[], None, Some("Custom instructions here"));
+        let prompt = build_system_prompt(&cwd, &tools, &[], None, &[], None, Some("Custom instructions here"));
         assert!(prompt.contains("Custom instructions here"));
     }
 
@@ -297,7 +335,7 @@ mod tests {
             path: PathBuf::from("/repo/CLAUDE.md"),
             content: "Project instructions here".to_string(),
         }];
-        let prompt = build_system_prompt(&cwd, &tools, &files, None, Some("Custom append"));
+        let prompt = build_system_prompt(&cwd, &tools, &files, None, &[], None, Some("Custom append"));
 
         let env_pos = prompt.find("# Environment").unwrap();
         let claude_md_pos = prompt.find("# claudeMd").unwrap();
@@ -319,9 +357,55 @@ mod tests {
                 subject: "Initial commit".into(),
             }],
         };
-        let prompt = build_system_prompt(&cwd, &tools, &[], Some(&git_context), None);
+        let prompt = build_system_prompt(&cwd, &tools, &[], None, &[], Some(&git_context), None);
         assert!(prompt.contains("# gitStatus"));
         assert!(prompt.contains("branch: main"));
         assert!(prompt.contains("abc123 Initial commit"));
+    }
+
+    #[test]
+    fn test_memory_section_is_included() {
+        use rust_claude_core::memory::{MemoryIndex, MemoryStore, ScannedMemoryStore};
+
+        let cwd = PathBuf::from("/tmp/test");
+        let tools = ToolRegistry::new();
+        let memory = ScannedMemoryStore {
+            store: MemoryStore {
+                project_root: PathBuf::from("/repo"),
+                memory_dir: PathBuf::from("/home/user/.claude/projects/repo/memory"),
+                entrypoint: PathBuf::from("/home/user/.claude/projects/repo/memory/MEMORY.md"),
+            },
+            index: Some(MemoryIndex {
+                path: PathBuf::from("/home/user/.claude/projects/repo/memory/MEMORY.md"),
+                content: "- [Testing](feedback_testing.md) - use real DB".to_string(),
+                truncated: false,
+            }),
+            entries: vec![],
+        };
+
+        let prompt = build_system_prompt(&cwd, &tools, &[], Some(&memory), &[], None, None);
+        assert!(prompt.contains("# memoryContract"));
+        assert!(prompt.contains("# memoryStore"));
+        assert!(prompt.contains("feedback_testing.md"));
+    }
+
+    #[test]
+    fn test_relevant_memory_section_is_included() {
+        use rust_claude_core::memory::{MemoryType, RelevantMemory};
+
+        let cwd = PathBuf::from("/tmp/test");
+        let tools = ToolRegistry::new();
+        let relevant = vec![RelevantMemory {
+            relative_path: "testing.md".to_string(),
+            memory_type: Some(MemoryType::Feedback),
+            description: Some("Use real DB in tests".to_string()),
+            freshness_days: 3,
+            body: "Use real database integration tests.".to_string(),
+        }];
+
+        let prompt = build_system_prompt(&cwd, &tools, &[], None, &relevant, None, None);
+        assert!(prompt.contains("# relevantMemories"));
+        assert!(prompt.contains("testing.md"));
+        assert!(prompt.contains("freshness_days: 3"));
     }
 }

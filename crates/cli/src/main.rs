@@ -18,7 +18,8 @@ use rust_claude_core::{
 use rust_claude_mcp::{McpManager, McpManagerConfig};
 use rust_claude_tools::{
     AgentContext, AgentTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
-    GrepTool, TaskTool, ToolRegistry, register_mcp_tools,
+    GrepTool, LspTool, TaskTool, ToolRegistry, WebFetchTool, WebSearchTool,
+    register_mcp_tools,
 };
 use rust_claude_tui::{App, TerminalGuard, TuiBridge, UserCommand};
 use tokio::sync::{mpsc, Mutex};
@@ -667,7 +668,10 @@ fn build_tools() -> ToolRegistry {
     tools.register(FileWriteTool::new());
     tools.register(GlobTool::new());
     tools.register(GrepTool::new());
+    tools.register(LspTool::new());
     tools.register(TaskTool::new());
+    tools.register(WebFetchTool::new());
+    tools.register(WebSearchTool::new());
     tools
 }
 

@@ -1386,7 +1386,7 @@ rust-claude-code/
 
 ### 迭代 21：LSP Tool + WebFetch/WebSearch
 
-**状态**: 规划中
+**状态**: 已完成
 
 **目标**: 补齐代码导航和 Web 信息获取能力，扩展工具集的广度。
 

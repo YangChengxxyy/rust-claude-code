@@ -1257,6 +1257,7 @@ dependencies = [
  "async-trait",
  "glob",
  "regex",
+ "reqwest",
  "rust-claude-api",
  "rust-claude-core",
  "rust-claude-mcp",

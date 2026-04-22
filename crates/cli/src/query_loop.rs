@@ -21,6 +21,8 @@ use rust_claude_core::{
 use rust_claude_tools::{ToolContext, ToolRegistry};
 use tokio::sync::Mutex;
 
+use crate::hooks::HookRunner;
+
 #[derive(Debug, thiserror::Error)]
 pub enum QueryLoopError {
     #[error(transparent)]
@@ -90,6 +92,7 @@ pub struct QueryLoop<C> {
     max_rounds: usize,
     bridge: Option<rust_claude_tui::TuiBridge>,
     compaction_config: Option<CompactionConfig>,
+    hook_runner: Option<Arc<HookRunner>>,
 }
 
 impl<C> QueryLoop<C>
@@ -103,6 +106,7 @@ where
             max_rounds: 8,
             bridge: None,
             compaction_config: None,
+            hook_runner: None,
         }
     }
 
@@ -116,6 +120,11 @@ where
         self
     }
 
+    pub fn with_hook_runner(mut self, runner: Arc<HookRunner>) -> Self {
+        self.hook_runner = Some(runner);
+        self
+    }
+
     pub fn with_compaction_config(mut self, config: CompactionConfig) -> Self {
         self.compaction_config = Some(config);
         self
@@ -126,9 +135,16 @@ where
         app_state: Arc<Mutex<AppState>>,
         user_input: impl Into<String>,
     ) -> Result<Message, QueryLoopError> {
+        let user_input_str = user_input.into();
+
+        // Fire UserPromptSubmit hooks
+        if let Some(runner) = &self.hook_runner {
+            runner.run_user_prompt_submit(&user_input_str, "").await;
+        }
+
         {
             let mut state = app_state.lock().await;
-            state.add_message(Message::user(user_input));
+            state.add_message(Message::user(user_input_str));
         }
 
         let mut max_tokens_recovery_count: usize = 0;
@@ -223,6 +239,9 @@ where
                 }
 
                 // Exhausted recovery attempts, return truncated result
+                if let Some(runner) = &self.hook_runner {
+                    runner.run_stop("max_tokens", "").await;
+                }
                 return Ok(assistant_message);
             }
 
@@ -230,12 +249,18 @@ where
             max_tokens_recovery_count = 0;
 
             if stop_reason != Some(StopReason::ToolUse) {
+                if let Some(runner) = &self.hook_runner {
+                    runner.run_stop("end_turn", "").await;
+                }
                 return Ok(assistant_message);
             }
 
             self.execute_tool_uses(&app_state, &assistant_message).await?;
         }
 
+        if let Some(runner) = &self.hook_runner {
+            runner.run_stop("max_rounds", "").await;
+        }
         Err(QueryLoopError::MaxRoundsExceeded)
     }
 
@@ -521,6 +546,20 @@ where
                 continue;
             }
 
+            // Run PreToolUse hooks after permission check passes
+            if let Some(runner) = &self.hook_runner {
+                let hook_result = runner.run_pre_tool_use(name, input, "").await;
+                if let rust_claude_core::hooks::HookResult::Block { reason } = hook_result {
+                    let msg = format!("Hook blocked: {}", reason);
+                    if let Some(bridge) = &self.bridge {
+                        bridge.send_hook_blocked(name, &reason).await;
+                        bridge.send_tool_result(name, &msg, true).await;
+                    }
+                    tool_results.push((index, tool_use_id.to_string(), msg, true));
+                    continue;
+                }
+            }
+
             let entry = (index, tool_use_id.to_string(), name.to_string(), input.clone());
             if self.tools.is_concurrency_safe(name) {
                 concurrent.push(entry);
@@ -534,23 +573,28 @@ where
                 .tools
                 .execute(
                     &name,
-                    input,
+                    input.clone(),
                     ToolContext {
                         tool_use_id,
                         app_state: Some(app_state.clone()),
                     },
                 )
                 .await;
-            (index, result)
+            (index, name, input, result)
         }))
         .await;
 
-        for (index, result) in concurrent_results {
+        for (index, name, input, result) in concurrent_results {
             let result = result.map_err(|error| QueryLoopError::Tool(error.to_string()))?;
             if let Some(bridge) = &self.bridge {
-                // Find original tool name from the tool_use_id
                 bridge
-                    .send_tool_result("tool", &result.content, result.is_error)
+                    .send_tool_result(&name, &result.content, result.is_error)
+                    .await;
+            }
+            // Fire PostToolUse hooks
+            if let Some(runner) = &self.hook_runner {
+                runner
+                    .run_post_tool_use(&name, &input, &result.content, result.is_error, "")
                     .await;
             }
             tool_results.push((
@@ -566,7 +610,7 @@ where
                 .tools
                 .execute(
                     &name,
-                    input,
+                    input.clone(),
                     ToolContext {
                         tool_use_id,
                         app_state: Some(app_state.clone()),
@@ -578,6 +622,12 @@ where
             if let Some(bridge) = &self.bridge {
                 bridge
                     .send_tool_result(&name, &result.content, result.is_error)
+                    .await;
+            }
+            // Fire PostToolUse hooks
+            if let Some(runner) = &self.hook_runner {
+                runner
+                    .run_post_tool_use(&name, &input, &result.content, result.is_error, "")
                     .await;
             }
             tool_results.push((

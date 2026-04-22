@@ -166,6 +166,16 @@ impl TuiBridge {
             .send(AppEvent::CompactionComplete { result })
             .await;
     }
+
+    pub async fn send_hook_blocked(&self, tool_name: &str, reason: &str) {
+        let _ = self
+            .event_tx
+            .send(AppEvent::HookBlocked {
+                tool_name: tool_name.to_string(),
+                reason: reason.to_string(),
+            })
+            .await;
+    }
 }
 
 #[cfg(test)]

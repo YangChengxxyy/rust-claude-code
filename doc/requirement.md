@@ -121,14 +121,18 @@
 
 - 已实现 `Message`、`ContentBlock`、`Role`、`StopReason`、`Usage`。
 - `Role` 当前只包含 `User` 和 `Assistant`。
+- `ContentBlock::Thinking` 支持 `signature: Option<String>` 字段，兼容 extended thinking 多轮对话回传。
+- `ContentBlock::Unknown` 带 `#[serde(other)]`，forward-compatible 处理未知 API 响应块类型。
 - 已实现 `ToolResult`、`ToolResultMetadata`、`ToolInfo`。
 - 已实现 `PermissionMode`、`PermissionRule`、`PermissionCheck`，并收敛了统一权限检查入口与规则优先级边界。
 - 已实现 `AppState`、`SessionSettings`、`TodoItem`、`TodoStatus`、`TodoPriority`。
-- 已实现 `Config`，支持从配置文件或 `ANTHROPIC_API_KEY` 加载 API Key，支持 `base_url`、`bearer_auth` 与 `ANTHROPIC_AUTH_TOKEN` 自动检测。
-- 已实现 `ClaudeSettings`（`settings.rs`），读取 `~/.claude/settings.json` 的 `env`、`model`、`apiKeyHelper` 字段。
-- 已实现 `Model`（`model.rs`），支持模型名称标准化与用量阈值检查。
+- `SessionSettings` 已包含 `thinking_enabled: bool`（默认 true）和 `stream` 字段。
+- 已实现 `Config`，支持从配置文件或 `ANTHROPIC_API_KEY` 加载 API Key，支持 `base_url`、`bearer_auth` 与 `ANTHROPIC_AUTH_TOKEN` 自动检测。支持 `ConfigProvenance` 追踪每个配置项来源。
+- 已实现 `ClaudeSettings`（`settings.rs`），读取 `~/.claude/settings.json` 的 `env`、`model`、`apiKeyHelper`、`permissions` 字段。支持项目级 `.claude/settings.json` 发现与 user/project 层合并。
+- 已实现 `Model`（`model.rs`），支持模型名称标准化、`ThinkingConfig`（Disabled/Enabled/Adaptive）、`get_thinking_config_for_model()` 自动选择、`usage_exceeds_200k_tokens()` 阈值检查。
 - 已实现 `claude_md` 模块（`claude_md.rs`），支持 CLAUDE.md 发现（全局 + 项目级）、git root 检测、内容截断。
-- 已实现 `compaction` 模块（`compaction.rs`），支持 token 估算、消息分区、`needs_compaction` 检查。
+- 已实现 `compaction` 模块（`compaction.rs`），支持 usage-based token 估算（优先 API usage 数据，chars/4 兜底）、消息分区、`needs_compaction` 检查。
+- 已实现 `git` 模块（`git.rs`），支持 `GitContextSnapshot` 收集（branch、clean 状态、最近 commits）。
 
 ### 4.2 api crate
 
@@ -137,9 +141,11 @@
 - 已支持 `x-api-key` 和 `anthropic-version` 请求头。
 - 已实现基础错误映射：认证失败、限流、通用 API 错误、超时、连接错误。
 - 已实现 `CreateMessageRequest`、`CreateMessageResponse`、`ApiMessage`、`ApiTool`、`SystemPrompt`。
-- `CreateMessageRequest` 已支持 `metadata`，`AnthropicClient` 已收敛共享的 header / request / JSON 响应处理边界。
+- `CreateMessageRequest` 已支持 `metadata` 和 `thinking` 字段（`ThinkingConfig` 序列化）。
+- `SystemPrompt` 支持结构化 `SystemBlock` 块，带 `cache_control: { type: "ephemeral" }` 标记。
+- 已实现 `inject_cache_control_on_messages()` — 在最后一条消息的最后一个内容块上注入 `cache_control`。
 - 已实现 SSE 流式基础设施：`MessageStream`、`StreamEvent`、SSE 事件解析、真实流式请求入口与 `examples/streaming_chat.rs`。
-- 已实现基础 delta 累积器，支持 `text_delta`、`thinking_delta` 与 `input_json_delta` 还原完整内容块。
+- 已实现 delta 累积器，支持 `text_delta`、`thinking_delta`、`signature_delta` 与 `input_json_delta` 还原完整内容块。
 - 已新增 `examples/simple_chat.rs` 与真实 API 的忽略型集成测试。
 
 ### 4.3 tools crate
@@ -156,25 +162,33 @@
 - 已接入 `QueryLoop`、流式响应消费、工具执行与多轮 tool use。
 - 已支持 `--mode` / `-m` 参数切换权限模式（`default`、`accept-edits`、`bypass`、`plan`、`dont-ask`）。
 - 无 prompt 启动时，已可进入基础 TUI 交互模式，并通过现有 `QueryLoop` 执行用户输入。
-- 已实现 Claude Code 兼容的 CLI 参数体系：`--model`、`-p/--print`、`--output-format`、`--max-turns`、`--system-prompt`/`--system-prompt-file`、`--append-system-prompt`/`--append-system-prompt-file`、`--max-tokens`、`--no-stream`、`--verbose`、`--allowed-tools`、`--disallowed-tools`、`--settings`。
-- 已实现统一优先级链：`RUST_CLAUDE_*` 环境变量 > CLI 参数 > `ANTHROPIC_*` 环境变量（含 `~/.claude/settings.json` env 注入）> 配置文件 > 默认值。
+- 已实现 Claude Code 兼容的 CLI 参数体系：`--model`、`-p/--print`、`--output-format`、`--max-turns`、`--system-prompt`/`--system-prompt-file`、`--append-system-prompt`/`--append-system-prompt-file`、`--max-tokens`、`--no-stream`、`--thinking`/`--no-thinking`、`--verbose`、`--allowed-tools`、`--disallowed-tools`、`--settings`。
+- 已实现统一优先级链：`RUST_CLAUDE_*` 环境变量 > CLI 参数 > `ANTHROPIC_*` 环境变量（含 `~/.claude/settings.json` env 注入）> project settings > user settings > 配置文件 > 默认值。
 - 已支持通过 `--settings` 指定自定义 settings.json 路径，默认读取 `~/.claude/settings.json` 的 `env` 字段注入进程环境变量（不覆盖已有值）。
+- 已支持项目级 `.claude/settings.json` 自动发现与 user/project 层 permissions 合并。
 - 已支持工具白名单/黑名单过滤（`--allowed-tools`、`--disallowed-tools`）。
 - 已支持 `--output-format json` 以 JSON 格式输出最终消息。
-- 已实现 System Prompt 组合模块（`system_prompt.rs`）：核心行为指导、动态工具描述注入、环境上下文、CLAUDE.md 内容注入、自定义追加。
+- 已实现 System Prompt 组合模块（`system_prompt.rs`）：核心行为指导、动态工具描述注入、环境上下文、Git 上下文注入、CLAUDE.md 内容注入、自定义追加。
+- QueryLoop 构建请求时自动注入 thinking 配置（根据模型选择 adaptive/budget/disabled）和 prompt caching（system prompt + 消息级 `cache_control`）。
+- QueryLoop 已实现 Max Tokens Recovery：`stop_reason == MaxTokens` 时自动注入恢复消息继续生成（最多 3 次）。
 - 已实现会话持久化（`session.rs`）：JSON 格式保存/加载，支持 `--continue` / `-c` 恢复最近会话。
 - 已实现 Compaction 服务（`compaction.rs`）：LLM 摘要压缩、可配置阈值、手动 `/compact` 与 QueryLoop 自动压缩集成。
+- 已实现 Hooks 系统（`hooks.rs`）：`HookRunner` 支持 command 类型 hook、matcher 过滤、JSON stdin/stdout 通信、超时保护、exit code 语义。QueryLoop 集成 PreToolUse/PostToolUse/UserPromptSubmit/Stop 四个事件触发点。
 
 ### 4.5 tui crate
 
 - 已实现基础 TUI 框架：`App` 状态对象、`ChatMessage` / `AppEvent` 事件模型（35+ 事件变体）、渲染层与终端守卫。
-- 已实现顶部状态栏、中间聊天区域、底部输入框的基础布局与样式（`theme.rs`）。
-- 已实现基础键盘交互：Enter 发送、Ctrl+C 退出、Esc 清空/取消、左右移动光标、Up/Down 历史/多行移动、PageUp/PageDown 聊天区域滚动、Ctrl+Home/Ctrl+End 跳转聊天区域边界、Home/End、Backspace/Delete。
-- 已实现 TUI 事件桥接 `TuiBridge`，支持流式文本（token 级）、工具调用、工具结果、usage 更新、thinking 阶段、压缩事件等。
+- 已实现顶部状态栏（模型、模式、git branch、token 用量）、中间聊天区域、底部多行输入框的基础布局与样式（`theme.rs`）。
+- 已实现完整键盘交互：Enter 发送、Shift+Enter 换行、Ctrl+C 退出/取消、Esc 清空/取消流式、左右移动光标、Ctrl+Left/Ctrl+Right 按词移动、Home/End/Ctrl+A/Ctrl+E 行内导航、Up/Down 历史浏览/多行移动、PageUp/PageDown 聊天区域滚动、Ctrl+Home/Ctrl+End 跳转聊天区域边界、Ctrl+L 清屏重绘、Tab 切换 thinking block 展开/折叠、Backspace/Delete。
+- 已实现多行输入 `InputBuffer`，支持 Bracketed Paste 粘贴多行内容。
+- 已实现输入历史持久化（500 条上限，文件存储），Up/Down 浏览，浏览时暂存当前草稿。
+- 已实现 Markdown 基础渲染：标题（H1-H3 颜色区分）、有序/无序列表、代码块（带语言标签和边框）、段落、行内代码/粗体/斜体解析。
+- 已实现 TUI 事件桥接 `TuiBridge`，支持流式文本（token 级）、工具调用、工具结果、usage 更新、thinking 阶段（流式 delta + 折叠/展开）、压缩事件、状态更新、配置信息等。
 - 已实现权限确认对话框（模态弹窗）：居中弹窗显示工具名与参数摘要，支持 Allow(y)/AlwaysAllow(a)/Deny(n)/AlwaysDeny(d) 四选项，方向键导航 + Enter 确认。
 - 已实现 Todo 侧面板（Tab 键切换）：右侧 30 列面板，状态图标（○/◐/●），实时刷新。
-- 已实现斜杠命令：`/clear`、`/compact`、`/mode`、`/model`、`/todo`、`/help`、`/exit`。
+- 已实现斜杠命令：`/clear`、`/compact`、`/config`、`/cost`、`/diff`、`/hooks`、`/mode`、`/model`、`/todo`、`/help`、`/exit`。
 - QueryLoop 中 `NeedsConfirmation` 已通过 TuiBridge oneshot channel 接入交互式权限对话框。
+- 已实现 Hook 阻止事件显示（`HookBlocked` 事件 → 系统消息）。
 
 ---
 
@@ -256,7 +270,8 @@ rust-claude-code/
 │   │       ├── settings.rs      # ClaudeSettings（~/.claude/settings.json）
 │   │       ├── model.rs         # 模型名称标准化与用量阈值
 │   │       ├── claude_md.rs     # CLAUDE.md 发现与加载
-│   │       └── compaction.rs    # token 估算与消息分区
+│   │       ├── compaction.rs    # token 估算与消息分区
+│   │       └── hooks.rs         # Hook 事件、配置、输入/结果类型
 │   ├── api/                # Anthropic API 客户端
 │   │   ├── Cargo.toml
 │   │   └── src/
@@ -295,6 +310,7 @@ rust-claude-code/
 │           ├── system_prompt.rs # System prompt 组合
 │           ├── session.rs       # 会话持久化
 │           ├── compaction.rs    # CompactionService（LLM 摘要压缩）
+│           ├── hooks.rs         # HookRunner（hook 执行引擎）
 │           └── lib.rs
 ```
 
@@ -1005,9 +1021,34 @@ rust-claude-code/
 
 ### 迭代 15：API 能力增强（Prompt Caching + Extended Thinking）
 
-**状态**: 规划中
+**状态**: 已完成
 
-**目标**: 补齐影响每一次 API 调用的核心能力 — prompt caching 大幅降低成本和延迟，extended thinking 解锁模型深度推理。这两项是 TypeScript 版本的基础设施级功能，当前 Rust 版本完全缺失。
+**完成记录**:
+
+- 已实现 `api` crate Prompt Caching 基础设施：
+  - `SystemBlock` 支持 `cache_control` 字段（`with_cache_control()` 方法）
+  - `inject_cache_control_on_messages()` — 在最后一条消息的最后一个内容块上注入 `cache_control: { type: "ephemeral" }`
+  - QueryLoop 构建请求时自动注入 system prompt 和消息级 cache_control 标记
+- 已实现 Extended Thinking 全链路支持：
+  - `ThinkingConfig` 枚举：`Disabled` / `Enabled { budget_tokens }` / `Adaptive`
+  - `get_thinking_config_for_model()` — Opus/Sonnet 4.6 使用 Adaptive，其他模型使用 budget，不支持 thinking 的模型自动 Disabled
+  - `SessionSettings.thinking_enabled: bool`（默认 true）
+  - `ContentBlock::Thinking` 增加 `signature: Option<String>` 字段
+  - 流式累积器支持 `SignatureDelta` 事件，正确还原 thinking block 的 signature
+  - `--thinking` / `--no-thinking` CLI 参数
+- 已实现 Max Tokens Recovery：
+  - 当 `stop_reason == MaxTokens` 时自动注入恢复消息继续生成（最多 3 次）
+  - 截断时如有 tool_use blocks 会先执行再续写
+- 已实现 Forward-compatible 响应解析：
+  - `ContentBlock::Unknown` 带 `#[serde(other)]`，跳过 `server_tool_use` 等未知块类型
+- 已实现 Usage-based Token 计数改进：
+  - `estimate_current_tokens()` 优先使用 API response 的 usage 数据，仅对新消息使用 chars/4 兜底
+  - `usage_exceeds_200k_tokens()` 用于动态模型切换判定
+- TUI 中 Thinking 块展示增强（折叠/展开、流式 ThinkingDelta 显示）
+- TUI UsageUpdate 事件已包含 `cache_read_input_tokens` / `cache_creation_input_tokens`
+- 验证结果：`cargo test --workspace` 通过
+
+**目标**: 补齐影响每一次 API 调用的核心能力 — prompt caching 大幅降低成本和延迟，extended thinking 解锁模型深度推理。这两项是 TypeScript 版本的基础设施级功能。
 
 **背景分析**（来自 TS 源码 `claude.ts`、`tokenEstimation.ts`、`thinking.ts`）:
 
@@ -1051,7 +1092,33 @@ rust-claude-code/
 
 ### 迭代 16：TUI 核心交互增强
 
-**状态**: 规划中
+**状态**: 已完成
+
+**完成记录**:
+
+- 已实现输入系统重构：
+  - 多行 `InputBuffer`：Shift+Enter 换行、Enter 提交、粘贴自动检测多行（Bracketed Paste 支持）
+  - 完整光标导航：Home/End、Ctrl+A/Ctrl+E（行首/行尾）、Ctrl+Left/Ctrl+Right（按词移动）
+  - 输入历史浏览：Up/Down 导航，500 条上限，持久化到 `~/.config/rust-claude-code/history`
+  - 历史浏览时暂存当前输入草稿，返回时恢复
+- 已实现 Markdown 基础渲染（`ui.rs`）：
+  - 标题（H1-H3）带颜色区分和 BOLD 修饰
+  - 有序/无序列表带缩进和标记
+  - 代码块（` ``` `）带语言标签和边框渲染（┌─/│/└─ 样式）
+  - 段落渲染支持 inline spans（行内代码、粗体、斜体解析）
+  - 注：未集成 `syntect` / `tree-sitter` 的语法高亮，代码块内容使用统一颜色
+- 已实现键盘快捷键：
+  - Escape 取消当前流式输出
+  - Ctrl+C 取消流式 / 空输入时退出
+  - Ctrl+L 清屏重绘
+  - PageUp/PageDown 滚动聊天历史
+  - Ctrl+Home/Ctrl+End 跳转到最旧/最新聊天内容
+- 已实现 Thinking 块 UI：
+  - 流式 ThinkingDelta 显示（实时更新思考文本）
+  - 完成后折叠为摘要（"Thought for ~N chars"）
+  - Tab 键切换展开/折叠最近的 thinking block
+  - `selected_thinking` 状态跟踪
+- 验证结果：`cargo test --workspace` 通过
 
 **目标**: 解决日常使用中最痛的交互问题 — 单行输入无法粘贴代码、无法浏览输入历史、Markdown 输出不可读。
 
@@ -1089,7 +1156,30 @@ rust-claude-code/
 
 ### 迭代 17：配置收敛 + Git 感知 + Slash Commands
 
-**状态**: 规划中
+**状态**: 已完成
+
+**完成记录**:
+
+- 已实现配置系统收敛：
+  - 支持项目级 `.claude/settings.json` 自动发现（`ClaudeSettings::discover_project_settings()`、`load_project()`）
+  - Settings 合并优先级：CLI args > `RUST_CLAUDE_*` env > `ANTHROPIC_*` env > project settings > user settings > config defaults
+  - `permissions` 字段在 settings 中声明 allow/deny 规则，user + project 层独立合并
+  - `ConfigProvenance` 追踪每个配置项的来源（Env / Cli / UserConfig / ProjectSettings / Default）
+  - `--settings` 参数支持指定自定义 settings.json 路径
+  - 注：未实现 JSON Schema 校验
+- 已实现 Git 感知：
+  - `GitContextSnapshot`：repo_root、branch、is_clean、recent_commits（`core/src/git.rs`）
+  - `collect_git_context()` 收集当前 git 仓库上下文
+  - Branch 信息展示在 TUI 状态栏（`StatusUpdate` 事件含 `git_branch`）
+  - `gitStatus` 快照注入 system prompt（branch、clean 状态、最近 5 条 commits）
+  - 每次查询结束后自动刷新 git context
+- 已实现 Slash Commands 增强：
+  - `/diff` — 显示当前 git working tree diff
+  - `/cost` — 显示会话累计 token 用量与 USD 估算成本
+  - `/config` — 显示当前生效的 model/permission/base_url 来源
+  - `/clear` 支持可选参数 `keep-context`
+  - 注：命令注册仍为静态数组 `SLASH_COMMANDS`，未重构为动态注册框架
+- 验证结果：`cargo test --workspace` 通过
 
 **目标**: 统一多来源配置系统，补齐 Git 项目上下文，增加常用 Slash Commands。
 
@@ -1125,7 +1215,42 @@ rust-claude-code/
 
 ### 迭代 18：Hooks 系统
 
-**状态**: 规划中
+**状态**: 已完成
+
+**完成记录**:
+
+- 已实现 `core` crate 的 `hooks` 模块（`hooks.rs`）：
+  - `HookEvent` 枚举：`PreToolUse`、`PostToolUse`、`UserPromptSubmit`、`Stop`、`Notification`
+  - `HookConfig` 类型：`type_`（仅支持 `"command"`）、`command`、`timeout`（默认 10s）
+  - `HookEventGroup`：`matcher`（工具名匹配）+ hooks 列表
+  - `HooksConfig`：`HashMap<String, Vec<HookEventGroup>>`（与 TS settings.json 格式兼容）
+  - `HookResult`：`Continue` / `Block { reason }`
+  - Hook 输入结构：`PreToolUseInput`、`PostToolUseInput`、`UserPromptSubmitInput`、`StopInput`、`NotificationInput`（JSON 序列化通过 stdin 传递）
+- 已实现 Settings 集成：
+  - `ClaudeSettings` 新增 `hooks` 字段（`#[serde(default)]`）
+  - `ClaudeSettings::merge()` 按事件合并 hook 列表（user hooks 在前，project hooks 在后）
+- 已实现 `cli` crate 的 `HookRunner`（`hooks.rs`）：
+  - `get_matching_hooks()` — 按事件和 matcher 过滤 hook 配置
+  - `execute_command_hook()` — 通过 `tokio::process::Command` spawn shell、stdin JSON 输入、stdout 捕获、超时保护
+  - `parse_pre_tool_use_result()` — 解析 JSON 决策或 exit code 语义（0=approve, 1=warn, 2=block）
+  - `run_pre_tool_use()` — 编排匹配、执行、结果聚合；首个 block 短路
+  - `run_post_tool_use()` / `run_user_prompt_submit()` / `run_stop()` — 信息通知型事件
+  - 环境变量注入：`CLAUDE_PROJECT_DIR`、`HOOK_EVENT`
+- 已实现 QueryLoop 集成：
+  - `with_hook_runner(Arc<HookRunner>)` builder 方法
+  - PreToolUse hooks：权限检查通过后、工具执行前触发；block 时跳过执行并返回错误
+  - PostToolUse hooks：工具执行后触发（并发和串行工具均支持）
+  - UserPromptSubmit hooks：用户提交输入时触发（API 调用前）
+  - Stop hooks：QueryLoop 正常结束或达到最大轮次时触发
+- 已实现 TUI 集成：
+  - `AppEvent::HookBlocked` 事件变体
+  - `TuiBridge::send_hook_blocked()` 方法
+  - TUI 中显示 hook 阻止信息为系统消息
+- 已实现 `/hooks` 斜杠命令：显示已配置的 hooks（按事件分组，显示 matcher 和 command）
+- 已在 `main.rs` 中完整接入：从合并后的 settings 构建 `HookRunner`，传递到 print 模式和 TUI 模式
+- 注：仅支持 `type: "command"` hook，不支持 prompt/agent/http 类型（加载时 warn 并跳过）
+- 注：不支持 `updatedInput`（工具输入修改）、`once`、`async`/`asyncRewake` 等高级特性
+- 验证结果：`cargo test --workspace` 通过，353 个测试全部通过
 
 **目标**: 建立自动化扩展点系统，允许用户在关键生命周期节点执行自定义脚本。Hooks 是 MCP、permission 增强等后续功能的基础设施。
 
@@ -1169,7 +1294,7 @@ rust-claude-code/
 
 ### 迭代 19：MCP 客户端
 
-**状态**: 规划中
+**状态**: 已完成
 
 **目标**: 实现 Model Context Protocol 客户端，支持通过 stdio 接入外部工具服务器，大幅扩展可用工具集。
 

@@ -14,6 +14,8 @@ pub enum UserCommand {
     ShowConfig,
     ShowCost,
     ShowDiff,
+    ShowHooks,
+    ShowMcp,
 }
 
 /// Events consumed by the TUI application.
@@ -85,6 +87,11 @@ pub enum AppEvent {
     /// Conversation compaction completed successfully.
     CompactionComplete {
         result: CompactionResult,
+    },
+    /// A PreToolUse hook blocked a tool.
+    HookBlocked {
+        tool_name: String,
+        reason: String,
     },
 }
 

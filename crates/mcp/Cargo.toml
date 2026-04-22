@@ -1,17 +1,11 @@
 [package]
-name = "rust-claude-tools"
+name = "rust-claude-mcp"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 rust-claude-core = { path = "../core" }
-rust-claude-mcp = { path = "../mcp" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-async-trait = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
-glob = "0.3"
-walkdir = "2"
-regex = "1"

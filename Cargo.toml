@@ -2,6 +2,7 @@
 members = [
     "crates/core",
     "crates/api",
+    "crates/mcp",
     "crates/tools",
     "crates/tui",
     "crates/cli",

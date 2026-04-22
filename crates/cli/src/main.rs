@@ -7,20 +7,24 @@ use rust_claude_core::{
     claude_md,
     config::{Config, ConfigError, ConfigOverrides, ConfigSource},
     git::collect_git_context,
+    hooks::HooksConfig,
+    mcp_config::McpServersConfig,
     message::ContentBlock,
     model::get_runtime_main_loop_model,
     permission::PermissionMode,
     settings::{ClaudeSettings, ParsedPermissions, SettingsLayer},
     state::AppState,
 };
+use rust_claude_mcp::{McpManager, McpManagerConfig};
 use rust_claude_tools::{
     BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, TodoWriteTool,
-    ToolRegistry,
+    ToolRegistry, register_mcp_tools,
 };
 use rust_claude_tui::{App, TerminalGuard, TuiBridge, UserCommand};
 use tokio::sync::{mpsc, Mutex};
 
 use rust_claude_cli::compaction::CompactionService;
+use rust_claude_cli::hooks::HookRunner;
 use rust_claude_cli::query_loop::QueryLoop;
 use rust_claude_cli::session::{self, SessionFile};
 use rust_claude_cli::system_prompt;
@@ -125,6 +129,8 @@ struct ResolvedConfig {
     disallowed_tools: Vec<String>,
     always_allow: Vec<rust_claude_core::permission::PermissionRule>,
     always_deny: Vec<rust_claude_core::permission::PermissionRule>,
+    hooks_config: HooksConfig,
+    mcp_servers: McpServersConfig,
     config: Config,
     project_settings: Option<SettingsLayer>,
 }
@@ -306,6 +312,8 @@ fn resolve_config(
         disallowed_tools,
         always_allow: config.always_allow.clone(),
         always_deny: config.always_deny.clone(),
+        hooks_config: merged_settings.hooks.clone(),
+        mcp_servers: merged_settings.mcp_servers.clone(),
         config,
         project_settings,
     })
@@ -427,8 +435,48 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Build hook runner from merged settings
+    let hook_runner = if resolved.hooks_config.is_empty() {
+        None
+    } else {
+        Some(Arc::new(HookRunner::new(resolved.hooks_config.clone(), cwd.clone())))
+    };
+
+    // Initialize MCP servers (if any configured)
+    let mcp_manager = if resolved.mcp_servers.is_empty() {
+        Arc::new(McpManager::empty())
+    } else {
+        if resolved.verbose {
+            println!("MCP: starting {} configured server(s)...", resolved.mcp_servers.len());
+        }
+        let manager = McpManager::start(&resolved.mcp_servers, &McpManagerConfig::default()).await;
+        if resolved.verbose {
+            println!(
+                "MCP: {} server(s) connected, {} tool(s) discovered",
+                manager.connected_count(),
+                manager.tool_count()
+            );
+            for status in manager.server_statuses() {
+                match &status.state {
+                    rust_claude_core::mcp_config::McpServerState::Connected => {
+                        println!("  {} (connected, {} tools)", status.name, status.tools.len());
+                    }
+                    rust_claude_core::mcp_config::McpServerState::Failed(msg) => {
+                        println!("  {} (failed: {})", status.name, msg);
+                    }
+                    rust_claude_core::mcp_config::McpServerState::Pending => {
+                        println!("  {} (pending)", status.name);
+                    }
+                }
+            }
+        }
+        Arc::new(manager)
+    };
+
     if resolved.system_prompt.is_none() {
-        let tools_for_prompt = build_filtered_tools(&resolved.allowed_tools, &resolved.disallowed_tools);
+        let mut tools_for_prompt = build_tools();
+        register_mcp_tools(&mut tools_for_prompt, &mcp_manager);
+        tools_for_prompt.apply_tool_filters(&resolved.allowed_tools, &resolved.disallowed_tools);
         let git_context = { app_state.lock().await.git_context.clone() };
         let composed = system_prompt::build_system_prompt(
             &cwd,
@@ -445,10 +493,14 @@ async fn main() -> Result<()> {
         let prompt = cli.prompt.join(" ");
         let client = build_client(&resolved.api_key, resolved.base_url.clone(), resolved.bearer_auth)?;
         let mut tools = build_tools();
+        register_mcp_tools(&mut tools, &mcp_manager);
         tools.apply_tool_filters(&resolved.allowed_tools, &resolved.disallowed_tools);
         let mut query_loop = QueryLoop::new(client, tools).with_compaction_config(CompactionConfig::default());
         if let Some(max_turns) = resolved.max_turns {
             query_loop = query_loop.with_max_rounds(max_turns);
+        }
+        if let Some(runner) = &hook_runner {
+            query_loop = query_loop.with_hook_runner(runner.clone());
         }
         let final_message = query_loop.run(app_state, prompt).await?;
 
@@ -466,7 +518,7 @@ async fn main() -> Result<()> {
     } else {
         let allowed_tools = resolved.allowed_tools.clone();
         let disallowed_tools = resolved.disallowed_tools.clone();
-        run_tui(app_state, resolved.config.clone(), allowed_tools, disallowed_tools).await
+        run_tui(app_state, resolved.config.clone(), allowed_tools, disallowed_tools, hook_runner, mcp_manager).await
     }
 }
 
@@ -509,6 +561,47 @@ fn build_client(
     Ok(client)
 }
 
+fn format_mcp_status(manager: &McpManager) -> String {
+    let statuses = manager.server_statuses();
+    if statuses.is_empty() {
+        return "No MCP servers configured.".to_string();
+    }
+
+    let mut text = format!(
+        "MCP servers: {} configured, {} connected, {} tool(s)\n",
+        statuses.len(),
+        manager.connected_count(),
+        manager.tool_count()
+    );
+
+    for status in statuses {
+        let state_str = match &status.state {
+            rust_claude_core::mcp_config::McpServerState::Connected => "connected".to_string(),
+            rust_claude_core::mcp_config::McpServerState::Failed(msg) => format!("failed: {}", msg),
+            rust_claude_core::mcp_config::McpServerState::Pending => "pending".to_string(),
+        };
+
+        text.push_str(&format!("\n  {} ({})\n", status.name, state_str));
+
+        if !status.tools.is_empty() {
+            text.push_str("    Tools:\n");
+            for tool in &status.tools {
+                let desc = if tool.description.is_empty() {
+                    String::new()
+                } else {
+                    format!(" - {}", tool.description)
+                };
+                text.push_str(&format!(
+                    "      mcp__{}__{}{}  \n",
+                    status.name, tool.name, desc
+                ));
+            }
+        }
+    }
+
+    text
+}
+
 fn build_tools() -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     tools.register(BashTool::new());
@@ -521,17 +614,13 @@ fn build_tools() -> ToolRegistry {
     tools
 }
 
-fn build_filtered_tools(allowed: &[String], disallowed: &[String]) -> ToolRegistry {
-    let mut tools = build_tools();
-    tools.apply_tool_filters(allowed, disallowed);
-    tools
-}
-
 async fn run_tui(
     app_state: Arc<Mutex<AppState>>,
     config: Config,
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
+    hook_runner: Option<Arc<HookRunner>>,
+    mcp_manager: Arc<McpManager>,
 ) -> Result<()> {
     let (model, model_setting, permission_mode, git_branch) = {
         let state = app_state.lock().await;
@@ -557,6 +646,8 @@ async fn run_tui(
         .send_status_update(&model, &model_setting, &permission_mode, git_branch.as_deref())
         .await;
 
+    let worker_hook_runner = hook_runner;
+    let worker_mcp_manager = mcp_manager.clone();
     tokio::spawn(async move {
         let compaction_config = CompactionConfig::default();
         let mut active_query_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -692,6 +783,34 @@ async fn run_tui(
                         ))
                         .await;
                 }
+                UserCommand::ShowHooks => {
+                    let msg = match &worker_hook_runner {
+                        Some(runner) if !runner.is_empty() => {
+                            let config = runner.config();
+                            let mut text = String::from("Configured hooks:\n");
+                            for (event, groups) in config {
+                                text.push_str(&format!("\n  {}:\n", event));
+                                for group in groups {
+                                    let matcher_display = group
+                                        .matcher
+                                        .as_deref()
+                                        .filter(|m| !m.is_empty())
+                                        .unwrap_or("*");
+                                    for hook in &group.hooks {
+                                        let cmd = hook.command.as_deref().unwrap_or("(no command)");
+                                        text.push_str(&format!(
+                                            "    [{}] {} (type: {})\n",
+                                            matcher_display, cmd, hook.type_
+                                        ));
+                                    }
+                                }
+                            }
+                            text
+                        }
+                        _ => "No hooks configured".to_string(),
+                    };
+                    worker_bridge.send_assistant_message(&msg).await;
+                }
                 UserCommand::ShowDiff => {
                     let cwd = { worker_state.lock().await.cwd.clone() };
                     // Run blocking git work off the async runtime so it doesn't
@@ -739,6 +858,10 @@ async fn run_tui(
                         worker_bridge.send_stream_cancelled().await;
                     }
                 }
+                UserCommand::ShowMcp => {
+                    let msg = format_mcp_status(&worker_mcp_manager);
+                    worker_bridge.send_assistant_message(&msg).await;
+                }
                 UserCommand::Prompt(prompt) => {
                     let client = match build_client(&config.api_key, base_url.clone(), bearer_auth) {
                         Ok(client) => client,
@@ -748,10 +871,15 @@ async fn run_tui(
                         }
                     };
 
-                    let tools = build_filtered_tools(&allowed_tools, &disallowed_tools);
-                    let query_loop = QueryLoop::new(client, tools)
+                    let mut tools = build_tools();
+                    register_mcp_tools(&mut tools, &worker_mcp_manager);
+                    tools.apply_tool_filters(&allowed_tools, &disallowed_tools);
+                    let mut query_loop = QueryLoop::new(client, tools)
                         .with_bridge(worker_bridge.clone())
                         .with_compaction_config(compaction_config.clone());
+                    if let Some(runner) = &worker_hook_runner {
+                        query_loop = query_loop.with_hook_runner(runner.clone());
+                    }
                     let worker_bridge_clone = worker_bridge.clone();
                     let worker_state_clone = worker_state.clone();
 

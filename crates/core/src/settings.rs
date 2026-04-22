@@ -2,6 +2,11 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::hooks::HooksConfig;
+use crate::mcp_config::{McpServersConfig, merge_mcp_servers};
+
+#[cfg(test)]
+use crate::hooks::HookEventGroup;
 use crate::permission::{PermissionError, PermissionRule, RuleType};
 
 /// Representation of `~/.claude/settings.json` or project `.claude/settings.json`.
@@ -21,6 +26,14 @@ pub struct ClaudeSettings {
 
     #[serde(default)]
     pub permissions: SettingsPermissions,
+
+    /// Hook definitions keyed by event name (e.g. "PreToolUse").
+    #[serde(default)]
+    pub hooks: HooksConfig,
+
+    /// MCP server definitions keyed by server name.
+    #[serde(default, rename = "mcpServers")]
+    pub mcp_servers: McpServersConfig,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -153,6 +166,19 @@ impl ClaudeSettings {
         let mut deny = low.permissions.deny.clone();
         deny.extend(high.permissions.deny.iter().cloned());
 
+        // Hook lists per event are concatenated (low-layer first, high-layer after).
+        let mut hooks: HooksConfig = low.hooks.clone();
+        for (event, groups) in &high.hooks {
+            hooks
+                .entry(event.clone())
+                .or_default()
+                .extend(groups.iter().cloned());
+        }
+
+        // MCP servers: merge by server name, high-priority layer overrides
+        // same-name entries from the low-priority layer.
+        let mcp_servers = merge_mcp_servers(&high.mcp_servers, &low.mcp_servers);
+
         ClaudeSettings {
             env,
             model: high.model.clone().or_else(|| low.model.clone()),
@@ -161,6 +187,8 @@ impl ClaudeSettings {
                 .clone()
                 .or_else(|| low.api_key_helper.clone()),
             permissions: SettingsPermissions { allow, deny },
+            hooks,
+            mcp_servers,
         }
     }
 }
@@ -342,5 +370,282 @@ mod tests {
         let merged = ClaudeSettings::merge(&project, &user);
         assert_eq!(merged.permissions.deny, vec!["Bash(rm *)"]);
         assert_eq!(merged.permissions.allow, vec!["Bash(git status *)"]);
+    }
+
+    #[test]
+    fn test_load_settings_with_hooks() {
+        let dir = make_temp_dir("hooks");
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "hooks": {
+                    "PreToolUse": [
+                        {"matcher": "Bash", "hooks": [{"type": "command", "command": "check.sh"}]}
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let settings = ClaudeSettings::load_from(&path).unwrap();
+        assert_eq!(settings.hooks.len(), 1);
+        let groups = &settings.hooks["PreToolUse"];
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].matcher.as_deref(), Some("Bash"));
+        assert_eq!(groups[0].hooks.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_settings_without_hooks() {
+        let dir = make_temp_dir("no-hooks");
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"model": "claude-sonnet-4-20250514"}"#).unwrap();
+
+        let settings = ClaudeSettings::load_from(&path).unwrap();
+        assert!(settings.hooks.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_hooks_same_event() {
+        let user = ClaudeSettings {
+            hooks: {
+                let mut h = HashMap::new();
+                h.insert(
+                    "PreToolUse".into(),
+                    vec![HookEventGroup {
+                        matcher: Some("Bash".into()),
+                        hooks: vec![],
+                    }],
+                );
+                h
+            },
+            ..Default::default()
+        };
+        let project = ClaudeSettings {
+            hooks: {
+                let mut h = HashMap::new();
+                h.insert(
+                    "PreToolUse".into(),
+                    vec![HookEventGroup {
+                        matcher: Some("Write".into()),
+                        hooks: vec![],
+                    }],
+                );
+                h
+            },
+            ..Default::default()
+        };
+
+        let merged = ClaudeSettings::merge(&project, &user);
+        let groups = &merged.hooks["PreToolUse"];
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].matcher.as_deref(), Some("Bash"));
+        assert_eq!(groups[1].matcher.as_deref(), Some("Write"));
+    }
+
+    #[test]
+    fn test_merge_hooks_different_events() {
+        let user = ClaudeSettings {
+            hooks: {
+                let mut h = HashMap::new();
+                h.insert("PreToolUse".into(), vec![]);
+                h
+            },
+            ..Default::default()
+        };
+        let project = ClaudeSettings {
+            hooks: {
+                let mut h = HashMap::new();
+                h.insert("PostToolUse".into(), vec![]);
+                h
+            },
+            ..Default::default()
+        };
+
+        let merged = ClaudeSettings::merge(&project, &user);
+        assert!(merged.hooks.contains_key("PreToolUse"));
+        assert!(merged.hooks.contains_key("PostToolUse"));
+    }
+
+    #[test]
+    fn test_load_settings_with_mcp_servers() {
+        let dir = make_temp_dir("mcp-servers");
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "mcpServers": {
+                    "filesystem": {
+                        "type": "stdio",
+                        "command": "npx",
+                        "args": ["-y", "@anthropic/mcp-server-filesystem"]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let settings = ClaudeSettings::load_from(&path).unwrap();
+        assert_eq!(settings.mcp_servers.len(), 1);
+        let fs_server = &settings.mcp_servers["filesystem"];
+        assert_eq!(fs_server.command, "npx");
+        assert_eq!(fs_server.args, vec!["-y", "@anthropic/mcp-server-filesystem"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_settings_without_mcp_servers() {
+        let dir = make_temp_dir("no-mcp");
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"model": "claude-sonnet-4-20250514"}"#).unwrap();
+
+        let settings = ClaudeSettings::load_from(&path).unwrap();
+        assert!(settings.mcp_servers.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_settings_with_unsupported_mcp_transport() {
+        let dir = make_temp_dir("mcp-unsupported");
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "mcpServers": {
+                    "remote": {"type": "sse", "command": "http-server"},
+                    "local": {"type": "stdio", "command": "npx"}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let settings = ClaudeSettings::load_from(&path).unwrap();
+        assert_eq!(settings.mcp_servers.len(), 2);
+        // Unsupported transport still loads; filtering happens at runtime
+        assert!(!settings.mcp_servers["remote"].is_supported_transport());
+        assert!(settings.mcp_servers["local"].is_supported_transport());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_merge_mcp_servers_different_names() {
+        use crate::mcp_config::{McpServerConfig, McpTransportType};
+
+        let user = ClaudeSettings {
+            mcp_servers: {
+                let mut m = HashMap::new();
+                m.insert("github".into(), McpServerConfig {
+                    transport_type: McpTransportType::Stdio,
+                    command: "gh-mcp".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    cwd: None,
+                });
+                m
+            },
+            ..Default::default()
+        };
+        let project = ClaudeSettings {
+            mcp_servers: {
+                let mut m = HashMap::new();
+                m.insert("filesystem".into(), McpServerConfig {
+                    transport_type: McpTransportType::Stdio,
+                    command: "fs-mcp".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    cwd: None,
+                });
+                m
+            },
+            ..Default::default()
+        };
+
+        let merged = ClaudeSettings::merge(&project, &user);
+        assert_eq!(merged.mcp_servers.len(), 2);
+        assert!(merged.mcp_servers.contains_key("github"));
+        assert!(merged.mcp_servers.contains_key("filesystem"));
+    }
+
+    #[test]
+    fn test_merge_mcp_servers_project_overrides_user() {
+        use crate::mcp_config::{McpServerConfig, McpTransportType};
+
+        let user = ClaudeSettings {
+            mcp_servers: {
+                let mut m = HashMap::new();
+                m.insert("filesystem".into(), McpServerConfig {
+                    transport_type: McpTransportType::Stdio,
+                    command: "a".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    cwd: None,
+                });
+                m
+            },
+            ..Default::default()
+        };
+        let project = ClaudeSettings {
+            mcp_servers: {
+                let mut m = HashMap::new();
+                m.insert("filesystem".into(), McpServerConfig {
+                    transport_type: McpTransportType::Stdio,
+                    command: "b".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    cwd: None,
+                });
+                m
+            },
+            ..Default::default()
+        };
+
+        let merged = ClaudeSettings::merge(&project, &user);
+        assert_eq!(merged.mcp_servers.len(), 1);
+        assert_eq!(merged.mcp_servers["filesystem"].command, "b");
+    }
+
+    #[test]
+    fn test_merge_mcp_servers_one_layer_empty() {
+        use crate::mcp_config::{McpServerConfig, McpTransportType};
+
+        let user = ClaudeSettings {
+            mcp_servers: {
+                let mut m = HashMap::new();
+                m.insert("github".into(), McpServerConfig {
+                    transport_type: McpTransportType::Stdio,
+                    command: "gh".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                    cwd: None,
+                });
+                m
+            },
+            ..Default::default()
+        };
+        let project = ClaudeSettings::default();
+
+        let merged = ClaudeSettings::merge(&project, &user);
+        assert_eq!(merged.mcp_servers.len(), 1);
+        assert!(merged.mcp_servers.contains_key("github"));
+    }
+
+    #[test]
+    fn test_merge_hooks_one_layer_empty() {
+        let user = ClaudeSettings {
+            hooks: {
+                let mut h = HashMap::new();
+                h.insert("Stop".into(), vec![]);
+                h
+            },
+            ..Default::default()
+        };
+        let project = ClaudeSettings::default();
+
+        let merged = ClaudeSettings::merge(&project, &user);
+        assert!(merged.hooks.contains_key("Stop"));
+        assert_eq!(merged.hooks.len(), 1);
     }
 }

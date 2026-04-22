@@ -1216,6 +1216,7 @@ dependencies = [
  "futures-util",
  "rust-claude-api",
  "rust-claude-core",
+ "rust-claude-mcp",
  "rust-claude-tools",
  "rust-claude-tui",
  "serde",
@@ -1237,6 +1238,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-claude-mcp"
+version = "0.1.0"
+dependencies = [
+ "rust-claude-core",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "rust-claude-tools"
 version = "0.1.0"
 dependencies = [
@@ -1245,6 +1257,7 @@ dependencies = [
  "glob",
  "regex",
  "rust-claude-core",
+ "rust-claude-mcp",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

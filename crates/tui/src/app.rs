@@ -65,6 +65,16 @@ const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         description: "Toggle todo panel",
     },
     SlashCommandSpec {
+        name: "/hooks",
+        usage: "/hooks",
+        description: "Show configured hooks",
+    },
+    SlashCommandSpec {
+        name: "/mcp",
+        usage: "/mcp",
+        description: "Show MCP server status and tools",
+    },
+    SlashCommandSpec {
         name: "/help",
         usage: "/help",
         description: "Show this help",
@@ -916,6 +926,12 @@ impl App {
             "/diff" => {
                 let _ = user_tx.send(UserCommand::ShowDiff).await;
             }
+            "/hooks" => {
+                let _ = user_tx.send(UserCommand::ShowHooks).await;
+            }
+            "/mcp" => {
+                let _ = user_tx.send(UserCommand::ShowMcp).await;
+            }
             "/help" => {
                 self.messages
                     .push(ChatMessage::System(slash_command_help_text()));
@@ -1098,6 +1114,13 @@ impl App {
                     result.preserved_message_count,
                     result.estimated_tokens_before / 1000,
                     result.estimated_tokens_after / 1000,
+                )));
+                self.sync_chat_viewport();
+            }
+            AppEvent::HookBlocked { tool_name, reason } => {
+                self.messages.push(ChatMessage::System(format!(
+                    "Hook blocked {}: {}",
+                    tool_name, reason,
                 )));
                 self.sync_chat_viewport();
             }

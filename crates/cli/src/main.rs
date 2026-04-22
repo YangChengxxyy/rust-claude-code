@@ -17,8 +17,8 @@ use rust_claude_core::{
 };
 use rust_claude_mcp::{McpManager, McpManagerConfig};
 use rust_claude_tools::{
-    BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, TodoWriteTool,
-    ToolRegistry, register_mcp_tools,
+    AgentContext, AgentTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
+    GrepTool, TaskTool, ToolRegistry, register_mcp_tools,
 };
 use rust_claude_tui::{App, TerminalGuard, TuiBridge, UserCommand};
 use tokio::sync::{mpsc, Mutex};
@@ -495,7 +495,10 @@ async fn main() -> Result<()> {
         let mut tools = build_tools();
         register_mcp_tools(&mut tools, &mcp_manager);
         tools.apply_tool_filters(&resolved.allowed_tools, &resolved.disallowed_tools);
-        let mut query_loop = QueryLoop::new(client, tools).with_compaction_config(CompactionConfig::default());
+        let agent_context = build_agent_context(Arc::new(client.clone()));
+        let mut query_loop = QueryLoop::new(client, tools)
+            .with_compaction_config(CompactionConfig::default())
+            .with_agent_context(agent_context);
         if let Some(max_turns) = resolved.max_turns {
             query_loop = query_loop.with_max_rounds(max_turns);
         }
@@ -561,6 +564,59 @@ fn build_client(
     Ok(client)
 }
 
+fn build_agent_context(
+    client: Arc<dyn rust_claude_api::ModelClient>,
+) -> AgentContext {
+    AgentContext {
+        tool_registry_factory: Arc::new(build_tools),
+        run_subagent: Arc::new(move |prompt, allowed_tools, app_state, current_depth, max_depth| {
+            let client = client.clone();
+            Box::pin(async move {
+                let mut tools = build_tools();
+                if !allowed_tools.is_empty() {
+                    tools.apply_tool_filters(&allowed_tools, &[]);
+                }
+                let query_loop = QueryLoop::new(client.clone(), tools).with_max_rounds(5).with_agent_context(AgentContext {
+                    tool_registry_factory: Arc::new(build_tools),
+                    run_subagent: Arc::new(|_, _, _, _, _| {
+                        Box::pin(async {
+                            Err(rust_claude_tools::ToolError::Execution(
+                                "nested agent runner unavailable".to_string(),
+                            ))
+                        })
+                    }),
+                    current_depth,
+                    max_depth,
+                });
+
+                let message = query_loop
+                    .run(app_state.clone(), prompt)
+                    .await
+                    .map_err(|e| rust_claude_tools::ToolError::Execution(e.to_string()))?;
+
+                let text = message
+                    .content
+                    .into_iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                let usage = app_state.lock().await.total_usage.clone();
+                Ok(rust_claude_tools::tool::AgentRunOutput {
+                    text,
+                    input_tokens: usage.input_tokens as u64,
+                    output_tokens: usage.output_tokens as u64,
+                })
+            })
+        }),
+        current_depth: 0,
+        max_depth: 3,
+    }
+}
+
 fn format_mcp_status(manager: &McpManager) -> String {
     let statuses = manager.server_statuses();
     if statuses.is_empty() {
@@ -604,13 +660,14 @@ fn format_mcp_status(manager: &McpManager) -> String {
 
 fn build_tools() -> ToolRegistry {
     let mut tools = ToolRegistry::new();
+    tools.register(AgentTool::new());
     tools.register(BashTool::new());
     tools.register(FileReadTool::new());
     tools.register(FileEditTool::new());
     tools.register(FileWriteTool::new());
     tools.register(GlobTool::new());
     tools.register(GrepTool::new());
-    tools.register(TodoWriteTool::new());
+    tools.register(TaskTool::new());
     tools
 }
 
@@ -874,9 +931,11 @@ async fn run_tui(
                     let mut tools = build_tools();
                     register_mcp_tools(&mut tools, &worker_mcp_manager);
                     tools.apply_tool_filters(&allowed_tools, &disallowed_tools);
+                    let agent_context = build_agent_context(Arc::new(client.clone()));
                     let mut query_loop = QueryLoop::new(client, tools)
                         .with_bridge(worker_bridge.clone())
-                        .with_compaction_config(compaction_config.clone());
+                        .with_compaction_config(compaction_config.clone())
+                        .with_agent_context(agent_context);
                     if let Some(runner) = &worker_hook_runner {
                         query_loop = query_loop.with_hook_runner(runner.clone());
                     }
@@ -1231,4 +1290,3 @@ mod tests {
         assert_eq!(resolved.config.provenance.model, ConfigSource::Env);
     }
 }
-

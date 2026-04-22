@@ -815,13 +815,13 @@ fn draw_permission_dialog(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_todo_panel(f: &mut Frame, app: &App, area: Rect) {
     let block = Block::default()
-        .title(" Todo ")
+        .title(" Tasks ")
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_set(border::ROUNDED)
         .border_style(Style::default().fg(theme::PLAN_MODE));
 
-    if app.todos.is_empty() {
+    if app.tasks.is_empty() {
         let paragraph = Paragraph::new(Text::from(vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -835,11 +835,12 @@ fn draw_todo_panel(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let mut lines = Vec::new();
-    for todo in &app.todos {
+    for todo in &app.tasks {
         let (icon, style) = match todo.status {
             TodoStatus::Pending => ("○", Style::default().fg(theme::INACTIVE)),
             TodoStatus::InProgress => ("◐", Style::default().fg(theme::CLAUDE)),
             TodoStatus::Completed => ("●", Style::default().fg(theme::SUCCESS)),
+            TodoStatus::Cancelled => ("✕", Style::default().fg(theme::INACTIVE)),
         };
 
         let content = truncate_display(&todo.content, (area.width as usize).saturating_sub(6));

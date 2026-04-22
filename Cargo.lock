@@ -1194,6 +1194,7 @@ dependencies = [
 name = "rust-claude-api"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "eventsource-stream",
  "futures-core",
  "futures-util",
@@ -1256,12 +1257,14 @@ dependencies = [
  "async-trait",
  "glob",
  "regex",
+ "rust-claude-api",
  "rust-claude-core",
  "rust-claude-mcp",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "uuid",
  "walkdir",
 ]
 

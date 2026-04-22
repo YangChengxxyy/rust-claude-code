@@ -1342,7 +1342,7 @@ rust-claude-code/
 
 ### 迭代 20：Agent Tool + Task System
 
-**状态**: 规划中
+**状态**: 已完成
 
 **目标**: 实现子代理能力，支持将复杂任务分解为子任务并行处理。Agent 是 Claude Code 处理复杂工程任务的核心能力。
 
@@ -1510,4 +1510,3 @@ rust-claude-code/
 - LSP、WebFetch、WebSearch 工具可用
 - Memory 系统支持跨会话记忆保持
 - Rust 版本在日常开发中可替代 TS 版本的核心功能
-

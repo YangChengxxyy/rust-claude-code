@@ -1,3 +1,4 @@
+pub mod agent_tool;
 pub mod bash;
 pub mod file_edit;
 pub mod file_read;
@@ -6,9 +7,11 @@ pub mod glob;
 pub mod grep;
 pub mod mcp_proxy;
 pub mod registry;
+pub mod task_tool;
 pub mod todo_write;
 pub mod tool;
 
+pub use agent_tool::AgentTool;
 pub use bash::BashTool;
 pub use file_edit::FileEditTool;
 pub use file_read::FileReadTool;
@@ -17,5 +20,6 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use mcp_proxy::{McpProxyTool, register_mcp_tools};
 pub use registry::{RegisteredTool, ToolRegistry};
+pub use task_tool::TaskTool;
 pub use todo_write::TodoWriteTool;
-pub use tool::{Tool, ToolContext, ToolError};
+pub use tool::{AgentContext, Tool, ToolContext, ToolError};

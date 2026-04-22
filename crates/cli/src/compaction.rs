@@ -16,7 +16,7 @@ use rust_claude_core::{
 };
 use tokio::sync::Mutex;
 
-use crate::query_loop::ModelClient;
+use rust_claude_api::ModelClient;
 
 const COMPACTION_PROMPT: &str = r#"You are a conversation summarizer. Your task is to create a concise but comprehensive summary of the conversation history provided below.
 

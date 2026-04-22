@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 rust-claude-core = { path = "../core" }
+rust-claude-api = { path = "../api" }
 rust-claude-mcp = { path = "../mcp" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -12,6 +13,7 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+uuid = { workspace = true }
 glob = "0.3"
 walkdir = "2"
 regex = "1"

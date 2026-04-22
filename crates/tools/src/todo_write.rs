@@ -109,14 +109,15 @@ mod tests {
                 ToolContext {
                     tool_use_id: "tool_1".to_string(),
                     app_state: Some(app_state.clone()),
+                    agent_context: None,
                 },
             )
             .await
             .unwrap();
 
         let state = app_state.lock().await;
-        assert_eq!(state.todos.len(), 1);
-        assert_eq!(state.todos[0].content, "task");
+        assert_eq!(state.tasks.len(), 1);
+        assert_eq!(state.tasks[0].content, "task");
     }
 
     #[tokio::test]
@@ -133,13 +134,14 @@ mod tests {
                 ToolContext {
                     tool_use_id: "tool_1".to_string(),
                     app_state: Some(app_state.clone()),
+                    agent_context: None,
                 },
             )
             .await
             .unwrap();
 
         let state = app_state.lock().await;
-        assert!(state.todos.is_empty());
+        assert!(state.tasks.is_empty());
     }
 
     #[tokio::test]
@@ -154,6 +156,7 @@ mod tests {
                 ToolContext {
                     tool_use_id: "tool_1".to_string(),
                     app_state: None,
+                    agent_context: None,
                 },
             )
             .await

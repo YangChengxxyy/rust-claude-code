@@ -1,12 +1,11 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use futures_util::future::join_all;
 use futures_util::StreamExt;
 use rust_claude_api::{
     inject_cache_control_on_messages, ApiError, ApiMessage, ApiTool, ContentBlockAccumulator,
-    CreateMessageRequest, CreateMessageResponse, MessageStream, StreamEvent, SystemBlock,
-    SystemPrompt,
+    CreateMessageRequest, CreateMessageResponse, ModelClient, StreamEvent,
+    SystemBlock, SystemPrompt,
 };
 use rust_claude_core::{
     compaction::CompactionConfig,
@@ -35,53 +34,6 @@ pub enum QueryLoopError {
     MaxRoundsExceeded,
 }
 
-#[async_trait]
-pub trait ModelClient: Send + Sync {
-    async fn create_message(
-        &self,
-        request: &CreateMessageRequest,
-    ) -> Result<CreateMessageResponse, ApiError>;
-
-    async fn create_message_stream(
-        &self,
-        request: &CreateMessageRequest,
-    ) -> Result<MessageStream, ApiError>;
-}
-
-#[async_trait]
-impl<C: ModelClient> ModelClient for &C {
-    async fn create_message(
-        &self,
-        request: &CreateMessageRequest,
-    ) -> Result<CreateMessageResponse, ApiError> {
-        (*self).create_message(request).await
-    }
-
-    async fn create_message_stream(
-        &self,
-        request: &CreateMessageRequest,
-    ) -> Result<MessageStream, ApiError> {
-        (*self).create_message_stream(request).await
-    }
-}
-
-#[async_trait]
-impl ModelClient for rust_claude_api::AnthropicClient {
-    async fn create_message(
-        &self,
-        request: &CreateMessageRequest,
-    ) -> Result<CreateMessageResponse, ApiError> {
-        rust_claude_api::AnthropicClient::create_message(self, request).await
-    }
-
-    async fn create_message_stream(
-        &self,
-        request: &CreateMessageRequest,
-    ) -> Result<MessageStream, ApiError> {
-        rust_claude_api::AnthropicClient::create_message_stream(self, request).await
-    }
-}
-
 const MAX_TOKENS_RECOVERY_LIMIT: usize = 3;
 const MAX_TOKENS_RECOVERY_MESSAGE: &str =
     "Continue from where you left off. Do not repeat what you already said. Pick up mid-thought if needed. Break remaining work into smaller pieces.";
@@ -93,6 +45,7 @@ pub struct QueryLoop<C> {
     bridge: Option<rust_claude_tui::TuiBridge>,
     compaction_config: Option<CompactionConfig>,
     hook_runner: Option<Arc<HookRunner>>,
+    agent_context: Option<rust_claude_tools::AgentContext>,
 }
 
 impl<C> QueryLoop<C>
@@ -107,6 +60,7 @@ where
             bridge: None,
             compaction_config: None,
             hook_runner: None,
+            agent_context: None,
         }
     }
 
@@ -127,6 +81,11 @@ where
 
     pub fn with_compaction_config(mut self, config: CompactionConfig) -> Self {
         self.compaction_config = Some(config);
+        self
+    }
+
+    pub fn with_agent_context(mut self, ctx: rust_claude_tools::AgentContext) -> Self {
+        self.agent_context = Some(ctx);
         self
     }
 
@@ -577,6 +536,7 @@ where
                     ToolContext {
                         tool_use_id,
                         app_state: Some(app_state.clone()),
+                        agent_context: self.agent_context.clone(),
                     },
                 )
                 .await;
@@ -614,6 +574,7 @@ where
                     ToolContext {
                         tool_use_id,
                         app_state: Some(app_state.clone()),
+                        agent_context: self.agent_context.clone(),
                     },
                 )
                 .await
@@ -660,6 +621,8 @@ fn ensure_index<T>(items: &mut Vec<Option<T>>, index: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use rust_claude_api::MessageStream;
     use rust_claude_core::message::{ContentBlock, Message};
     use rust_claude_tools::{BashTool, FileReadTool, Tool, ToolContext, ToolError};
     use std::collections::VecDeque;

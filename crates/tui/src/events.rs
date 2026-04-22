@@ -80,7 +80,7 @@ pub enum AppEvent {
         /// Channel to send the user's response back.
         response_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
     },
-    /// Todo list has been updated.
+    /// Task list has been updated.
     TodoUpdate(Vec<TodoItem>),
     /// Conversation compaction has started.
     CompactionStart,
@@ -168,7 +168,8 @@ impl ChatMessage {
             "FileRead" => "Read",
             "FileEdit" => "Update",
             "FileWrite" => "Write",
-            "TodoWrite" => "Todo",
+            "Task" => "Task",
+            "TodoWrite" => "Task",
             other => other,
         }
     }

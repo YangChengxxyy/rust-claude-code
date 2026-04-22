@@ -374,9 +374,9 @@ pub struct App {
     // -- permission dialog --
     pub permission_dialog: Option<PermissionDialog>,
 
-    // -- todo panel --
+    // -- task panel --
     pub todo_visible: bool,
-    pub todos: Vec<TodoItem>,
+    pub tasks: Vec<TodoItem>,
 
     // -- history --
     pub history: Vec<String>,
@@ -418,7 +418,7 @@ impl App {
             cache_creation_input_tokens: 0,
             permission_dialog: None,
             todo_visible: false,
-            todos: Vec::new(),
+            tasks: Vec::new(),
             history,
             history_index: None,
             draft_before_history: None,
@@ -1100,7 +1100,7 @@ impl App {
                     response_tx: Some(response_tx),
                 });
             }
-            AppEvent::TodoUpdate(todos) => self.todos = todos,
+            AppEvent::TodoUpdate(todos) => self.tasks = todos,
             AppEvent::CompactionStart => {
                 self.messages.push(ChatMessage::System(
                     "Compacting conversation history...".into(),

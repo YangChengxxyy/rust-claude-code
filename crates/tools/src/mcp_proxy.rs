@@ -151,6 +151,7 @@ mod tests {
         let context = ToolContext {
             tool_use_id: "test_id".into(),
             app_state: None,
+                    agent_context: None,
         };
 
         let result = tool

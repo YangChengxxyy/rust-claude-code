@@ -5,29 +5,36 @@ use crate::git::GitContextSnapshot;
 use crate::message::{Message, Usage};
 use crate::permission::{PermissionCheck, PermissionMode, PermissionRequest, PermissionRule};
 
+/// A task with status tracking. Replaces the previous TodoItem type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TodoItem {
+pub struct Task {
     pub id: String,
     pub content: String,
-    pub status: TodoStatus,
-    pub priority: TodoPriority,
+    pub status: TaskStatus,
+    pub priority: TaskPriority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TodoStatus {
+pub enum TaskStatus {
     Pending,
     InProgress,
     Completed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum TodoPriority {
+pub enum TaskPriority {
     High,
     Medium,
     Low,
 }
+
+// Backward-compatible type aliases for existing code (TUI, TodoWriteTool, etc.)
+pub type TodoItem = Task;
+pub type TodoStatus = TaskStatus;
+pub type TodoPriority = TaskPriority;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSettings {
@@ -47,7 +54,7 @@ fn default_thinking_enabled() -> bool {
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub messages: Vec<Message>,
-    pub todos: Vec<TodoItem>,
+    pub tasks: Vec<Task>,
     pub permission_mode: PermissionMode,
     pub always_allow_rules: Vec<PermissionRule>,
     pub always_deny_rules: Vec<PermissionRule>,
@@ -66,7 +73,7 @@ impl AppState {
     pub fn new(cwd: std::path::PathBuf) -> Self {
         AppState {
             messages: Vec::new(),
-            todos: Vec::new(),
+            tasks: Vec::new(),
             permission_mode: PermissionMode::Default,
             always_allow_rules: Vec::new(),
             always_deny_rules: Vec::new(),
@@ -136,13 +143,21 @@ impl AppState {
             .and_then(|message| message.usage.as_ref())
     }
 
-    pub fn update_todos(&mut self, todos: Vec<TodoItem>) {
-        let all_completed = todos.iter().all(|t| t.status == TodoStatus::Completed);
-        if all_completed && !todos.is_empty() {
-            self.todos.clear();
+    /// Update the task list. If all tasks are completed or cancelled, clear the list.
+    pub fn update_tasks(&mut self, tasks: Vec<Task>) {
+        let all_done = tasks.iter().all(|t| {
+            matches!(t.status, TaskStatus::Completed | TaskStatus::Cancelled)
+        });
+        if all_done && !tasks.is_empty() {
+            self.tasks.clear();
         } else {
-            self.todos = todos;
+            self.tasks = tasks;
         }
+    }
+
+    /// Backward-compatible alias for update_tasks.
+    pub fn update_todos(&mut self, todos: Vec<TodoItem>) {
+        self.update_tasks(todos);
     }
 
     pub fn messages_for_api(&self) -> Vec<&Message> {
@@ -176,7 +191,7 @@ mod tests {
     fn test_app_state_new() {
         let state = AppState::new(std::path::PathBuf::from("/tmp"));
         assert!(state.messages.is_empty());
-        assert!(state.todos.is_empty());
+        assert!(state.tasks.is_empty());
         assert_eq!(state.permission_mode, PermissionMode::Default);
         assert!(state.always_allow_rules.is_empty());
         assert!(state.always_deny_rules.is_empty());
@@ -222,50 +237,88 @@ mod tests {
     }
 
     #[test]
-    fn test_update_todos_all_completed_clears() {
+    fn test_update_tasks_all_completed_clears() {
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
-        state.update_todos(vec![TodoItem {
+        state.update_tasks(vec![Task {
             id: "1".to_string(),
             content: "task 1".to_string(),
-            status: TodoStatus::Completed,
-            priority: TodoPriority::High,
+            status: TaskStatus::Completed,
+            priority: TaskPriority::High,
         }]);
-        assert!(state.todos.is_empty());
+        assert!(state.tasks.is_empty());
     }
 
     #[test]
-    fn test_update_todos_mixed_keeps() {
+    fn test_update_tasks_all_cancelled_clears() {
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
-        state.update_todos(vec![
-            TodoItem {
+        state.update_tasks(vec![Task {
+            id: "1".to_string(),
+            content: "task 1".to_string(),
+            status: TaskStatus::Cancelled,
+            priority: TaskPriority::Low,
+        }]);
+        assert!(state.tasks.is_empty());
+    }
+
+    #[test]
+    fn test_update_tasks_mixed_keeps() {
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.update_tasks(vec![
+            Task {
                 id: "1".to_string(),
                 content: "task 1".to_string(),
-                status: TodoStatus::Completed,
-                priority: TodoPriority::High,
+                status: TaskStatus::Completed,
+                priority: TaskPriority::High,
             },
-            TodoItem {
+            Task {
                 id: "2".to_string(),
                 content: "task 2".to_string(),
-                status: TodoStatus::InProgress,
-                priority: TodoPriority::Medium,
+                status: TaskStatus::InProgress,
+                priority: TaskPriority::Medium,
             },
         ]);
-        assert_eq!(state.todos.len(), 2);
+        assert_eq!(state.tasks.len(), 2);
     }
 
     #[test]
-    fn test_todo_item_serde() {
-        let item = TodoItem {
+    fn test_task_serde() {
+        let item = Task {
             id: "1".to_string(),
             content: "test task".to_string(),
-            status: TodoStatus::InProgress,
-            priority: TodoPriority::High,
+            status: TaskStatus::InProgress,
+            priority: TaskPriority::High,
         };
         let json = serde_json::to_string(&item).unwrap();
-        let parsed: TodoItem = serde_json::from_str(&json).unwrap();
+        let parsed: Task = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, "1");
-        assert_eq!(parsed.status, TodoStatus::InProgress);
-        assert_eq!(parsed.priority, TodoPriority::High);
+        assert_eq!(parsed.status, TaskStatus::InProgress);
+        assert_eq!(parsed.priority, TaskPriority::High);
+    }
+
+    #[test]
+    fn test_task_cancelled_status_serde() {
+        let item = Task {
+            id: "1".to_string(),
+            content: "cancelled task".to_string(),
+            status: TaskStatus::Cancelled,
+            priority: TaskPriority::Low,
+        };
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("\"cancelled\""));
+        let parsed: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.status, TaskStatus::Cancelled);
+    }
+
+    #[test]
+    fn test_backward_compat_todo_aliases() {
+        // Verify type aliases work
+        let item: TodoItem = Task {
+            id: "1".to_string(),
+            content: "test".to_string(),
+            status: TodoStatus::Pending,
+            priority: TodoPriority::Medium,
+        };
+        assert_eq!(item.status, TaskStatus::Pending);
     }
 
     #[test]

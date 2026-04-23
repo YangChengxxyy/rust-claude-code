@@ -232,6 +232,39 @@ pub fn build_relevant_memories_section(memories: &[RelevantMemory]) -> Option<St
     Some(lines.join("\n"))
 }
 
+/// Scan the memory store for an existing entry that would be a duplicate of
+/// the given write request. Matches by exact `relative_path` first, then by
+/// case-insensitive `frontmatter.name`.
+pub fn find_duplicate_memory<'a>(
+    scanned: &'a ScannedMemoryStore,
+    request: &MemoryWriteRequest,
+) -> Option<&'a MemoryEntry> {
+    // 1. Exact path match
+    if let Some(entry) = scanned
+        .entries
+        .iter()
+        .find(|e| e.relative_path == request.relative_path)
+    {
+        return Some(entry);
+    }
+
+    // 2. Case-insensitive name match
+    if let Some(req_name) = &request.frontmatter.name {
+        let req_lower = req_name.to_ascii_lowercase();
+        if let Some(entry) = scanned.entries.iter().find(|e| {
+            e.frontmatter
+                .name
+                .as_ref()
+                .map(|n| n.to_ascii_lowercase() == req_lower)
+                .unwrap_or(false)
+        }) {
+            return Some(entry);
+        }
+    }
+
+    None
+}
+
 pub fn write_memory_entry(
     store: &MemoryStore,
     request: &MemoryWriteRequest,
@@ -239,6 +272,26 @@ pub fn write_memory_entry(
     let path = store.memory_dir.join(&request.relative_path);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+    }
+    let content = render_memory_file(&request.frontmatter, &request.body);
+    fs::write(&path, content)?;
+    rebuild_memory_index(store)?;
+    Ok(path)
+}
+
+/// Update an existing memory file in-place with new frontmatter and body,
+/// then rebuild the `MEMORY.md` index. Returns an error if the target file
+/// does not exist (use `write_memory_entry` for creation).
+pub fn correct_memory_entry(
+    store: &MemoryStore,
+    request: &MemoryWriteRequest,
+) -> std::io::Result<PathBuf> {
+    let path = store.memory_dir.join(&request.relative_path);
+    if !path.exists() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Memory file not found: {}", request.relative_path),
+        ));
     }
     let content = render_memory_file(&request.frontmatter, &request.body);
     fs::write(&path, content)?;
@@ -568,6 +621,185 @@ mod tests {
         assert!(removed);
         let index = fs::read_to_string(store.entrypoint).unwrap();
         assert!(index.trim().is_empty());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_duplicate_by_exact_path() {
+        let scanned = ScannedMemoryStore {
+            store: MemoryStore {
+                project_root: PathBuf::from("/repo"),
+                memory_dir: PathBuf::from("/memory"),
+                entrypoint: PathBuf::from("/memory/MEMORY.md"),
+            },
+            index: None,
+            entries: vec![MemoryEntry {
+                path: PathBuf::from("/memory/testing.md"),
+                relative_path: "testing.md".to_string(),
+                modified_at_ms: 1,
+                freshness_days: 0,
+                frontmatter: MemoryFrontmatter {
+                    name: Some("Testing".to_string()),
+                    ..MemoryFrontmatter::default()
+                },
+                body: "body".to_string(),
+            }],
+        };
+
+        let request = MemoryWriteRequest {
+            relative_path: "testing.md".to_string(),
+            frontmatter: MemoryFrontmatter {
+                name: Some("Different Name".to_string()),
+                ..MemoryFrontmatter::default()
+            },
+            body: "new body".to_string(),
+        };
+
+        let dup = find_duplicate_memory(&scanned, &request);
+        assert!(dup.is_some());
+        assert_eq!(dup.unwrap().relative_path, "testing.md");
+    }
+
+    #[test]
+    fn find_duplicate_by_name_case_insensitive() {
+        let scanned = ScannedMemoryStore {
+            store: MemoryStore {
+                project_root: PathBuf::from("/repo"),
+                memory_dir: PathBuf::from("/memory"),
+                entrypoint: PathBuf::from("/memory/MEMORY.md"),
+            },
+            index: None,
+            entries: vec![MemoryEntry {
+                path: PathBuf::from("/memory/testing.md"),
+                relative_path: "testing.md".to_string(),
+                modified_at_ms: 1,
+                freshness_days: 0,
+                frontmatter: MemoryFrontmatter {
+                    name: Some("Testing Conventions".to_string()),
+                    ..MemoryFrontmatter::default()
+                },
+                body: "body".to_string(),
+            }],
+        };
+
+        let request = MemoryWriteRequest {
+            relative_path: "other.md".to_string(),
+            frontmatter: MemoryFrontmatter {
+                name: Some("testing conventions".to_string()),
+                ..MemoryFrontmatter::default()
+            },
+            body: "new body".to_string(),
+        };
+
+        let dup = find_duplicate_memory(&scanned, &request);
+        assert!(dup.is_some());
+        assert_eq!(dup.unwrap().relative_path, "testing.md");
+    }
+
+    #[test]
+    fn find_duplicate_returns_none_when_no_match() {
+        let scanned = ScannedMemoryStore {
+            store: MemoryStore {
+                project_root: PathBuf::from("/repo"),
+                memory_dir: PathBuf::from("/memory"),
+                entrypoint: PathBuf::from("/memory/MEMORY.md"),
+            },
+            index: None,
+            entries: vec![MemoryEntry {
+                path: PathBuf::from("/memory/testing.md"),
+                relative_path: "testing.md".to_string(),
+                modified_at_ms: 1,
+                freshness_days: 0,
+                frontmatter: MemoryFrontmatter {
+                    name: Some("Testing".to_string()),
+                    ..MemoryFrontmatter::default()
+                },
+                body: "body".to_string(),
+            }],
+        };
+
+        let request = MemoryWriteRequest {
+            relative_path: "other.md".to_string(),
+            frontmatter: MemoryFrontmatter {
+                name: Some("Deployment".to_string()),
+                ..MemoryFrontmatter::default()
+            },
+            body: "new body".to_string(),
+        };
+
+        assert!(find_duplicate_memory(&scanned, &request).is_none());
+    }
+
+    #[test]
+    fn correct_memory_entry_updates_existing_file() {
+        let dir = std::env::temp_dir().join(format!("memory-correct-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = MemoryStore {
+            project_root: PathBuf::from("/repo"),
+            memory_dir: dir.clone(),
+            entrypoint: dir.join("MEMORY.md"),
+        };
+
+        // Create an initial entry
+        let initial = MemoryWriteRequest {
+            relative_path: "testing.md".to_string(),
+            frontmatter: MemoryFrontmatter {
+                name: Some("Testing".to_string()),
+                description: Some("Old description".to_string()),
+                memory_type: Some(MemoryType::Feedback),
+                ..MemoryFrontmatter::default()
+            },
+            body: "Old body.".to_string(),
+        };
+        write_memory_entry(&store, &initial).unwrap();
+
+        // Correct it
+        let correction = MemoryWriteRequest {
+            relative_path: "testing.md".to_string(),
+            frontmatter: MemoryFrontmatter {
+                name: Some("Testing".to_string()),
+                description: Some("Updated description".to_string()),
+                memory_type: Some(MemoryType::Feedback),
+                ..MemoryFrontmatter::default()
+            },
+            body: "Updated body.".to_string(),
+        };
+        let path = correct_memory_entry(&store, &correction).unwrap();
+        assert!(path.exists());
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Updated description"));
+        assert!(content.contains("Updated body."));
+        assert!(!content.contains("Old"));
+
+        let index = fs::read_to_string(&store.entrypoint).unwrap();
+        assert!(index.contains("[Testing](testing.md)"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn correct_memory_entry_errors_on_nonexistent_target() {
+        let dir = std::env::temp_dir().join(format!("memory-correct-missing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = MemoryStore {
+            project_root: PathBuf::from("/repo"),
+            memory_dir: dir.clone(),
+            entrypoint: dir.join("MEMORY.md"),
+        };
+
+        let request = MemoryWriteRequest {
+            relative_path: "nonexistent.md".to_string(),
+            frontmatter: MemoryFrontmatter::default(),
+            body: "body".to_string(),
+        };
+
+        let result = correct_memory_entry(&store, &request);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
 
         let _ = fs::remove_dir_all(&dir);
     }

@@ -692,8 +692,11 @@ fn format_memory_status(cwd: &std::path::Path) -> String {
     let Some(store) = memory::discover_memory_store(cwd) else {
         return "No memory store is available for the current project.".to_string();
     };
+    format_memory_store_status(&store)
+}
 
-    match memory::scan_memory_store(&store) {
+fn format_memory_store_status(store: &memory::MemoryStore) -> String {
+    match memory::scan_memory_store(store) {
         Ok(scanned) => {
             let mut text = format!(
                 "Memory store:\n  project_root: {}\n  memory_dir: {}\n  entrypoint: {}\n  entries: {}",
@@ -770,14 +773,39 @@ fn remember_memory(
         body: body.to_string(),
     };
 
-    match memory::write_memory_entry(&store, &request) {
-        Ok(written) => format!(
-            "Saved memory '{}' to {} and updated {}",
-            title,
-            written.display(),
-            store.entrypoint.display()
-        ),
-        Err(e) => format!("Failed to save memory: {e}"),
+    // Check for duplicates before writing.  When a duplicate is found by
+    // name (not path), use the existing entry's path so `correct_memory_entry`
+    // targets the right file.
+    let existing_path = match memory::scan_memory_store(&store) {
+        Ok(scanned) => memory::find_duplicate_memory(&scanned, &request)
+            .map(|dup| dup.relative_path.clone()),
+        Err(_) => None,
+    };
+
+    if let Some(target_path) = existing_path {
+        let corrected_request = memory::MemoryWriteRequest {
+            relative_path: target_path,
+            ..request
+        };
+        match memory::correct_memory_entry(&store, &corrected_request) {
+            Ok(written) => format!(
+                "Updated memory '{}' at {} and rebuilt {}",
+                title,
+                written.display(),
+                store.entrypoint.display()
+            ),
+            Err(e) => format!("Failed to update memory: {e}"),
+        }
+    } else {
+        match memory::write_memory_entry(&store, &request) {
+            Ok(written) => format!(
+                "Saved memory '{}' to {} and updated {}",
+                title,
+                written.display(),
+                store.entrypoint.display()
+            ),
+            Err(e) => format!("Failed to save memory: {e}"),
+        }
     }
 }
 
@@ -1440,6 +1468,250 @@ mod tests {
 
         assert_eq!(resolved.model_setting, "opus[1m]");
         assert_eq!(resolved.config.provenance.model, ConfigSource::Cli);
+    }
+
+    /// Exercises the dedup-aware memory write path: when a memory already
+    /// exists at the target path, `correct_memory_entry` is used instead of
+    /// `write_memory_entry`, producing an "Updated" message.
+    #[test]
+    fn remember_memory_updates_existing_entry_via_dedup() {
+        use rust_claude_core::memory;
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!(
+            "remember-dedup-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let store = memory::MemoryStore {
+            project_root: std::path::PathBuf::from("/repo"),
+            memory_dir: dir.clone(),
+            entrypoint: dir.join("MEMORY.md"),
+        };
+
+        // Seed an initial memory entry
+        let initial = memory::MemoryWriteRequest {
+            relative_path: "testing.md".to_string(),
+            frontmatter: memory::MemoryFrontmatter {
+                name: Some("Testing".to_string()),
+                description: Some("Old desc".to_string()),
+                memory_type: Some(memory::MemoryType::Feedback),
+                extra: std::collections::HashMap::new(),
+            },
+            body: "Old body.".to_string(),
+        };
+        memory::write_memory_entry(&store, &initial).unwrap();
+
+        // Build an update request targeting the same path
+        let update = memory::MemoryWriteRequest {
+            relative_path: "testing.md".to_string(),
+            frontmatter: memory::MemoryFrontmatter {
+                name: Some("Testing".to_string()),
+                description: Some("New desc".to_string()),
+                memory_type: Some(memory::MemoryType::Feedback),
+                extra: std::collections::HashMap::new(),
+            },
+            body: "New body.".to_string(),
+        };
+
+        // Duplicate detection should find the existing entry
+        let scanned = memory::scan_memory_store(&store).unwrap();
+        let dup = memory::find_duplicate_memory(&scanned, &update);
+        assert!(dup.is_some(), "existing entry should be detected as duplicate");
+
+        // Correct instead of create
+        let path = memory::correct_memory_entry(&store, &update).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("New desc"));
+        assert!(content.contains("New body."));
+        assert!(!content.contains("Old"));
+
+        // Only one entry in the store, not two
+        let rescan = memory::scan_memory_store(&store).unwrap();
+        assert_eq!(rescan.entries.len(), 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// When a duplicate is found by name but at a different path, the fix
+    /// should update the file at the existing path, not the new path.
+    #[test]
+    fn remember_memory_name_dedup_targets_existing_path() {
+        use rust_claude_core::memory;
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!(
+            "remember-name-dedup-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let store = memory::MemoryStore {
+            project_root: std::path::PathBuf::from("/repo"),
+            memory_dir: dir.clone(),
+            entrypoint: dir.join("MEMORY.md"),
+        };
+
+        // Seed an entry at "testing.md" with name "Testing Conventions"
+        let initial = memory::MemoryWriteRequest {
+            relative_path: "testing.md".to_string(),
+            frontmatter: memory::MemoryFrontmatter {
+                name: Some("Testing Conventions".to_string()),
+                description: Some("Old desc".to_string()),
+                memory_type: Some(memory::MemoryType::Feedback),
+                extra: std::collections::HashMap::new(),
+            },
+            body: "Old body.".to_string(),
+        };
+        memory::write_memory_entry(&store, &initial).unwrap();
+
+        // A new request at a DIFFERENT path but same name (case-insensitive)
+        let update = memory::MemoryWriteRequest {
+            relative_path: "conventions/testing.md".to_string(),
+            frontmatter: memory::MemoryFrontmatter {
+                name: Some("testing conventions".to_string()),
+                description: Some("New desc".to_string()),
+                memory_type: Some(memory::MemoryType::Feedback),
+                extra: std::collections::HashMap::new(),
+            },
+            body: "New body.".to_string(),
+        };
+
+        // find_duplicate_memory matches by name
+        let scanned = memory::scan_memory_store(&store).unwrap();
+        let dup = memory::find_duplicate_memory(&scanned, &update);
+        assert!(dup.is_some(), "name-based match should find existing entry");
+        let dup_entry = dup.unwrap();
+        assert_eq!(dup_entry.relative_path, "testing.md");
+
+        // The corrected request should target the existing path
+        let corrected = memory::MemoryWriteRequest {
+            relative_path: dup_entry.relative_path.clone(),
+            ..update
+        };
+        let path = memory::correct_memory_entry(&store, &corrected).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("New desc"), "should have updated content");
+        assert!(content.contains("New body."), "should have updated body");
+
+        // Still only one entry, at the original path
+        let rescan = memory::scan_memory_store(&store).unwrap();
+        assert_eq!(rescan.entries.len(), 1);
+        assert_eq!(rescan.entries[0].relative_path, "testing.md");
+
+        // The new path should NOT have been created
+        assert!(!dir.join("conventions/testing.md").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn format_memory_store_status_empty_store() {
+        use rust_claude_core::memory;
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!(
+            "memory-status-empty-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let store = memory::MemoryStore {
+            project_root: dir.clone(),
+            memory_dir: dir.clone(),
+            entrypoint: dir.join("MEMORY.md"),
+        };
+
+        let status = format_memory_store_status(&store);
+        assert!(status.contains("entries: 0"), "should show zero entries");
+        assert!(status.contains("No memory entries found"), "should indicate empty");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn format_memory_store_status_populated_store() {
+        use rust_claude_core::memory;
+        use std::fs;
+
+        let dir = std::env::temp_dir().join(format!(
+            "memory-status-populated-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let store = memory::MemoryStore {
+            project_root: std::path::PathBuf::from("/repo"),
+            memory_dir: dir.clone(),
+            entrypoint: dir.join("MEMORY.md"),
+        };
+
+        // Write two memory entries
+        memory::write_memory_entry(
+            &store,
+            &memory::MemoryWriteRequest {
+                relative_path: "testing.md".to_string(),
+                frontmatter: memory::MemoryFrontmatter {
+                    name: Some("Testing".to_string()),
+                    description: Some("DB test guidance".to_string()),
+                    memory_type: Some(memory::MemoryType::Feedback),
+                    extra: std::collections::HashMap::new(),
+                },
+                body: "Use real database.".to_string(),
+            },
+        )
+        .unwrap();
+        memory::write_memory_entry(
+            &store,
+            &memory::MemoryWriteRequest {
+                relative_path: "deploy.md".to_string(),
+                frontmatter: memory::MemoryFrontmatter {
+                    name: Some("Deploy".to_string()),
+                    description: Some("Deploy process".to_string()),
+                    memory_type: Some(memory::MemoryType::Project),
+                    extra: std::collections::HashMap::new(),
+                },
+                body: "Use rolling deploy.".to_string(),
+            },
+        )
+        .unwrap();
+
+        let status = format_memory_store_status(&store);
+        assert!(status.contains("entries: 2"), "should show two entries");
+        assert!(status.contains("Visible memories:"), "should list memories");
+        assert!(status.contains("[feedback]"), "should show memory type");
+        assert!(status.contains("[project]"), "should show second type");
+        assert!(status.contains("DB test guidance"), "should show description");
+        assert!(status.contains("Entrypoint loaded:"), "should show entrypoint info");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn format_memory_store_status_no_store_dir() {
+        use rust_claude_core::memory;
+
+        let dir = std::env::temp_dir().join(format!(
+            "memory-status-nodir-{}",
+            std::process::id()
+        ));
+        // Ensure dir does NOT exist
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let store = memory::MemoryStore {
+            project_root: dir.clone(),
+            memory_dir: dir.join("nonexistent-memory"),
+            entrypoint: dir.join("nonexistent-memory/MEMORY.md"),
+        };
+
+        let status = format_memory_store_status(&store);
+        assert!(status.contains("entries: 0"), "non-existent dir should show 0 entries");
+        assert!(status.contains("No memory entries found"), "should indicate empty");
     }
 
     /// `RUST_CLAUDE_MODEL_OVERRIDE` must still beat both CLI `--model` and

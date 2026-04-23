@@ -1621,4 +1621,47 @@ mod tests {
                 if summary.contains("Thought for") && content == "reasoning"
         ));
     }
+
+    /// Verify that memory status text arriving as AssistantMessage is displayed
+    /// correctly for the "no store" case.
+    #[test]
+    fn test_memory_no_store_response_displays_as_assistant() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let msg = "No memory store is available for the current project.";
+        app.handle_app_event(AppEvent::AssistantMessage(msg.into()));
+
+        assert!(matches!(
+            app.messages.last(),
+            Some(ChatMessage::Assistant(text)) if text.contains("No memory store")
+        ));
+    }
+
+    /// Verify that memory status text for an empty store displays correctly.
+    #[test]
+    fn test_memory_empty_store_response_displays_as_assistant() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let msg = "Memory store:\n  project_root: /repo\n  memory_dir: /memory\n  entrypoint: /memory/MEMORY.md\n  entries: 0\n\nNo memory entries found.";
+        app.handle_app_event(AppEvent::AssistantMessage(msg.into()));
+
+        assert!(matches!(
+            app.messages.last(),
+            Some(ChatMessage::Assistant(text))
+                if text.contains("entries: 0") && text.contains("No memory entries found")
+        ));
+    }
+
+    /// Verify that memory status text for a populated store displays correctly.
+    #[test]
+    fn test_memory_populated_store_response_displays_as_assistant() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let msg = "Memory store:\n  project_root: /repo\n  memory_dir: /memory\n  entrypoint: /memory/MEMORY.md\n  entries: 2\n\nVisible memories:\n- [feedback] testing.md — DB test guidance (1 days old)\n- [project] deploy.md — Deploy process (3 days old)\n";
+        app.handle_app_event(AppEvent::AssistantMessage(msg.into()));
+
+        assert!(matches!(
+            app.messages.last(),
+            Some(ChatMessage::Assistant(text))
+                if text.contains("entries: 2") && text.contains("Visible memories:")
+                    && text.contains("[feedback]") && text.contains("[project]")
+        ));
+    }
 }

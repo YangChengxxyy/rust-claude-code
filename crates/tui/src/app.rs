@@ -337,6 +337,15 @@ impl InputBuffer {
     }
 }
 
+/// State for a tool call being constructed during streaming.
+#[derive(Debug, Clone)]
+pub struct StreamingToolState {
+    /// The tool name.
+    pub name: String,
+    /// Accumulated partial JSON input.
+    pub accumulated_json: String,
+}
+
 /// Main TUI application state.
 pub struct App {
     /// Chat message history.
@@ -355,8 +364,18 @@ pub struct App {
     pub suppress_stream: bool,
     /// Accumulated streaming text (displayed live, moved to messages on StreamEnd).
     pub streaming_text: String,
+    /// Raw text accumulator for conversion to ChatMessage on stream end.
+    pub streaming_text_raw: String,
+    /// Incremental markdown state for streaming text rendering.
+    pub streaming_md: crate::streaming_markdown::StreamingMarkdownState,
     /// Accumulated streaming thinking text.
     pub streaming_thinking: String,
+    /// Incremental markdown state for streaming thinking rendering.
+    pub streaming_thinking_md: crate::streaming_markdown::StreamingMarkdownState,
+    /// Whether the thinking block is currently folded during streaming.
+    pub thinking_folded: bool,
+    /// State for a tool call being constructed during streaming.
+    pub streaming_tool: Option<StreamingToolState>,
     /// Expanded thinking message indices.
     pub expanded_thinking: Vec<usize>,
     /// Selected thinking block for keyboard expand/collapse.
@@ -412,7 +431,12 @@ impl App {
             is_thinking: false,
             suppress_stream: false,
             streaming_text: String::new(),
+            streaming_text_raw: String::new(),
+            streaming_md: crate::streaming_markdown::StreamingMarkdownState::new(),
             streaming_thinking: String::new(),
+            streaming_thinking_md: crate::streaming_markdown::StreamingMarkdownState::new(),
+            thinking_folded: false,
+            streaming_tool: None,
             expanded_thinking: Vec::new(),
             selected_thinking: None,
             clear_requested: false,
@@ -607,11 +631,26 @@ impl App {
     }
 
     fn cancel_stream_local(&mut self) {
+        // Finalize thinking content as cancelled if any
+        if !self.streaming_thinking.is_empty() {
+            let thinking_text = std::mem::take(&mut self.streaming_thinking);
+            self.streaming_thinking_md.clear();
+            let summary = format!("Thought for ~{} chars (cancelled)", thinking_text.chars().count());
+            self.messages.push(ChatMessage::Thinking {
+                summary,
+                content: thinking_text,
+            });
+            self.update_selected_thinking();
+        }
         self.suppress_stream = true;
         self.is_streaming = false;
         self.is_thinking = false;
         self.streaming_text.clear();
+        self.streaming_text_raw.clear();
+        self.streaming_md.clear();
         self.streaming_thinking.clear();
+        self.streaming_thinking_md.clear();
+        self.streaming_tool = None;
         self.messages.push(ChatMessage::System(
             "Cancelled current response.".into(),
         ));
@@ -619,6 +658,10 @@ impl App {
     }
 
     /// Run the TUI event loop.
+    ///
+    /// During streaming, rendering is rate-limited to ~30 FPS (33ms tick)
+    /// to batch rapid delta events and prevent flicker. When not streaming,
+    /// events trigger immediate redraws.
     pub async fn run(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
@@ -661,7 +704,15 @@ impl App {
         }
         terminal.draw(|f| ui::draw(f, self))?;
 
+        // Frame rate limiting: 33ms tick (~30 FPS) during streaming
+        let mut render_tick = tokio::time::interval(Duration::from_millis(33));
+        render_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut dirty = false;
+
         loop {
+            // Determine if we're streaming and should use tick-based rendering
+            let is_streaming = self.is_streaming;
+
             tokio::select! {
                 terminal_event = term_rx.recv() => {
                     match terminal_event {
@@ -671,12 +722,31 @@ impl App {
                         Some(other) => self.handle_app_event(other),
                         None => self.should_quit = true,
                     }
+                    dirty = true;
                 }
                 event = app_rx.recv() => {
                     match event {
-                        Some(ev) => self.handle_app_event(ev),
+                        Some(ev) => {
+                            let is_delta = matches!(&ev,
+                                AppEvent::StreamDelta(_) |
+                                AppEvent::ThinkingDelta(_) |
+                                AppEvent::ToolInputDelta { .. }
+                            );
+                            self.handle_app_event(ev);
+                            if is_delta && is_streaming {
+                                // During streaming, delta events only set dirty flag;
+                                // actual redraw happens on the next tick
+                                dirty = true;
+                                continue;
+                            }
+                            dirty = true;
+                        }
                         None => self.should_quit = true,
                     }
+                }
+                _ = render_tick.tick(), if is_streaming && dirty => {
+                    // Tick fires during streaming when dirty — redraw
+                    // (handled below in the common draw path)
                 }
             }
 
@@ -689,7 +759,10 @@ impl App {
                 self.clear_requested = false;
             }
 
-            terminal.draw(|f| ui::draw(f, self))?;
+            if dirty {
+                terminal.draw(|f| ui::draw(f, self))?;
+                dirty = false;
+            }
         }
 
         Ok(())
@@ -798,11 +871,20 @@ impl App {
                     self.reset_input_navigation();
                 }
             }
-            KeyCode::Tab | KeyCode::BackTab if !self.is_streaming => {
-                self.toggle_selected_thinking();
+            KeyCode::Tab | KeyCode::BackTab => {
+                if self.is_streaming && self.is_thinking {
+                    // Toggle thinking fold/unfold during streaming
+                    self.thinking_folded = !self.thinking_folded;
+                } else if !self.is_streaming {
+                    self.toggle_selected_thinking();
+                }
             }
-            KeyCode::Char('\t') if !self.is_streaming => {
-                self.toggle_selected_thinking();
+            KeyCode::Char('\t') => {
+                if self.is_streaming && self.is_thinking {
+                    self.thinking_folded = !self.thinking_folded;
+                } else if !self.is_streaming {
+                    self.toggle_selected_thinking();
+                }
             }
             _ => {}
         }
@@ -1025,16 +1107,20 @@ impl App {
             AppEvent::ThinkingStart => {
                 self.is_thinking = true;
                 self.streaming_thinking.clear();
+                self.streaming_thinking_md.clear();
+                self.thinking_folded = false;
                 self.sync_chat_viewport();
             }
             AppEvent::ThinkingDelta(text) => {
                 self.is_thinking = true;
                 self.streaming_thinking.push_str(&text);
+                self.streaming_thinking_md.push_delta(&text);
                 self.sync_chat_viewport();
             }
             AppEvent::ThinkingComplete(text) => {
                 self.is_thinking = false;
                 let buffered = std::mem::take(&mut self.streaming_thinking);
+                self.streaming_thinking_md.clear();
                 let final_text = if text.is_empty() {
                     buffered
                 } else {
@@ -1054,12 +1140,16 @@ impl App {
                 if self.is_streaming && !self.suppress_stream {
                     self.is_thinking = false;
                     self.streaming_text.push_str(&text);
+                    self.streaming_text_raw.push_str(&text);
+                    self.streaming_md.push_delta(&text);
                     self.sync_chat_viewport();
                 }
             }
             AppEvent::StreamEnd => {
+                // Finalize thinking if still buffered
                 if !self.streaming_thinking.is_empty() {
                     let final_text = std::mem::take(&mut self.streaming_thinking);
+                    self.streaming_thinking_md.clear();
                     let summary = format!("Thought for ~{} chars", final_text.chars().count());
                     self.messages.push(ChatMessage::Thinking {
                         summary,
@@ -1067,27 +1157,63 @@ impl App {
                     });
                     self.update_selected_thinking();
                 }
+                // Finalize streaming text
                 if self.is_streaming && !self.suppress_stream && !self.streaming_text.is_empty() {
                     let text = std::mem::take(&mut self.streaming_text);
                     self.messages.push(ChatMessage::Assistant(text));
                 } else {
                     self.streaming_text.clear();
                 }
+                // Clear all streaming state
+                self.streaming_text_raw.clear();
+                self.streaming_md.clear();
+                self.streaming_tool = None;
                 self.is_streaming = false;
                 self.is_thinking = false;
                 self.suppress_stream = false;
                 self.sync_chat_viewport();
             }
             AppEvent::StreamCancelled => {
+                // Finalize thinking as cancelled if any
+                if !self.streaming_thinking.is_empty() {
+                    let thinking_text = std::mem::take(&mut self.streaming_thinking);
+                    self.streaming_thinking_md.clear();
+                    let summary = format!("Thought for ~{} chars (cancelled)", thinking_text.chars().count());
+                    self.messages.push(ChatMessage::Thinking {
+                        summary,
+                        content: thinking_text,
+                    });
+                    self.update_selected_thinking();
+                }
                 self.suppress_stream = true;
                 self.is_streaming = false;
                 self.is_thinking = false;
                 self.streaming_text.clear();
+                self.streaming_text_raw.clear();
+                self.streaming_md.clear();
                 self.streaming_thinking.clear();
+                self.streaming_thinking_md.clear();
+                self.streaming_tool = None;
                 self.sync_chat_viewport();
+            }
+            AppEvent::ToolInputStreamStart { name } => {
+                self.is_thinking = false;
+                self.streaming_tool = Some(StreamingToolState {
+                    name,
+                    accumulated_json: String::new(),
+                });
+                self.sync_chat_viewport();
+            }
+            AppEvent::ToolInputDelta { name: _, json_fragment } => {
+                if let Some(ref mut tool_state) = self.streaming_tool {
+                    tool_state.accumulated_json.push_str(&json_fragment);
+                    self.sync_chat_viewport();
+                }
             }
             AppEvent::ToolUseStart { name, input } => {
                 self.is_thinking = false;
+                // Clear streaming tool state since the tool is now fully constructed
+                self.streaming_tool = None;
                 let summary = summarize_tool_input(&name, &input);
                 self.messages.push(ChatMessage::ToolUse {
                     name,
@@ -1682,5 +1808,79 @@ mod tests {
                 if text.contains("entries: 2") && text.contains("Visible memories:")
                     && text.contains("[feedback]") && text.contains("[project]")
         ));
+    #[test]
+    fn test_cancel_during_text_streaming_clears_state() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        app.is_streaming = true;
+        app.handle_app_event(AppEvent::StreamDelta("Hello ".into()));
+        app.handle_app_event(AppEvent::StreamDelta("world".into()));
+        assert!(!app.streaming_text.is_empty());
+        assert!(!app.streaming_md.is_empty());
+
+        // Cancel
+        app.cancel_stream_local();
+        assert!(app.streaming_text.is_empty());
+        assert!(app.streaming_md.is_empty());
+        assert!(app.streaming_text_raw.is_empty());
+        assert!(!app.is_streaming);
+        assert!(app.streaming_tool.is_none());
+    }
+
+    #[test]
+    fn test_cancel_during_thinking_streaming_preserves_thinking() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        app.is_streaming = true;
+        app.handle_app_event(AppEvent::ThinkingStart);
+        app.handle_app_event(AppEvent::ThinkingDelta("Let me think about this...".into()));
+        assert!(!app.streaming_thinking.is_empty());
+        assert!(!app.streaming_thinking_md.is_empty());
+
+        // Cancel
+        app.cancel_stream_local();
+        // Thinking should be finalized as a message with (cancelled)
+        let thinking_msg = app.messages.iter().find(|m| matches!(m, ChatMessage::Thinking { .. }));
+        assert!(thinking_msg.is_some(), "Thinking should be preserved as a message");
+        if let Some(ChatMessage::Thinking { summary, content }) = thinking_msg {
+            assert!(summary.contains("cancelled"), "Summary should note cancellation");
+            assert_eq!(content, "Let me think about this...");
+        }
+        assert!(app.streaming_thinking.is_empty());
+        assert!(app.streaming_thinking_md.is_empty());
+        assert!(!app.is_streaming);
+    }
+
+    #[test]
+    fn test_cancel_during_tool_input_streaming_clears_tool_state() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        app.is_streaming = true;
+        app.handle_app_event(AppEvent::ToolInputStreamStart { name: "Bash".into() });
+        app.handle_app_event(AppEvent::ToolInputDelta {
+            name: "Bash".into(),
+            json_fragment: r#"{"command": "ls"#.into(),
+        });
+        assert!(app.streaming_tool.is_some());
+
+        // Cancel
+        app.cancel_stream_local();
+        assert!(app.streaming_tool.is_none());
+        assert!(!app.is_streaming);
+    }
+
+    #[test]
+    fn test_stream_cancelled_event_preserves_thinking() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        app.is_streaming = true;
+        app.handle_app_event(AppEvent::ThinkingDelta("reasoning text".into()));
+        app.handle_app_event(AppEvent::StreamCancelled);
+
+        // Thinking should be finalized as a message
+        let thinking_msg = app.messages.iter().find(|m| matches!(m, ChatMessage::Thinking { .. }));
+        assert!(thinking_msg.is_some());
+        if let Some(ChatMessage::Thinking { summary, .. }) = thinking_msg {
+            assert!(summary.contains("cancelled"));
+        }
+        assert!(app.streaming_thinking.is_empty());
+        assert!(app.streaming_thinking_md.is_empty());
+        assert!(app.streaming_tool.is_none());
     }
 }

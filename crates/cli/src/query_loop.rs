@@ -258,6 +258,12 @@ where
                 StreamEvent::ContentBlockStart { index, content_block } => {
                     ensure_index(&mut content, index);
                     ensure_index(&mut accumulators, index);
+                    // Forward tool_use block starts to the bridge for streaming display
+                    if let Some(bridge) = &self.bridge {
+                        if let ContentBlock::ToolUse { name, .. } = &content_block {
+                            bridge.send_tool_input_stream_start(name).await;
+                        }
+                    }
                     accumulators[index] = Some(
                         ContentBlockAccumulator::from_block(&content_block)
                             .map_err(QueryLoopError::Api)?,
@@ -269,7 +275,7 @@ where
                     let accumulator = accumulators[index]
                         .as_mut()
                         .ok_or_else(|| QueryLoopError::Tool("missing content block accumulator".to_string()))?;
-                    // Send streaming text deltas to the TUI bridge
+                    // Send streaming deltas to the TUI bridge
                     if let Some(bridge) = &self.bridge {
                         match &delta {
                             rust_claude_api::ContentBlockDelta::TextDelta { text } => {
@@ -278,6 +284,20 @@ where
                             rust_claude_api::ContentBlockDelta::ThinkingDelta { thinking } => {
                                 bridge.send_thinking_start().await;
                                 bridge.send_thinking_delta(thinking).await;
+                            }
+                            rust_claude_api::ContentBlockDelta::InputJsonDelta { partial_json } => {
+                                // Resolve tool name from the content block at this index
+                                let tool_name = content[index]
+                                    .as_ref()
+                                    .and_then(|block| {
+                                        if let ContentBlock::ToolUse { name, .. } = block {
+                                            Some(name.as_str())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or("unknown");
+                                bridge.send_tool_input_delta(tool_name, partial_json).await;
                             }
                             _ => {}
                         }

@@ -22,7 +22,7 @@ use rust_claude_tools::{
     GrepTool, LspTool, NotebookEditTool, TaskTool, ToolRegistry, WebFetchTool, WebSearchTool,
     register_mcp_tools,
 };
-use rust_claude_tui::{App, TerminalGuard, TuiBridge, UserCommand};
+use rust_claude_tui::{App, AppEvent, TerminalGuard, TuiBridge, UserCommand};
 use tokio::sync::{mpsc, Mutex};
 
 use rust_claude_cli::compaction::CompactionService;
@@ -537,6 +537,10 @@ async fn main() -> Result<()> {
         register_mcp_tools(&mut tools, &mcp_manager);
         tools.apply_tool_filters(&resolved.allowed_tools, &resolved.disallowed_tools);
         let agent_context = build_agent_context(Arc::new(client.clone()));
+
+        let output_json = resolved.output_json;
+        let stream_enabled = resolved.config.stream;
+
         let mut query_loop = QueryLoop::new(client, tools)
             .with_compaction_config(CompactionConfig::default())
             .with_agent_context(agent_context);
@@ -546,15 +550,81 @@ async fn main() -> Result<()> {
         if let Some(runner) = &hook_runner {
             query_loop = query_loop.with_hook_runner(runner.clone());
         }
-        let final_message = query_loop.run(app_state, prompt).await?;
 
-        if resolved.output_json {
-            let json = serde_json::to_string_pretty(&final_message)?;
-            println!("{json}");
+        // For streaming print mode, attach a bridge that streams to stdout
+        if stream_enabled && !output_json {
+            let (print_tx, mut print_rx) = tokio::sync::mpsc::channel::<AppEvent>(256);
+            let bridge = rust_claude_tui::TuiBridge::new(print_tx);
+            query_loop = query_loop.with_bridge(bridge);
+
+            // Spawn a task to consume bridge events and stream to stdout/stderr
+            let print_handle = tokio::spawn(async move {
+                use std::io::Write;
+                let stdout = std::io::stdout();
+                let stderr = std::io::stderr();
+                while let Some(event) = print_rx.recv().await {
+                    match event {
+                        AppEvent::StreamDelta(text) => {
+                            let mut out = stdout.lock();
+                            let _ = out.write_all(text.as_bytes());
+                            let _ = out.flush();
+                        }
+                        AppEvent::StreamEnd => {
+                            let mut out = stdout.lock();
+                            let _ = out.write_all(b"\n");
+                            let _ = out.flush();
+                        }
+                        AppEvent::ToolUseStart { name, input } => {
+                            let display_name = rust_claude_tui::ChatMessage::user_facing_tool_name(&name);
+                            let summary = match name.as_str() {
+                                "Bash" => input.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                "FileRead" => input.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                "FileEdit" | "FileWrite" => input.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                _ => String::new(),
+                            };
+                            let mut err = stderr.lock();
+                            if summary.is_empty() {
+                                let _ = writeln!(err, "[{display_name}]");
+                            } else {
+                                let _ = writeln!(err, "[{display_name}] {summary}");
+                            }
+                        }
+                        AppEvent::ToolResult { name, output, is_error } => {
+                            let display_name = rust_claude_tui::ChatMessage::user_facing_tool_name(&name);
+                            let status = if is_error { "error" } else { "ok" };
+                            let truncated = if output.len() > 100 {
+                                format!("{}...", &output[..100])
+                            } else {
+                                output
+                            };
+                            let mut err = stderr.lock();
+                            let _ = writeln!(err, "[{display_name} {status}] {truncated}");
+                        }
+                        AppEvent::Error(msg) => {
+                            let mut err = stderr.lock();
+                            let _ = writeln!(err, "Error: {msg}");
+                        }
+                        // Suppress thinking, tool input streaming, and other events
+                        _ => {}
+                    }
+                }
+            });
+
+            let final_message = query_loop.run(app_state, prompt).await?;
+            // Drop happens when query_loop is done — print_handle will exit once channel closes
+            drop(final_message);
+            let _ = print_handle.await;
         } else {
-            for block in final_message.content {
-                if let ContentBlock::Text { text } = block {
-                    println!("{text}");
+            // Non-streaming or JSON output mode: collect full response then dump
+            let final_message = query_loop.run(app_state, prompt).await?;
+            if output_json {
+                let json = serde_json::to_string_pretty(&final_message)?;
+                println!("{json}");
+            } else {
+                for block in final_message.content {
+                    if let ContentBlock::Text { text } = block {
+                        println!("{text}");
+                    }
                 }
             }
         }

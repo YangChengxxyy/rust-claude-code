@@ -49,19 +49,92 @@ pub fn build_chat_lines(app: &App) -> Vec<Line<'static>> {
         render_message(msg, idx, app, &mut lines);
     }
 
-    if app.is_streaming && !app.streaming_text.is_empty() {
-        for (i, line) in app.streaming_text.lines().enumerate() {
-            if i == 0 {
-                let line_text = line.to_owned();
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{} ", theme::BLACK_CIRCLE), theme::bullet_style()),
-                    Span::styled(line_text, theme::assistant_text_style()),
-                ]));
-            } else {
-                let line_text = line.to_owned();
+    // Render streaming thinking content in real time
+    if app.is_streaming && !app.streaming_thinking_md.is_empty() {
+        // Thinking header
+        let header_text = if app.thinking_folded {
+            "[Thinking] ...".to_string()
+        } else {
+            "[Thinking]".to_string()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", theme::BLACK_CIRCLE),
+                theme::spinner_style(),
+            ),
+            Span::styled(
+                header_text,
+                Style::default()
+                    .fg(theme::INACTIVE)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]));
+
+        if !app.thinking_folded {
+            // Render cached thinking lines in dim/italic style
+            let thinking_style = Style::default()
+                .fg(theme::INACTIVE)
+                .add_modifier(Modifier::ITALIC);
+            for cached_line in &app.streaming_thinking_md.lines_cache {
+                // Re-style all spans to dim/italic for thinking
+                let styled_spans: Vec<Span> = cached_line
+                    .spans
+                    .iter()
+                    .map(|span| {
+                        Span::styled(span.content.to_string(), thinking_style)
+                    })
+                    .collect();
+                lines.push(Line::from(styled_spans));
+            }
+            if let Some(pending) = app.streaming_thinking_md.render_pending_line() {
+                let styled_spans: Vec<Span> = pending
+                    .spans
+                    .iter()
+                    .map(|span| {
+                        Span::styled(span.content.to_string(), thinking_style)
+                    })
+                    .collect();
+                lines.push(Line::from(styled_spans));
+            }
+        }
+    }
+
+    // Render streaming text with incremental markdown
+    if app.is_streaming && !app.streaming_md.is_empty() {
+        // Render all cached (fully parsed) lines
+        lines.extend(app.streaming_md.lines_cache.iter().cloned());
+        // Render the pending (incomplete) line
+        if let Some(pending) = app.streaming_md.render_pending_line() {
+            lines.push(pending);
+        }
+    }
+
+    // Render streaming tool call construction
+    if let Some(ref tool_state) = app.streaming_tool {
+        let display_name = ChatMessage::user_facing_tool_name(&tool_state.name);
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", theme::BLACK_CIRCLE),
+                theme::bullet_style(),
+            ),
+            Span::styled(
+                format!("{display_name} "),
+                theme::tool_name_style(),
+            ),
+            Span::styled("constructing...", theme::tool_desc_style()),
+        ]));
+        if !tool_state.accumulated_json.is_empty() {
+            // Show the partial JSON in a code-block style
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("┌─ input", Style::default().fg(theme::BASH_BORDER)),
+            ]));
+            for json_line in tool_state.accumulated_json.lines() {
                 lines.push(Line::from(vec![
                     Span::raw("  "),
-                    Span::styled(line_text, theme::assistant_text_style()),
+                    Span::styled("│ ", Style::default().fg(theme::BASH_BORDER)),
+                    Span::styled(json_line.to_string(), Style::default().fg(theme::TEXT)),
                 ]));
             }
         }

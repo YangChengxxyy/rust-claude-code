@@ -48,7 +48,16 @@ pub enum AppEvent {
     ThinkingDelta(String),
     /// A completed thinking block (used by non-streaming flow).
     ThinkingComplete(String),
-    /// The model began a tool call.
+    /// The model began constructing a tool call (streaming).
+    ToolInputStreamStart {
+        name: String,
+    },
+    /// A chunk of tool input JSON during streaming construction.
+    ToolInputDelta {
+        name: String,
+        json_fragment: String,
+    },
+    /// The model began a tool call (complete input available).
     ToolUseStart {
         name: String,
         input: serde_json::Value,

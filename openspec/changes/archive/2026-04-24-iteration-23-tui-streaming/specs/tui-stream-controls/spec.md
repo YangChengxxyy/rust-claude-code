@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Cancel active streaming output
 The TUI SHALL allow the user to cancel the currently active streaming response without exiting the application. Cancellation SHALL apply to all streaming phases including text streaming, thinking streaming, and tool input streaming.
@@ -22,17 +22,3 @@ The TUI SHALL allow the user to cancel the currently active streaming response w
 #### Scenario: Terminal state clean after cancel
 - **WHEN** a stream is cancelled during any streaming phase
 - **THEN** the terminal SHALL be in a clean state with no orphaned streaming buffers, the input area SHALL be active, and no visual artifacts SHALL remain from the cancelled stream
-
-### Requirement: Ctrl+C exits only when idle
-The TUI SHALL exit on `Ctrl+C` only when no streaming response is active and the input/editor state does not need cancellation semantics.
-
-#### Scenario: Ctrl+C exits while idle
-- **WHEN** no response is streaming and the input area is idle
-- **THEN** pressing `Ctrl+C` SHALL terminate the TUI session
-
-### Requirement: Clear screen shortcut
-The TUI SHALL support `Ctrl+L` to clear the visible chat area while preserving the current session state and input buffer.
-
-#### Scenario: Clear visible chat viewport
-- **WHEN** the user presses `Ctrl+L`
-- **THEN** the TUI SHALL clear or redraw the visible terminal chat area without deleting message history or the current input draft

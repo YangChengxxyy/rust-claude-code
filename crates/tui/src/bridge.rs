@@ -46,6 +46,25 @@ impl TuiBridge {
         let _ = self.event_tx.send(AppEvent::StreamCancelled).await;
     }
 
+    pub async fn send_tool_input_stream_start(&self, name: &str) {
+        let _ = self
+            .event_tx
+            .send(AppEvent::ToolInputStreamStart {
+                name: name.to_string(),
+            })
+            .await;
+    }
+
+    pub async fn send_tool_input_delta(&self, name: &str, fragment: &str) {
+        let _ = self
+            .event_tx
+            .send(AppEvent::ToolInputDelta {
+                name: name.to_string(),
+                json_fragment: fragment.to_string(),
+            })
+            .await;
+    }
+
     pub async fn send_tool_use(&self, name: &str, input: &serde_json::Value) {
         let _ = self
             .event_tx

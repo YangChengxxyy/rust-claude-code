@@ -407,19 +407,36 @@ async fn main() -> Result<()> {
     state.always_allow_rules = resolved.always_allow.clone();
     state.always_deny_rules = resolved.always_deny.clone();
 
+    // Helper: restore full session state from a loaded SessionFile.
+    let restore_session = |state: &mut rust_claude_core::state::AppState, prev: &session::SessionFile| {
+        state.messages = prev.messages.clone();
+        if !prev.model_setting.is_empty() {
+            state.session.model_setting = prev.model_setting.clone();
+        }
+        if let Some(usage) = &prev.total_usage {
+            state.total_usage = usage.clone();
+        }
+        state.permission_mode = prev.permission_mode;
+        if !prev.always_allow_rules.is_empty() {
+            state.always_allow_rules = prev.always_allow_rules.clone();
+        }
+        if !prev.always_deny_rules.is_empty() {
+            state.always_deny_rules = prev.always_deny_rules.clone();
+        }
+        state.session.model = get_runtime_main_loop_model(
+            &state.session.model_setting,
+            state.permission_mode,
+            false,
+        );
+    };
+
     if let Some(session_id) = &cli.resume_session {
         match session::load_session_by_id(session_id) {
             Ok(Some(prev)) => {
-                state.messages = prev.messages;
-                if !prev.model_setting.is_empty() {
-                    state.session.model_setting = prev.model_setting;
-                }
-                state.session.model = get_runtime_main_loop_model(
-                    &state.session.model_setting,
-                    state.permission_mode,
-                    false,
-                );
-                println!("Resumed session {} ({} messages)", prev.id, state.messages.len());
+                let msg_count = prev.messages.len();
+                let id = prev.id.clone();
+                restore_session(&mut state, &prev);
+                println!("Resumed session {} ({} messages)", id, msg_count);
             }
             Ok(None) => return Err(anyhow!("session '{}' not found", session_id)),
             Err(e) => return Err(anyhow!("failed to load session '{}': {e}", session_id)),
@@ -427,16 +444,10 @@ async fn main() -> Result<()> {
     } else if cli.continue_session {
         match session::load_latest_session() {
             Ok(Some(prev)) => {
-                state.messages = prev.messages;
-                if !prev.model_setting.is_empty() {
-                    state.session.model_setting = prev.model_setting;
-                }
-                state.session.model = get_runtime_main_loop_model(
-                    &state.session.model_setting,
-                    state.permission_mode,
-                    false,
-                );
-                println!("Continuing session {} ({} messages)", prev.id, state.messages.len());
+                let msg_count = prev.messages.len();
+                let id = prev.id.clone();
+                restore_session(&mut state, &prev);
+                println!("Continuing session {} ({} messages)", id, msg_count);
             }
             Ok(None) => {
                 println!("No previous session found. Starting fresh.");
@@ -901,6 +912,10 @@ async fn run_tui(
                         &state_snapshot.cwd,
                     );
                     session_file.messages = state_snapshot.messages.clone();
+                    session_file.total_usage = Some(state_snapshot.total_usage.clone());
+                    session_file.permission_mode = state_snapshot.permission_mode;
+                    session_file.always_allow_rules = state_snapshot.always_allow_rules.clone();
+                    session_file.always_deny_rules = state_snapshot.always_deny_rules.clone();
                     drop(state_snapshot);
                     if let Err(e) = session_file.save() {
                         worker_bridge
@@ -1116,6 +1131,11 @@ async fn run_tui(
                     worker_bridge.send_assistant_message(&msg).await;
                 }
                 UserCommand::Prompt(prompt) => {
+                    // Abort any still-running query to prevent two loops
+                    // racing on the same AppState.
+                    if let Some(handle) = active_query_task.take() {
+                        handle.abort();
+                    }
                     let client = match build_client(&config.api_key, base_url.clone(), bearer_auth) {
                         Ok(client) => client,
                         Err(error) => {
@@ -1230,6 +1250,10 @@ async fn run_tui(
                             &state_snapshot.cwd,
                         );
                         session_file.messages = state_snapshot.messages.clone();
+                        session_file.total_usage = Some(state_snapshot.total_usage.clone());
+                        session_file.permission_mode = state_snapshot.permission_mode;
+                        session_file.always_allow_rules = state_snapshot.always_allow_rules.clone();
+                        session_file.always_deny_rules = state_snapshot.always_deny_rules.clone();
                         drop(state_snapshot);
                         if let Err(e) = session_file.save() {
                             worker_bridge_clone

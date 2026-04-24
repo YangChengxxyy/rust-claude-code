@@ -622,9 +622,11 @@ fn draw_input_area(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let input_text = build_input_text(app, input_style);
+    // Do NOT enable .wrap() — the cursor position calculation maps logical
+    // lines 1-to-1 to visual lines.  Wrapping would cause cursor misplacement
+    // because the Y offset is derived from the logical line number.
     let paragraph = Paragraph::new(input_text)
-        .block(block)
-        .wrap(Wrap { trim: false });
+        .block(block);
 
     f.render_widget(paragraph, area);
 

@@ -50,9 +50,7 @@ fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    String::from_utf8(output.stdout)
-        .ok()
-        .map(|text| text.trim().to_string())
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 #[cfg(test)]

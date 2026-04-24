@@ -173,11 +173,15 @@ impl Config {
         config_bearer_auth: Option<bool>,
     ) -> Result<(String, bool), ConfigError> {
         if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY") {
-            return Ok((api_key, config_bearer_auth.unwrap_or(false)));
+            if !api_key.is_empty() {
+                return Ok((api_key, config_bearer_auth.unwrap_or(false)));
+            }
         }
         if let Ok(auth_token) = std::env::var("ANTHROPIC_AUTH_TOKEN") {
-            // ANTHROPIC_AUTH_TOKEN always implies Bearer auth
-            return Ok((auth_token, true));
+            if !auth_token.is_empty() {
+                // ANTHROPIC_AUTH_TOKEN always implies Bearer auth
+                return Ok((auth_token, true));
+            }
         }
         Err(ConfigError::MissingApiKey)
     }

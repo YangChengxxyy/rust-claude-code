@@ -217,7 +217,7 @@ impl ContentBlockAccumulator {
 }
 
 pub fn parse_sse_events(input: &str) -> Result<Vec<SseEvent>, ApiError> {
-    let normalized = input.replace("\r\n", "\n");
+    let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
     let mut events = Vec::new();
 
     for chunk in normalized.split("\n\n") {

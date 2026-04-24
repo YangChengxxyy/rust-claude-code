@@ -40,16 +40,16 @@ pub struct CompactionResult {
 /// Estimate the token count of a single content block using chars / 4 heuristic.
 fn estimate_content_block_tokens(block: &ContentBlock) -> u32 {
     let char_count = match block {
-        ContentBlock::Text { text } => text.len(),
+        ContentBlock::Text { text } => text.chars().count(),
         ContentBlock::ToolUse { id, name, input } => {
-            id.len() + name.len() + input.to_string().len()
+            id.len() + name.len() + input.to_string().chars().count()
         }
         ContentBlock::ToolResult {
             tool_use_id,
             content,
             ..
-        } => tool_use_id.len() + content.len(),
-        ContentBlock::Thinking { thinking, .. } => thinking.len(),
+        } => tool_use_id.len() + content.chars().count(),
+        ContentBlock::Thinking { thinking, .. } => thinking.chars().count(),
         ContentBlock::Image { source } => match source {
             crate::message::ImageSource::Base64 { media_type, data } => media_type.len() + data.len(),
             crate::message::ImageSource::Url { url } => url.len(),

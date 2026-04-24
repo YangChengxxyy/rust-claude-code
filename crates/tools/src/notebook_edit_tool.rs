@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use rust_claude_core::tool_types::{ToolInfo, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::fs;
 use std::path::PathBuf;
 
 use crate::tool::{Tool, ToolContext, ToolError};
@@ -51,7 +50,8 @@ impl Tool for NotebookEditTool {
             .map_err(|e| ToolError::InvalidInput(format!("invalid notebook edit input: {e}")))?;
 
         let path = PathBuf::from(&input.file_path);
-        let raw = fs::read_to_string(&path)
+        let raw = tokio::fs::read_to_string(&path)
+            .await
             .map_err(|e| ToolError::Execution(format!("failed to read notebook: {e}")))?;
         let mut notebook: Value = serde_json::from_str(&raw)
             .map_err(|e| ToolError::Execution(format!("file is not a valid notebook JSON document: {e}")))?;
@@ -115,7 +115,8 @@ impl Tool for NotebookEditTool {
 
         let formatted = serde_json::to_string_pretty(&notebook)
             .map_err(|e| ToolError::Execution(format!("failed to serialize notebook: {e}")))?;
-        fs::write(&path, formatted)
+        tokio::fs::write(&path, formatted)
+            .await
             .map_err(|e| ToolError::Execution(format!("failed to write notebook: {e}")))?;
 
         Ok(ToolResult::success(
@@ -137,8 +138,8 @@ mod tests {
     fn make_temp_dir(name: &str) -> std::path::PathBuf {
         let unique = format!("rust-claude-notebook-test-{}-{}", name, std::process::id());
         let path = std::env::temp_dir().join(unique);
-        let _ = fs::remove_dir_all(&path);
-        fs::create_dir_all(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
         path
     }
 
@@ -157,7 +158,7 @@ mod tests {
             "nbformat": 4,
             "nbformat_minor": 5
         });
-        fs::write(path, serde_json::to_string_pretty(&notebook).unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_string_pretty(&notebook).unwrap()).unwrap();
     }
 
     #[tokio::test]
@@ -185,9 +186,9 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        let saved: Value = serde_json::from_str(&fs::read_to_string(dir.join("test.ipynb")).unwrap()).unwrap();
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("test.ipynb")).unwrap()).unwrap();
         assert_eq!(saved["cells"][0]["cell_type"], "markdown");
-        let _ = fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -213,6 +214,6 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("out of range"));
-        let _ = fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

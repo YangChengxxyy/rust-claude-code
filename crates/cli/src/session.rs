@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use rust_claude_core::message::Message;
+use rust_claude_core::message::{Message, Usage};
+use rust_claude_core::permission::{PermissionMode, PermissionRule};
 
 /// Metadata and message history for a single session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +29,18 @@ pub struct SessionFile {
     pub updated_at: String,
     /// Conversation messages.
     pub messages: Vec<Message>,
+    /// Accumulated token usage across the session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_usage: Option<Usage>,
+    /// Permission mode active during the session.
+    #[serde(default)]
+    pub permission_mode: PermissionMode,
+    /// Always-allow rules accumulated during the session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub always_allow_rules: Vec<PermissionRule>,
+    /// Always-deny rules accumulated during the session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub always_deny_rules: Vec<PermissionRule>,
 }
 
 impl SessionFile {
@@ -43,6 +56,10 @@ impl SessionFile {
             created_at: now.clone(),
             updated_at: now,
             messages: Vec::new(),
+            total_usage: None,
+            permission_mode: PermissionMode::Default,
+            always_allow_rules: Vec::new(),
+            always_deny_rules: Vec::new(),
         }
     }
 

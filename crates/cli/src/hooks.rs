@@ -218,6 +218,7 @@ impl HookRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
         {
             Ok(child) => child,
@@ -233,7 +234,10 @@ impl HookRunner {
             drop(stdin);
         }
 
-        // Wait with timeout
+        // Wait with timeout.
+        // `wait_with_output` consumes `child`. On timeout the future is dropped,
+        // and `kill_on_drop(true)` (set on the Command above) ensures the child
+        // process is killed instead of becoming a zombie.
         let timeout_dur = Duration::from_secs(timeout_secs);
         match tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
             Ok(Ok(output)) => {
@@ -246,7 +250,7 @@ impl HookRunner {
                 None
             }
             Err(_) => {
-                // Timeout — process is dropped which sends SIGKILL
+                // Timeout — child is dropped here; kill_on_drop ensures cleanup.
                 eprintln!(
                     "Warning: hook command '{}' timed out after {}s",
                     command, timeout_secs

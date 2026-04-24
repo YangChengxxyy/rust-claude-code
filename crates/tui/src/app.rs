@@ -388,6 +388,10 @@ pub struct App {
     pub history_index: Option<usize>,
     pub draft_before_history: Option<InputBuffer>,
     pub history_path: PathBuf,
+
+    // -- terminal dimensions (updated on every draw / resize) --
+    pub terminal_width: u16,
+    pub terminal_height: u16,
 }
 
 impl App {
@@ -428,6 +432,8 @@ impl App {
             history_index: None,
             draft_before_history: None,
             history_path,
+            terminal_width: 80,
+            terminal_height: 24,
         }
     }
 
@@ -445,7 +451,10 @@ impl App {
     }
 
     fn max_chat_scroll_offset(&self) -> u16 {
-        let viewport = ui::chat_viewport_area(self, Rect::new(0, 0, 80, 24));
+        let viewport = ui::chat_viewport_area(
+            self,
+            Rect::new(0, 0, self.terminal_width, self.terminal_height),
+        );
         ui::max_chat_scroll_offset(self, viewport.width, viewport.height)
     }
 
@@ -644,6 +653,12 @@ impl App {
             }
         });
 
+        // Capture initial terminal size.
+        {
+            let size = terminal.size()?;
+            self.terminal_width = size.width;
+            self.terminal_height = size.height;
+        }
         terminal.draw(|f| ui::draw(f, self))?;
 
         loop {
@@ -1179,7 +1194,11 @@ impl App {
                 )));
                 self.sync_chat_viewport();
             }
-            AppEvent::Resize(_, _) => self.clamp_chat_scroll(),
+            AppEvent::Resize(w, h) => {
+                self.terminal_width = w;
+                self.terminal_height = h;
+                self.clamp_chat_scroll();
+            }
             AppEvent::Key(_) | AppEvent::Paste(_) => {}
         }
     }

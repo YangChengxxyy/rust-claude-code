@@ -72,6 +72,15 @@ impl Tool for WebFetchTool {
         let input: WebFetchInput = serde_json::from_value(input)
             .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
 
+        // Validate URL scheme to prevent SSRF / local file access
+        let url_lower = input.url.trim().to_ascii_lowercase();
+        if !url_lower.starts_with("http://") && !url_lower.starts_with("https://") {
+            return Err(ToolError::InvalidInput(format!(
+                "only http:// and https:// URLs are allowed, got: {}",
+                input.url
+            )));
+        }
+
         let ttl = Duration::from_secs(DEFAULT_TTL_SECS);
         let page = {
             let cache = self.cache.lock().await;

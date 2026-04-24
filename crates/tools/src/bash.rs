@@ -53,10 +53,27 @@ impl BashTool {
             return (output.to_string(), false);
         }
 
-        let head_len = MAX_OUTPUT_LEN / 2;
-        let tail_len = MAX_OUTPUT_LEN - head_len;
-        let head = &output[..head_len];
-        let tail = &output[output.len() - tail_len..];
+        let head_budget = MAX_OUTPUT_LEN / 2;
+        let tail_budget = MAX_OUTPUT_LEN - head_budget;
+
+        // Find a char-boundary-safe split point for head (walk backwards)
+        let head_end = {
+            let mut end = head_budget.min(output.len());
+            while end > 0 && !output.is_char_boundary(end) {
+                end -= 1;
+            }
+            end
+        };
+        // Find a char-boundary-safe split point for tail (walk forwards)
+        let tail_start = {
+            let mut start = output.len().saturating_sub(tail_budget);
+            while start < output.len() && !output.is_char_boundary(start) {
+                start += 1;
+            }
+            start
+        };
+        let head = &output[..head_end];
+        let tail = &output[tail_start..];
 
         (
             format!("{head}\n... output truncated ...\n{tail}"),
@@ -84,7 +101,7 @@ impl Tool for BashTool {
     }
 
     fn is_concurrency_safe(&self) -> bool {
-        true
+        false
     }
 
     async fn execute(

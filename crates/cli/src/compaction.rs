@@ -200,6 +200,9 @@ impl<C: ModelClient> CompactionService<C> {
         {
             let mut state = app_state.lock().await;
             state.messages = new_messages;
+            // Reset stale usage tracking since the message indices have changed.
+            state.last_api_usage = None;
+            state.last_api_message_index = 0;
         }
 
         Ok(CompactionResult {

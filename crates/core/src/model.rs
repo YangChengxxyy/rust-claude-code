@@ -94,7 +94,7 @@ pub fn get_best_model() -> &'static str {
 pub fn parse_user_specified_model(model_input: &str) -> String {
     let trimmed = model_input.trim();
     if trimmed.is_empty() {
-        return trimmed.to_string();
+        return get_default_opus_model().to_string();
     }
 
     let lower = trimmed.to_ascii_lowercase();

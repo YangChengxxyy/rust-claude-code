@@ -106,7 +106,7 @@ mod tests {
 
         let tool = registry.get("Bash").unwrap();
         assert_eq!(tool.info.name, "Bash");
-        assert!(tool.is_concurrency_safe);
+        assert!(!tool.is_concurrency_safe);
         assert!(registry.get("Unknown").is_none());
     }
 

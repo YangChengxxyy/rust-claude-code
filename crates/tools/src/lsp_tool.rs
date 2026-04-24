@@ -35,13 +35,21 @@ impl LspTool {
 
     /// Build a `file://` URI from a path, ensuring it is absolute so the URI
     /// has the correct three-slash form (`file:///path/to/file`).
+    /// On Windows the backslashes are converted to forward slashes and a
+    /// leading `/` is prepended so the result is `file:///C:/...`.
     fn file_uri(path: &std::path::Path, cwd: &std::path::Path) -> String {
         let abs = if path.is_absolute() {
             path.to_path_buf()
         } else {
             cwd.join(path)
         };
-        format!("file://{}", abs.display())
+        let s = abs.display().to_string().replace('\\', "/");
+        if s.starts_with('/') {
+            format!("file://{s}")
+        } else {
+            // Windows: C:/Users/... → file:///C:/Users/...
+            format!("file:///{s}")
+        }
     }
 
     fn require_position(input: &LspToolInput) -> Result<(u32, u32), ToolError> {

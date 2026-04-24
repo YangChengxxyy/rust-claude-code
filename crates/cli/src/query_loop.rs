@@ -102,6 +102,14 @@ where
             runner.run_user_prompt_submit(&user_input_str, "").await;
         }
 
+        // Discover & scan the memory store once at the start rather than on
+        // every single agentic round.
+        let scanned_memory = {
+            let cwd = app_state.lock().await.cwd.clone();
+            memory::discover_memory_store(&cwd)
+                .and_then(|store| memory::scan_memory_store(&store).ok())
+        };
+
         {
             let mut state = app_state.lock().await;
             state.add_message(Message::user(user_input_str));
@@ -134,7 +142,7 @@ where
                 }
             }
 
-            let request = self.build_request(&app_state).await;
+            let request = self.build_request(&app_state, scanned_memory.as_ref()).await;
             let use_stream = {
                 let state = app_state.lock().await;
                 state.session.stream
@@ -313,7 +321,11 @@ where
         })
     }
 
-    async fn build_request(&self, app_state: &Arc<Mutex<AppState>>) -> CreateMessageRequest {
+    async fn build_request(
+        &self,
+        app_state: &Arc<Mutex<AppState>>,
+        scanned_memory: Option<&memory::ScannedMemoryStore>,
+    ) -> CreateMessageRequest {
         let state = app_state.lock().await;
         let exceeds_200k_tokens = state
             .most_recent_assistant_usage()
@@ -323,7 +335,6 @@ where
             state.permission_mode,
             exceeds_200k_tokens,
         );
-        let cwd = state.cwd.clone();
         let user_text = state
             .messages
             .iter()
@@ -339,10 +350,7 @@ where
                 }
             })
             .unwrap_or_default();
-        let scanned_memory = memory::discover_memory_store(&cwd)
-            .and_then(|store| memory::scan_memory_store(&store).ok());
         let relevant_memories = scanned_memory
-            .as_ref()
             .map(|scanned| memory::select_relevant_memories(scanned, &user_text, 5))
             .unwrap_or_default();
 
@@ -354,7 +362,13 @@ where
             .collect();
         let mut serialized_messages: Vec<serde_json::Value> = messages
             .iter()
-            .map(|m| serde_json::to_value(m).unwrap_or_default())
+            .filter_map(|m| {
+                let val = serde_json::to_value(m);
+                if let Err(ref e) = val {
+                    eprintln!("Warning: failed to serialize message, skipping: {e}");
+                }
+                val.ok()
+            })
             .collect();
         inject_cache_control_on_messages(&mut serialized_messages);
 
@@ -412,7 +426,13 @@ where
         // Replace messages with cache_control-injected versions
         request.messages = serialized_messages
             .into_iter()
-            .filter_map(|v| serde_json::from_value(v).ok())
+            .filter_map(|v| {
+                let result: Result<ApiMessage, _> = serde_json::from_value(v);
+                if let Err(ref e) = result {
+                    eprintln!("Warning: failed to deserialize cache-injected message, skipping: {e}");
+                }
+                result.ok()
+            })
             .collect();
 
         request
@@ -460,12 +480,10 @@ where
                             let mut state = app_state.lock().await;
                             let rule = rust_claude_core::permission::PermissionRule {
                                 tool_name: tool_name.to_string(),
-                                pattern: command.map(|c| {
-                                    // For bash commands, create a prefix pattern
-                                    let first_word =
-                                        c.split_whitespace().next().unwrap_or(c);
-                                    format!("{first_word} *")
-                                }),
+                                // Use the exact command as the pattern so we
+                                // don't accidentally allow broader commands
+                                // than the user intended.
+                                pattern: command.map(|c| c.to_string()),
                                 rule_type: rust_claude_core::permission::RuleType::Allow,
                             };
                             state.always_allow_rules.push(rule);
@@ -478,11 +496,7 @@ where
                             let mut state = app_state.lock().await;
                             let rule = rust_claude_core::permission::PermissionRule {
                                 tool_name: tool_name.to_string(),
-                                pattern: command.map(|c| {
-                                    let first_word =
-                                        c.split_whitespace().next().unwrap_or(c);
-                                    format!("{first_word} *")
-                                }),
+                                pattern: command.map(|c| c.to_string()),
                                 rule_type: rust_claude_core::permission::RuleType::Deny,
                             };
                             state.always_deny_rules.push(rule);
@@ -1408,7 +1422,7 @@ mod tests {
         state.add_message(Message::user("hello"));
         let app_state = Arc::new(Mutex::new(state));
 
-        let request = loop_runner.build_request(&app_state).await;
+        let request = loop_runner.build_request(&app_state, None).await;
         assert_eq!(request.model, "claude-opus-4-6");
     }
 
@@ -1436,7 +1450,7 @@ mod tests {
         state.add_message(Message::user("hello"));
         let app_state = Arc::new(Mutex::new(state));
 
-        let request = loop_runner.build_request(&app_state).await;
+        let request = loop_runner.build_request(&app_state, None).await;
         assert_eq!(request.model, "claude-sonnet-4-6");
     }
 }

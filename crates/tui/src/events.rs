@@ -1,6 +1,6 @@
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, MouseEvent};
 use rust_claude_core::compaction::CompactionResult;
-use rust_claude_core::config::ConfigProvenance;
+use rust_claude_core::config::{ConfigProvenance, Theme};
 use rust_claude_core::state::TodoItem;
 
 /// Commands emitted by the TUI input layer toward the background worker.
@@ -10,6 +10,7 @@ pub enum UserCommand {
     Compact,
     SetMode(String),
     SetModel(String),
+    SetTheme(Theme),
     CancelStream,
     ShowConfig,
     ShowCost,
@@ -34,8 +35,12 @@ pub enum UserCommand {
 pub enum AppEvent {
     /// Keyboard input from the terminal.
     Key(KeyEvent),
+    /// Mouse input from the terminal.
+    Mouse(MouseEvent),
     /// Bracketed paste input from the terminal.
     Paste(String),
+    /// A new assistant streaming response has started.
+    StreamStart,
     /// A chunk of streaming text from the assistant.
     StreamDelta(String),
     /// The assistant finished streaming its response.
@@ -88,6 +93,7 @@ pub enum AppEvent {
         model_source: String,
         permission_source: String,
         base_url_source: String,
+        theme_source: String,
     },
     /// An error to display to the user.
     Error(String),
@@ -198,11 +204,12 @@ impl ChatMessage {
     }
 }
 
-pub fn format_provenance_summary(provenance: &ConfigProvenance) -> (String, String, String) {
+pub fn format_provenance_summary(provenance: &ConfigProvenance) -> (String, String, String, String) {
     (
         provenance.model.to_string(),
         format!("allow:{} deny:{}", provenance.always_allow, provenance.always_deny),
         provenance.base_url.to_string(),
+        provenance.theme.to_string(),
     )
 }
 

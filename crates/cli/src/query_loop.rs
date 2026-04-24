@@ -250,6 +250,9 @@ where
         while let Some(event) = stream.next().await {
             match event? {
                 StreamEvent::MessageStart { message } => {
+                    if let Some(bridge) = &self.bridge {
+                        bridge.send_stream_start().await;
+                    }
                     message_id = message.id;
                     role = message.role;
                     model = message.model;

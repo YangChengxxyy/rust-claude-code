@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub api_key: String,
@@ -23,6 +31,8 @@ pub struct Config {
     pub always_deny: Vec<crate::permission::PermissionRule>,
     #[serde(default = "default_true")]
     pub stream: bool,
+    #[serde(default)]
+    pub theme: Theme,
     #[serde(default)]
     pub provenance: ConfigProvenance,
 }
@@ -73,6 +83,7 @@ pub struct ConfigProvenance {
     pub always_allow: ConfigSource,
     pub always_deny: ConfigSource,
     pub stream: ConfigSource,
+    pub theme: ConfigSource,
 }
 
 impl Default for ConfigProvenance {
@@ -87,6 +98,7 @@ impl Default for ConfigProvenance {
             always_allow: ConfigSource::Default,
             always_deny: ConfigSource::Default,
             stream: ConfigSource::Default,
+            theme: ConfigSource::Default,
         }
     }
 }
@@ -133,6 +145,9 @@ impl Config {
             if raw.stream.is_some() {
                 provenance.stream = ConfigSource::UserConfig;
             }
+            if raw.theme.is_some() {
+                provenance.theme = ConfigSource::UserConfig;
+            }
 
             Ok(Config {
                 api_key,
@@ -145,6 +160,7 @@ impl Config {
                 always_allow: raw.always_allow.unwrap_or_default(),
                 always_deny: raw.always_deny.unwrap_or_default(),
                 stream: raw.stream.unwrap_or_else(default_true),
+                theme: raw.theme.unwrap_or_default(),
                 provenance,
             })
         } else {
@@ -161,6 +177,7 @@ impl Config {
                 always_allow: Vec::new(),
                 always_deny: Vec::new(),
                 stream: true,
+                theme: Theme::Dark,
                 provenance: ConfigProvenance::default(),
             })
         }
@@ -219,6 +236,7 @@ impl Config {
             always_allow: Vec::new(),
             always_deny: Vec::new(),
             stream: true,
+            theme: Theme::Dark,
             provenance: ConfigProvenance::default(),
         }
     }
@@ -262,6 +280,7 @@ pub struct ConfigOverrides {
     pub always_allow: ResolvedField<Vec<crate::permission::PermissionRule>>,
     pub always_deny: ResolvedField<Vec<crate::permission::PermissionRule>>,
     pub stream: ResolvedField<bool>,
+    pub theme: ResolvedField<Theme>,
 }
 
 impl Config {
@@ -302,6 +321,10 @@ impl Config {
             self.stream = value;
             self.provenance.stream = overrides.stream.source.unwrap_or(ConfigSource::Default);
         }
+        if let Some(value) = overrides.theme.value {
+            self.theme = value;
+            self.provenance.theme = overrides.theme.source.unwrap_or(ConfigSource::Default);
+        }
         self
     }
 }
@@ -328,6 +351,8 @@ struct RawConfig {
     always_deny: Option<Vec<crate::permission::PermissionRule>>,
     #[serde(default)]
     stream: Option<bool>,
+    #[serde(default)]
+    theme: Option<Theme>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -443,6 +468,7 @@ mod tests {
             always_allow: vec![],
             always_deny: vec![],
             stream: false,
+            theme: Theme::Light,
             provenance: ConfigProvenance::default(),
         };
 
@@ -456,6 +482,7 @@ mod tests {
         );
         assert_eq!(parsed.max_tokens, 4096);
         assert!(!parsed.stream);
+        assert_eq!(parsed.theme, Theme::Light);
     }
 
     #[test]
@@ -467,6 +494,7 @@ mod tests {
         assert!(config.system_prompt.is_none());
         assert_eq!(config.max_tokens, 16384);
         assert!(config.stream);
+        assert_eq!(config.theme, Theme::Dark);
     }
 
     #[test]
@@ -492,6 +520,7 @@ mod tests {
         assert_eq!(config.model, "claude-test");
         assert_eq!(config.max_tokens, 2048);
         assert!(!config.stream);
+        assert_eq!(config.theme, Theme::Dark);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::config::ConfigProvenance;
+use crate::config::{Config, ConfigProvenance};
 use crate::git::GitContextSnapshot;
 use crate::message::{Message, Usage};
 use crate::permission::{PermissionCheck, PermissionMode, PermissionRequest, PermissionRule};
@@ -61,6 +61,7 @@ pub struct AppState {
     pub session: SessionSettings,
     pub cwd: std::path::PathBuf,
     pub total_usage: Usage,
+    pub config: Config,
     pub config_provenance: ConfigProvenance,
     pub git_context: Option<GitContextSnapshot>,
     /// Usage from the most recent API response (for accurate token counting).
@@ -92,6 +93,7 @@ impl AppState {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 0,
             },
+            config: Config::with_credential(String::new(), false),
             config_provenance: ConfigProvenance::default(),
             git_context: None,
             last_api_usage: None,
@@ -112,6 +114,7 @@ impl AppState {
                 stream: config.stream,
                 thinking_enabled: true,
             },
+            config: config.clone(),
             config_provenance: config.provenance.clone(),
             ..Self::new(cwd)
         }
@@ -365,6 +368,7 @@ mod tests {
                 rule_type: crate::permission::RuleType::Deny,
             }],
             stream: true,
+            theme: crate::config::Theme::Dark,
             provenance: crate::config::ConfigProvenance::default(),
         };
 

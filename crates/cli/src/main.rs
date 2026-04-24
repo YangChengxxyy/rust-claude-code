@@ -5,7 +5,7 @@ use clap::Parser;
 use rust_claude_api::AnthropicClient;
 use rust_claude_core::{
     claude_md,
-    config::{Config, ConfigError, ConfigOverrides, ConfigSource},
+    config::{Config, ConfigError, ConfigOverrides, ConfigSource, Theme},
     git::collect_git_context,
     hooks::HooksConfig,
     memory,
@@ -95,6 +95,9 @@ struct Cli {
 
     #[arg(long = "no-stream")]
     no_stream: bool,
+
+    #[arg(long = "theme", value_parser = ["dark", "light"])]
+    theme: Option<String>,
 
     #[arg(long = "thinking", conflicts_with = "no_thinking")]
     thinking: bool,
@@ -258,6 +261,14 @@ fn resolve_config(
     if cli.no_stream {
         overrides.stream.set(false, ConfigSource::Cli);
     }
+    if let Some(theme) = cli.theme.as_deref() {
+        let theme = match theme {
+            "dark" => Theme::Dark,
+            "light" => Theme::Light,
+            _ => unreachable!("clap restricts theme values"),
+        };
+        overrides.theme.set(theme, ConfigSource::Cli);
+    }
 
     // Highest-priority overrides (RUST_CLAUDE_* escape hatches) apply last so they
     // beat both CLI flags and ANTHROPIC_* env variables.
@@ -396,6 +407,7 @@ async fn main() -> Result<()> {
     state.session.system_prompt = resolved.system_prompt.clone();
     state.session.max_tokens = resolved.max_tokens;
     state.session.stream = resolved.stream;
+    state.config = resolved.config.clone();
     state.config_provenance = resolved.config.provenance.clone();
     state.git_context = collect_git_context(&cwd);
     if cli.no_thinking {
@@ -1072,6 +1084,27 @@ async fn run_tui(
                         .send_assistant_message(&format!("Model switched to: {model_setting}"))
                         .await;
                 }
+                UserCommand::SetTheme(theme) => {
+                    let theme_str = match theme {
+                        Theme::Dark => "dark",
+                        Theme::Light => "light",
+                    };
+                    {
+                        let mut state = worker_state.lock().await;
+                        state.config.theme = theme;
+                        state.config.provenance.theme = ConfigSource::Cli;
+                        state.config_provenance.theme = ConfigSource::Cli;
+                        if let Err(e) = state.config.save() {
+                            worker_bridge
+                                .send_error(&format!("Failed to persist theme setting: {e}"))
+                                .await;
+                            continue;
+                        }
+                    }
+                    worker_bridge
+                        .send_assistant_message(&format!("Theme switched to: {theme_str}"))
+                        .await;
+                }
                 UserCommand::ShowConfig => {
                     let provenance = { worker_state.lock().await.config_provenance.clone() };
                     worker_bridge.send_config_info(&provenance).await;
@@ -1339,7 +1372,7 @@ async fn run_tui(
     });
 
     let mut terminal_guard = TerminalGuard::new()?;
-    let mut app = App::new(model, model_setting, permission_mode, git_branch);
+    let mut app = App::new(model, model_setting, permission_mode, git_branch, config.theme);
     app.run(terminal_guard.terminal_mut(), event_rx, user_tx).await?;
     Ok(())
 }

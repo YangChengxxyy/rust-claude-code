@@ -3,10 +3,13 @@ use std::io::Stdout;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
+use rust_claude_core::config::Theme;
 use rust_claude_core::state::TodoItem;
 use tokio::sync::mpsc;
 
@@ -63,6 +66,11 @@ const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         name: "/model",
         usage: "/model <model>",
         description: "Switch model setting",
+    },
+    SlashCommandSpec {
+        name: "/theme",
+        usage: "/theme <dark|light>",
+        description: "Switch TUI theme",
     },
     SlashCommandSpec {
         name: "/todo",
@@ -411,14 +419,20 @@ pub struct App {
     // -- terminal dimensions (updated on every draw / resize) --
     pub terminal_width: u16,
     pub terminal_height: u16,
+    pub theme: Theme,
 }
 
 impl App {
+    pub fn palette(&self) -> crate::theme::Palette {
+        crate::theme::Palette::from_config(self.theme)
+    }
+
     pub fn new(
         model: String,
         model_setting: String,
         permission_mode: String,
         git_branch: Option<String>,
+        theme: Theme,
     ) -> Self {
         let history_path = history_file_path();
         let history = load_history(&history_path);
@@ -432,9 +446,13 @@ impl App {
             suppress_stream: false,
             streaming_text: String::new(),
             streaming_text_raw: String::new(),
-            streaming_md: crate::streaming_markdown::StreamingMarkdownState::new(),
+            streaming_md: crate::streaming_markdown::StreamingMarkdownState::new(
+                crate::theme::Palette::from_config(theme),
+            ),
             streaming_thinking: String::new(),
-            streaming_thinking_md: crate::streaming_markdown::StreamingMarkdownState::new(),
+            streaming_thinking_md: crate::streaming_markdown::StreamingMarkdownState::new(
+                crate::theme::Palette::from_config(theme),
+            ),
             thinking_folded: false,
             streaming_tool: None,
             expanded_thinking: Vec::new(),
@@ -458,6 +476,7 @@ impl App {
             history_path,
             terminal_width: 80,
             terminal_height: 24,
+            theme,
         }
     }
 
@@ -509,13 +528,40 @@ impl App {
             return;
         }
 
+        if self.follow_output {
+            self.scroll_offset = max_offset;
+        }
         self.scroll_offset = self.scroll_offset.saturating_sub(CHAT_SCROLL_PAGE_SIZE);
-        self.follow_output = self.scroll_offset >= max_offset;
+        self.follow_output = false;
     }
 
     fn scroll_chat_down(&mut self) {
         let max_offset = self.max_chat_scroll_offset();
         self.scroll_offset = (self.scroll_offset + CHAT_SCROLL_PAGE_SIZE).min(max_offset);
+        self.follow_output = self.scroll_offset >= max_offset;
+    }
+
+    fn scroll_chat_up_lines(&mut self, lines: u16) {
+        let max_offset = self.max_chat_scroll_offset();
+        if max_offset == 0 {
+            self.scroll_offset = 0;
+            self.follow_output = true;
+            return;
+        }
+
+        if self.follow_output {
+            self.scroll_offset = max_offset;
+        }
+        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+        self.follow_output = false;
+    }
+
+    fn scroll_chat_down_lines(&mut self, lines: u16) {
+        let max_offset = self.max_chat_scroll_offset();
+        if self.follow_output {
+            self.scroll_offset = max_offset;
+        }
+        self.scroll_offset = self.scroll_offset.saturating_add(lines).min(max_offset);
         self.follow_output = self.scroll_offset >= max_offset;
     }
 
@@ -678,6 +724,11 @@ impl App {
                             break;
                         }
                     }
+                    Ok(Event::Mouse(mouse)) => {
+                        if term_tx.blocking_send(AppEvent::Mouse(mouse)).is_err() {
+                            break;
+                        }
+                    }
                     Ok(Event::Paste(text)) => {
                         if term_tx.blocking_send(AppEvent::Paste(text)).is_err() {
                             break;
@@ -717,6 +768,7 @@ impl App {
                 terminal_event = term_rx.recv() => {
                     match terminal_event {
                         Some(AppEvent::Key(key)) => self.handle_key_event(key, &user_tx).await,
+                        Some(AppEvent::Mouse(mouse)) => self.handle_mouse_event(mouse),
                         Some(AppEvent::Paste(text)) => self.handle_paste(text),
                         Some(AppEvent::Resize(w, h)) => self.handle_app_event(AppEvent::Resize(w, h)),
                         Some(other) => self.handle_app_event(other),
@@ -891,6 +943,26 @@ impl App {
         self.clamp_chat_scroll();
     }
 
+    fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        let chat_area = ui::chat_viewport_area(
+            self,
+            Rect::new(0, 0, self.terminal_width, self.terminal_height),
+        );
+        let in_chat_area = mouse.column >= chat_area.x
+            && mouse.column < chat_area.x + chat_area.width
+            && mouse.row >= chat_area.y
+            && mouse.row < chat_area.y + chat_area.height;
+
+        if in_chat_area {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => self.scroll_chat_up_lines(3),
+                MouseEventKind::ScrollDown => self.scroll_chat_down_lines(3),
+                _ => {}
+            }
+            self.clamp_chat_scroll();
+        }
+    }
+
     fn handle_permission_key(&mut self, key: KeyEvent) {
         let dialog = match self.permission_dialog.as_mut() {
             Some(d) => d,
@@ -1018,6 +1090,40 @@ impl App {
                     self.sync_chat_viewport();
                 }
             }
+            "/theme" => {
+                if let Some(theme_str) = arg {
+                    let theme = match theme_str {
+                        "dark" => Some(Theme::Dark),
+                        "light" => Some(Theme::Light),
+                        _ => None,
+                    };
+                    match theme {
+                        Some(theme) => match user_tx.send(UserCommand::SetTheme(theme)).await {
+                            Ok(()) => {
+                                self.theme = theme;
+                                self.messages.push(ChatMessage::System(format!(
+                                    "Switching theme to: {theme_str}"
+                                )));
+                            }
+                            Err(_) => self.messages.push(ChatMessage::System(
+                                "Error: failed to send theme change request".into(),
+                            )),
+                        },
+                        None => {
+                            self.messages.push(ChatMessage::System(
+                                "Unknown theme. Valid themes: dark, light".into(),
+                            ));
+                        }
+                    }
+                    self.sync_chat_viewport();
+                } else {
+                    self.messages.push(ChatMessage::System(format!(
+                        "Current theme: {:?}. Usage: /theme <dark|light>",
+                        self.theme
+                    )));
+                    self.sync_chat_viewport();
+                }
+            }
             "/memory" => {
                 match arg {
                     None => {
@@ -1134,6 +1240,11 @@ impl App {
                     });
                     self.update_selected_thinking();
                 }
+                self.sync_chat_viewport();
+            }
+            AppEvent::StreamStart => {
+                self.is_streaming = true;
+                self.suppress_stream = false;
                 self.sync_chat_viewport();
             }
             AppEvent::StreamDelta(text) => {
@@ -1267,10 +1378,11 @@ impl App {
                 model_source,
                 permission_source,
                 base_url_source,
+                theme_source,
             } => {
                 self.messages.push(ChatMessage::System(format!(
-                    "Effective config:\n  model source: {}\n  permissions source: {}\n  base_url source: {}",
-                    model_source, permission_source, base_url_source
+                    "Effective config:\n  model source: {}\n  permissions source: {}\n  base_url source: {}\n  theme source: {}",
+                    model_source, permission_source, base_url_source, theme_source
                 )));
                 self.sync_chat_viewport();
             }
@@ -1325,7 +1437,7 @@ impl App {
                 self.terminal_height = h;
                 self.clamp_chat_scroll();
             }
-            AppEvent::Key(_) | AppEvent::Paste(_) => {}
+            AppEvent::Key(_) | AppEvent::Mouse(_) | AppEvent::Paste(_) => {}
         }
     }
 }
@@ -1387,10 +1499,15 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
 
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.min(s.len())])
+        return s.to_string();
     }
+
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    format!("{}...", &s[..end])
 }
 
 fn history_file_path() -> PathBuf {
@@ -1431,7 +1548,7 @@ fn save_history(path: &PathBuf, history: &[String]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEventKind, KeyEventState};
+    use crossterm::event::{KeyCode, KeyEventKind, KeyEventState, MouseEvent, MouseEventKind};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent {
@@ -1460,12 +1577,44 @@ mod tests {
         }
     }
 
+    fn mouse(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn mouse_at(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn test_stream_start_reenables_streaming_after_tool_use_turn() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        app.handle_app_event(AppEvent::StreamEnd);
+        assert!(!app.is_streaming);
+
+        app.handle_app_event(AppEvent::StreamStart);
+        app.handle_app_event(AppEvent::StreamDelta("final answer".into()));
+
+        assert!(app.is_streaming);
+        assert_eq!(app.streaming_text, "final answer");
+    }
+
     #[test]
     fn test_help_registry_contains_new_commands() {
         let help = slash_command_help_text();
         assert!(help.contains("/config"));
         assert!(help.contains("/cost"));
         assert!(help.contains("/diff"));
+        assert!(help.contains("/theme"));
     }
 
     #[test]
@@ -1488,14 +1637,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_paste_preserves_multiline_content() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
         app.handle_paste("line1\r\nline2".into());
         assert_eq!(app.input_text(), "line1\nline2");
     }
 
     #[test]
     fn test_tab_toggles_selected_thinking_expansion() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
         app.messages.push(ChatMessage::Thinking {
             summary: "Thought for ~10 chars".into(),
             content: "reasoning".into(),
@@ -1511,7 +1660,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ctrl_c_cancels_stream_instead_of_quit() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
         app.is_streaming = true;
         let (tx, mut rx) = mpsc::channel(1);
         app.handle_key_event(key_ctrl(KeyCode::Char('c')), &tx).await;
@@ -1522,7 +1671,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shift_enter_inserts_newline() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
         let (tx, _rx) = mpsc::channel(1);
         app.handle_key_event(key(KeyCode::Char('a')), &tx).await;
         app.handle_key_event(key_shift(KeyCode::Enter), &tx).await;
@@ -1532,7 +1681,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_up_down_browse_history() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
         app.history = vec!["first".into(), "second".into()];
         let (tx, _rx) = mpsc::channel(1);
         app.handle_key_event(key(KeyCode::Up), &tx).await;
@@ -1546,7 +1695,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_page_navigation_preserves_draft() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
         app.input_buffer = InputBuffer::from_text("draft");
         app.messages = (0..40)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
@@ -1562,7 +1711,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_page_down_restores_follow_output_at_bottom() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
         app.messages = (0..80)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
             .collect();
@@ -1580,7 +1729,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ctrl_home_and_end_jump_chat_boundaries() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
         app.messages = (0..80)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
             .collect();
@@ -1594,9 +1743,83 @@ mod tests {
         assert_eq!(app.scroll_offset, 0);
     }
 
+    #[tokio::test]
+    async fn test_page_up_from_follow_output_moves_up_from_latest() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        app.messages = (0..80)
+            .map(|i| ChatMessage::Assistant(format!("message {i}")))
+            .collect();
+        app.terminal_width = 80;
+        app.terminal_height = 24;
+        app.follow_output = true;
+        app.scroll_offset = app.max_chat_scroll_offset();
+        let initial = app.scroll_offset;
+        let (tx, _rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::PageUp), &tx).await;
+
+        assert!(app.scroll_offset < initial);
+        assert!(!app.follow_output);
+    }
+
+    #[test]
+    fn test_mouse_scroll_up_moves_away_from_latest() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        app.messages = (0..80)
+            .map(|i| ChatMessage::Assistant(format!("message {i}")))
+            .collect();
+        app.terminal_width = 80;
+        app.terminal_height = 24;
+        app.follow_output = true;
+        app.scroll_offset = app.max_chat_scroll_offset();
+        let initial = app.scroll_offset;
+
+        app.handle_mouse_event(mouse(MouseEventKind::ScrollUp));
+
+        assert!(app.scroll_offset < initial);
+        assert!(!app.follow_output);
+    }
+
+    #[test]
+    fn test_mouse_scroll_down_returns_to_latest() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        app.messages = (0..80)
+            .map(|i| ChatMessage::Assistant(format!("message {i}")))
+            .collect();
+        app.terminal_width = 80;
+        app.terminal_height = 24;
+        app.follow_output = false;
+        app.scroll_offset = app.max_chat_scroll_offset().saturating_sub(6);
+
+        app.handle_mouse_event(mouse(MouseEventKind::ScrollDown));
+        app.handle_mouse_event(mouse(MouseEventKind::ScrollDown));
+
+        assert_eq!(app.scroll_offset, app.max_chat_scroll_offset());
+        assert!(app.follow_output);
+    }
+
+    #[test]
+    fn test_mouse_scroll_outside_chat_area_does_not_scroll_chat() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        app.todo_visible = true;
+        app.messages = (0..80)
+            .map(|i| ChatMessage::Assistant(format!("message {i}")))
+            .collect();
+        app.terminal_width = 120;
+        app.terminal_height = 24;
+        app.follow_output = true;
+        app.scroll_offset = app.max_chat_scroll_offset();
+        let initial = app.scroll_offset;
+
+        app.handle_mouse_event(mouse_at(MouseEventKind::ScrollUp, 110, 2));
+
+        assert_eq!(app.scroll_offset, initial);
+        assert!(app.follow_output);
+    }
+
     #[test]
     fn test_sync_chat_viewport_preserves_history_view() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
         app.messages = (0..80)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
             .collect();
@@ -1610,7 +1833,7 @@ mod tests {
     }
     #[tokio::test]
     async fn test_mode_command_sends_control_message() {
-        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into(), None);
+        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into(), None, Theme::Dark);
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/mode plan");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1621,7 +1844,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_command_sends_control_message() {
-        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into(), None);
+        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into(), None, Theme::Dark);
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/model opus[1m]");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1632,7 +1855,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_command_without_args_shows_setting_and_runtime() {
-        let mut app = App::new("claude-opus-4-6".into(), "opusplan".into(), "Plan".into(), None);
+        let mut app = App::new("claude-opus-4-6".into(), "opusplan".into(), "Plan".into(), None, Theme::Dark);
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/model");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1647,8 +1870,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_theme_command_sends_control_message_and_updates_local_theme() {
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text("/theme light");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        let sent = rx.recv().await.unwrap();
+        assert_eq!(sent, UserCommand::SetTheme(Theme::Light));
+        assert_eq!(app.theme, Theme::Light);
+    }
+
+    #[tokio::test]
     async fn test_memory_command_sends_show_memory() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/memory");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1659,7 +1894,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_remember_command_sends_payload() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text(
             "/memory remember feedback feedback/testing.md Testing Use-real-db Use real database",
@@ -1681,7 +1916,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_forget_command_sends_payload() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/memory forget feedback/testing.md");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1697,7 +1932,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_remember_without_args_shows_usage() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/memory remember");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1712,7 +1947,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_forget_without_args_shows_usage() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/memory forget");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1727,7 +1962,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_unknown_subcommand_shows_usage() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/memory bogus");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1742,7 +1977,7 @@ mod tests {
 
     #[test]
     fn test_status_update_changes_displayed_model_and_mode() {
-        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into(), None);
+        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into(), None, Theme::Dark);
         app.handle_app_event(AppEvent::StatusUpdate {
             model: "claude-opus-4-6".into(),
             model_setting: "opusplan".into(),
@@ -1758,7 +1993,7 @@ mod tests {
 
     #[test]
     fn test_thinking_complete_creates_message() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
         app.handle_app_event(AppEvent::ThinkingComplete("reasoning".into()));
         assert!(matches!(
             app.messages.last(),
@@ -1771,7 +2006,7 @@ mod tests {
     /// correctly for the "no store" case.
     #[test]
     fn test_memory_no_store_response_displays_as_assistant() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
         let msg = "No memory store is available for the current project.";
         app.handle_app_event(AppEvent::AssistantMessage(msg.into()));
 
@@ -1784,7 +2019,7 @@ mod tests {
     /// Verify that memory status text for an empty store displays correctly.
     #[test]
     fn test_memory_empty_store_response_displays_as_assistant() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
         let msg = "Memory store:\n  project_root: /repo\n  memory_dir: /memory\n  entrypoint: /memory/MEMORY.md\n  entries: 0\n\nNo memory entries found.";
         app.handle_app_event(AppEvent::AssistantMessage(msg.into()));
 
@@ -1798,7 +2033,7 @@ mod tests {
     /// Verify that memory status text for a populated store displays correctly.
     #[test]
     fn test_memory_populated_store_response_displays_as_assistant() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
         let msg = "Memory store:\n  project_root: /repo\n  memory_dir: /memory\n  entrypoint: /memory/MEMORY.md\n  entries: 2\n\nVisible memories:\n- [feedback] testing.md — DB test guidance (1 days old)\n- [project] deploy.md — Deploy process (3 days old)\n";
         app.handle_app_event(AppEvent::AssistantMessage(msg.into()));
 
@@ -1808,9 +2043,11 @@ mod tests {
                 if text.contains("entries: 2") && text.contains("Visible memories:")
                     && text.contains("[feedback]") && text.contains("[project]")
         ));
+    }
+
     #[test]
     fn test_cancel_during_text_streaming_clears_state() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
         app.is_streaming = true;
         app.handle_app_event(AppEvent::StreamDelta("Hello ".into()));
         app.handle_app_event(AppEvent::StreamDelta("world".into()));
@@ -1828,7 +2065,7 @@ mod tests {
 
     #[test]
     fn test_cancel_during_thinking_streaming_preserves_thinking() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
         app.is_streaming = true;
         app.handle_app_event(AppEvent::ThinkingStart);
         app.handle_app_event(AppEvent::ThinkingDelta("Let me think about this...".into()));
@@ -1851,7 +2088,7 @@ mod tests {
 
     #[test]
     fn test_cancel_during_tool_input_streaming_clears_tool_state() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
+        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
         app.is_streaming = true;
         app.handle_app_event(AppEvent::ToolInputStreamStart { name: "Bash".into() });
         app.handle_app_event(AppEvent::ToolInputDelta {
@@ -1867,20 +2104,17 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_cancelled_event_preserves_thinking() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None);
-        app.is_streaming = true;
-        app.handle_app_event(AppEvent::ThinkingDelta("reasoning text".into()));
-        app.handle_app_event(AppEvent::StreamCancelled);
+    fn test_truncate_handles_utf8_boundaries() {
+        let input = "a".repeat(198) + "用例";
+        let truncated = truncate(&input, 200);
+        assert_eq!(truncated, format!("{}...", "a".repeat(198)));
+    }
 
-        // Thinking should be finalized as a message
-        let thinking_msg = app.messages.iter().find(|m| matches!(m, ChatMessage::Thinking { .. }));
-        assert!(thinking_msg.is_some());
-        if let Some(ChatMessage::Thinking { summary, .. }) = thinking_msg {
-            assert!(summary.contains("cancelled"));
-        }
-        assert!(app.streaming_thinking.is_empty());
-        assert!(app.streaming_thinking_md.is_empty());
-        assert!(app.streaming_tool.is_none());
+    #[test]
+    fn test_truncate_does_not_split_multibyte_chars() {
+        let input = "a".repeat(198) + "用例";
+        let truncated = truncate(&input, 199);
+        assert_eq!(truncated, format!("{}...", "a".repeat(198)));
     }
 }
+

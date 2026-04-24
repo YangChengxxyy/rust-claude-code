@@ -34,6 +34,10 @@ impl TuiBridge {
             .await;
     }
 
+    pub async fn send_stream_start(&self) {
+        let _ = self.event_tx.send(AppEvent::StreamStart).await;
+    }
+
     pub async fn send_stream_delta(&self, text: &str) {
         let _ = self.event_tx.send(AppEvent::StreamDelta(text.to_string())).await;
     }
@@ -130,7 +134,7 @@ impl TuiBridge {
     }
 
     pub async fn send_config_info(&self, provenance: &ConfigProvenance) {
-        let (model_source, permission_source, base_url_source) =
+        let (model_source, permission_source, base_url_source, theme_source) =
             format_provenance_summary(provenance);
         let _ = self
             .event_tx
@@ -138,6 +142,7 @@ impl TuiBridge {
                 model_source,
                 permission_source,
                 base_url_source,
+                theme_source,
             })
             .await;
     }
@@ -201,6 +206,19 @@ impl TuiBridge {
 mod tests {
     use super::*;
     use rust_claude_core::state::{TodoPriority, TodoStatus};
+
+    #[tokio::test]
+    async fn test_bridge_sends_stream_start() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let bridge = TuiBridge::new(tx);
+
+        bridge.send_stream_start().await;
+
+        match rx.recv().await {
+            Some(AppEvent::StreamStart) => {}
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn test_bridge_sends_stream_delta() {

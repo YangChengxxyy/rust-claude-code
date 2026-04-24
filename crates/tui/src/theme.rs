@@ -1,170 +1,180 @@
-//! Centralized color theme matching Claude Code's dark theme.
-//!
-//! All RGB values are taken from the official Claude Code `darkTheme` in
-//! `src/utils/theme.ts`. This gives us a single source of truth for colors
-//! across the entire TUI rendering layer.
+//! Centralized color theme support for the TUI.
 
 use ratatui::style::{Color, Modifier, Style};
+use rust_claude_core::config::Theme as ConfigTheme;
 
-// ── Core brand ──────────────────────────────────────────────────────────────
+#[derive(Debug, Clone, Copy)]
+pub struct Palette {
+    pub claude: Color,
+    pub text: Color,
+    pub subtle: Color,
+    pub inactive: Color,
+    pub success: Color,
+    pub error: Color,
+    pub warning: Color,
+    pub bash_border: Color,
+    pub suggestion: Color,
+    pub prompt_border: Color,
+    pub plan_mode: Color,
+    pub user_msg_bg: Color,
+    pub bash_msg_bg: Color,
+    pub diff_added: Color,
+    pub diff_removed: Color,
+    pub diff_added_word: Color,
+    pub diff_removed_word: Color,
+}
 
-/// Claude orange — used for the spinner and brand indicator.
-pub const CLAUDE: Color = Color::Rgb(215, 119, 87);
+impl Palette {
+    pub fn dark() -> Self {
+        Self {
+            claude: Color::Rgb(215, 119, 87),
+            text: Color::Rgb(255, 255, 255),
+            subtle: Color::Rgb(80, 80, 80),
+            inactive: Color::Rgb(153, 153, 153),
+            success: Color::Rgb(78, 186, 101),
+            error: Color::Rgb(255, 107, 128),
+            warning: Color::Rgb(255, 193, 7),
+            bash_border: Color::Rgb(253, 93, 177),
+            suggestion: Color::Rgb(177, 185, 249),
+            prompt_border: Color::Rgb(136, 136, 136),
+            plan_mode: Color::Rgb(72, 150, 140),
+            user_msg_bg: Color::Rgb(55, 55, 55),
+            bash_msg_bg: Color::Rgb(65, 60, 65),
+            diff_added: Color::Rgb(34, 92, 43),
+            diff_removed: Color::Rgb(122, 41, 54),
+            diff_added_word: Color::Rgb(56, 166, 96),
+            diff_removed_word: Color::Rgb(179, 89, 107),
+        }
+    }
 
-// ── Text ────────────────────────────────────────────────────────────────────
+    pub fn light() -> Self {
+        Self {
+            claude: Color::Rgb(180, 90, 55),
+            text: Color::Rgb(20, 20, 20),
+            subtle: Color::Rgb(180, 180, 180),
+            inactive: Color::Rgb(110, 110, 110),
+            success: Color::Rgb(34, 139, 34),
+            error: Color::Rgb(196, 48, 48),
+            warning: Color::Rgb(180, 120, 0),
+            bash_border: Color::Rgb(180, 70, 140),
+            suggestion: Color::Rgb(85, 110, 220),
+            prompt_border: Color::Rgb(150, 150, 150),
+            plan_mode: Color::Rgb(60, 130, 120),
+            user_msg_bg: Color::Rgb(235, 235, 235),
+            bash_msg_bg: Color::Rgb(240, 235, 240),
+            diff_added: Color::Rgb(210, 245, 210),
+            diff_removed: Color::Rgb(250, 220, 225),
+            diff_added_word: Color::Rgb(60, 150, 60),
+            diff_removed_word: Color::Rgb(200, 90, 90),
+        }
+    }
 
-/// Primary text color (white on dark background).
-pub const TEXT: Color = Color::Rgb(255, 255, 255);
+    pub fn from_config(theme: ConfigTheme) -> Self {
+        match theme {
+            ConfigTheme::Dark => Self::dark(),
+            ConfigTheme::Light => Self::light(),
+        }
+    }
 
-/// Dimmed / subtle text (dark gray).
-pub const SUBTLE: Color = Color::Rgb(80, 80, 80);
+    pub fn bullet_style(self) -> Style {
+        Style::default().fg(self.text)
+    }
 
-/// Inactive / secondary text (light gray).
-pub const INACTIVE: Color = Color::Rgb(153, 153, 153);
+    pub fn response_prefix_style(self) -> Style {
+        Style::default().fg(self.inactive)
+    }
 
-// ── Semantic ────────────────────────────────────────────────────────────────
+    pub fn assistant_text_style(self) -> Style {
+        Style::default().fg(self.text)
+    }
 
-pub const SUCCESS: Color = Color::Rgb(78, 186, 101);
-pub const ERROR: Color = Color::Rgb(255, 107, 128);
-pub const WARNING: Color = Color::Rgb(255, 193, 7);
+    pub fn user_text_style(self) -> Style {
+        Style::default().fg(self.text)
+    }
 
-// ── Accents ─────────────────────────────────────────────────────────────────
+    pub fn tool_name_style(self) -> Style {
+        Style::default().fg(self.text).add_modifier(Modifier::BOLD)
+    }
 
-/// Bright pink used for bash command borders / indicators.
-pub const BASH_BORDER: Color = Color::Rgb(253, 93, 177);
+    pub fn tool_desc_style(self) -> Style {
+        Style::default().fg(self.text)
+    }
 
-/// Light blue-purple used for suggestions, permissions, and highlights.
-pub const SUGGESTION: Color = Color::Rgb(177, 185, 249);
+    pub fn bash_command_style(self) -> Style {
+        Style::default().fg(self.text)
+    }
 
-/// Prompt input border color (medium gray).
-pub const PROMPT_BORDER: Color = Color::Rgb(136, 136, 136);
+    pub fn bash_prefix_style(self) -> Style {
+        Style::default().fg(self.bash_border)
+    }
 
-/// Plan mode indicator.
-pub const PLAN_MODE: Color = Color::Rgb(72, 150, 140);
+    pub fn success_style(self) -> Style {
+        Style::default().fg(self.success)
+    }
 
-// ── Backgrounds ─────────────────────────────────────────────────────────────
+    pub fn error_style(self) -> Style {
+        Style::default().fg(self.error)
+    }
 
-/// User message background.
-pub const USER_MSG_BG: Color = Color::Rgb(55, 55, 55);
+    pub fn warning_style(self) -> Style {
+        Style::default().fg(self.warning)
+    }
 
-/// Bash output / command background.
-pub const BASH_MSG_BG: Color = Color::Rgb(65, 60, 65);
+    pub fn status_bar_style(self) -> Style {
+        Style::default().fg(self.inactive)
+    }
 
-// ── Diff ────────────────────────────────────────────────────────────────────
+    pub fn prompt_border_style(self) -> Style {
+        Style::default().fg(self.prompt_border)
+    }
 
-pub const DIFF_ADDED: Color = Color::Rgb(34, 92, 43);
-pub const DIFF_REMOVED: Color = Color::Rgb(122, 41, 54);
-pub const DIFF_ADDED_WORD: Color = Color::Rgb(56, 166, 96);
-pub const DIFF_REMOVED_WORD: Color = Color::Rgb(179, 89, 107);
+    pub fn input_disabled_style(self) -> Style {
+        Style::default().fg(self.subtle)
+    }
 
-// ── Unicode figures ─────────────────────────────────────────────────────────
+    pub fn spinner_style(self) -> Style {
+        Style::default().fg(self.claude)
+    }
+}
 
-/// Black circle bullet used as message prefix (macOS style).
 pub const BLACK_CIRCLE: &str = "⏺";
-
-/// Left-bottom branch used for indented response lines.
+pub const ASSISTANT_BULLET: &str = "•";
 pub const RESPONSE_PREFIX: &str = "⎿";
-
-// ── Convenience style builders ──────────────────────────────────────────────
-
-/// Style for the `⏺` message bullet.
-pub fn bullet_style() -> Style {
-    Style::default().fg(TEXT)
-}
-
-/// Style for the `⎿` response indentation prefix (dimmed).
-pub fn response_prefix_style() -> Style {
-    Style::default().fg(INACTIVE)
-}
-
-/// Style for the assistant's body text.
-pub fn assistant_text_style() -> Style {
-    Style::default().fg(TEXT)
-}
-
-/// Style for user message text.
-pub fn user_text_style() -> Style {
-    Style::default().fg(TEXT)
-}
-
-/// Style for tool name (bold).
-pub fn tool_name_style() -> Style {
-    Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
-}
-
-/// Style for tool description in parentheses.
-pub fn tool_desc_style() -> Style {
-    Style::default().fg(INACTIVE)
-}
-
-/// Style for bash command text (with pink indicator).
-pub fn bash_command_style() -> Style {
-    Style::default().fg(TEXT)
-}
-
-/// Style for the bash `!` prefix.
-pub fn bash_prefix_style() -> Style {
-    Style::default().fg(BASH_BORDER)
-}
-
-/// Style for success result text.
-pub fn success_style() -> Style {
-    Style::default().fg(SUCCESS)
-}
-
-/// Style for error result text.
-pub fn error_style() -> Style {
-    Style::default().fg(ERROR)
-}
-
-/// Style for warning text.
-pub fn warning_style() -> Style {
-    Style::default().fg(WARNING)
-}
-
-/// Style for the status bar text.
-pub fn status_bar_style() -> Style {
-    Style::default().fg(INACTIVE)
-}
-
-/// Style for the prompt input border.
-pub fn prompt_border_style() -> Style {
-    Style::default().fg(PROMPT_BORDER)
-}
-
-/// Style for disabled / streaming input.
-pub fn input_disabled_style() -> Style {
-    Style::default().fg(SUBTLE)
-}
-
-/// Style for the Claude spinner / thinking indicator.
-pub fn spinner_style() -> Style {
-    Style::default().fg(CLAUDE)
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_claude_orange_rgb() {
-        assert_eq!(CLAUDE, Color::Rgb(215, 119, 87));
+    fn test_dark_text_is_white() {
+        assert_eq!(Palette::dark().text, Color::Rgb(255, 255, 255));
     }
 
     #[test]
-    fn test_text_is_white() {
-        assert_eq!(TEXT, Color::Rgb(255, 255, 255));
+    fn test_light_text_is_dark() {
+        assert_eq!(Palette::light().text, Color::Rgb(20, 20, 20));
+    }
+
+    #[test]
+    fn test_assistant_bullet_is_small_dot() {
+        assert_eq!(ASSISTANT_BULLET, "•");
     }
 
     #[test]
     fn test_bullet_style_fg() {
-        let style = bullet_style();
-        assert_eq!(style.fg, Some(TEXT));
+        let style = Palette::dark().bullet_style();
+        assert_eq!(style.fg, Some(Palette::dark().text));
+    }
+
+    #[test]
+    fn test_tool_desc_style_is_bright() {
+        let style = Palette::dark().tool_desc_style();
+        assert_eq!(style.fg, Some(Palette::dark().text));
     }
 
     #[test]
     fn test_tool_name_style_is_bold() {
-        let style = tool_name_style();
+        let style = Palette::dark().tool_name_style();
         assert!(style.add_modifier.contains(Modifier::BOLD));
     }
 }

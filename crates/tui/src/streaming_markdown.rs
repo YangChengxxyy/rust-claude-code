@@ -8,7 +8,7 @@
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-use crate::theme;
+use crate::theme::{self, Palette};
 
 // ── Block-level parser state ────────────────────────────────────────────────
 
@@ -35,11 +35,14 @@ pub struct StreamingMarkdownState {
     pub lines_cache: Vec<Line<'static>>,
     /// The current incomplete line (no newline received yet).
     pub pending_line: String,
+    palette: Palette,
     /// Block-level state machine.
     block_state: BlockState,
     /// Whether the very first block has been emitted (controls blank-line
     /// insertion before headings/code-blocks).
     first_block: bool,
+    /// Whether the assistant message prefix has already been emitted.
+    emitted_message_prefix: bool,
     /// Tracks whether the most recent cached item was a blank line,
     /// to avoid duplicate blank lines.
     last_was_blank: bool,
@@ -47,17 +50,19 @@ pub struct StreamingMarkdownState {
 
 impl Default for StreamingMarkdownState {
     fn default() -> Self {
-        Self::new()
+        Self::new(Palette::dark())
     }
 }
 
 impl StreamingMarkdownState {
-    pub fn new() -> Self {
+    pub fn new(palette: Palette) -> Self {
         Self {
             lines_cache: Vec::new(),
             pending_line: String::new(),
+            palette,
             block_state: BlockState::Paragraph,
             first_block: true,
+            emitted_message_prefix: false,
             last_was_blank: false,
         }
     }
@@ -131,7 +136,7 @@ impl StreamingMarkdownState {
                     // Close the code block
                     self.lines_cache.push(Line::from(vec![
                         Span::raw("  "),
-                        Span::styled("└─", Style::default().fg(theme::BASH_BORDER)),
+                        Span::styled("└─", Style::default().fg(self.palette.bash_border)),
                     ]));
                     self.block_state = BlockState::Paragraph;
                     self.last_was_blank = false;
@@ -139,8 +144,8 @@ impl StreamingMarkdownState {
                     // Code line inside block
                     self.lines_cache.push(Line::from(vec![
                         Span::raw("  "),
-                        Span::styled("│ ", Style::default().fg(theme::BASH_BORDER)),
-                        Span::styled(line.to_string(), Style::default().fg(theme::TEXT)),
+                        Span::styled("│ ", Style::default().fg(self.palette.bash_border)),
+                        Span::styled(line.to_string(), Style::default().fg(self.palette.text)),
                     ]));
                     self.last_was_blank = false;
                 }
@@ -173,7 +178,7 @@ impl StreamingMarkdownState {
                         Span::raw("  "),
                         Span::styled(
                             format!("┌─ {title}"),
-                            Style::default().fg(theme::BASH_BORDER),
+                            Style::default().fg(self.palette.bash_border),
                         ),
                     ]));
                     self.block_state = BlockState::CodeBlock { lang };
@@ -193,20 +198,26 @@ impl StreamingMarkdownState {
                     let heading_text = trimmed[heading_level + 1..].to_string();
                     let style = match heading_level {
                         1 => Style::default()
-                            .fg(theme::CLAUDE)
+                            .fg(self.palette.claude)
                             .add_modifier(Modifier::BOLD),
                         2 => Style::default()
-                            .fg(theme::SUGGESTION)
+                            .fg(self.palette.suggestion)
                             .add_modifier(Modifier::BOLD),
                         _ => Style::default()
-                            .fg(theme::TEXT)
+                            .fg(self.palette.text)
                             .add_modifier(Modifier::BOLD),
                     };
-                    self.lines_cache.push(Line::from(vec![
+                    let prefix = if !self.emitted_message_prefix {
+                        self.emitted_message_prefix = true;
                         Span::styled(
-                            format!("{} ", theme::BLACK_CIRCLE),
-                            theme::bullet_style(),
-                        ),
+                            format!("{} ", theme::ASSISTANT_BULLET),
+                            self.palette.bullet_style(),
+                        )
+                    } else {
+                        Span::raw("  ")
+                    };
+                    self.lines_cache.push(Line::from(vec![
+                        prefix,
                         Span::styled(heading_text, style),
                     ]));
                     self.block_state = BlockState::Paragraph;
@@ -223,10 +234,10 @@ impl StreamingMarkdownState {
                         Span::raw("  "),
                         Span::styled(
                             "• ".to_string(),
-                            Style::default().fg(theme::SUGGESTION),
+                            Style::default().fg(self.palette.suggestion),
                         ),
                     ];
-                    spans.extend(parse_inline_spans(text));
+                    spans.extend(parse_inline_spans(text, self.palette));
                     self.lines_cache.push(Line::from(spans));
                     self.block_state = BlockState::List;
                     self.first_block = false;
@@ -240,10 +251,10 @@ impl StreamingMarkdownState {
                         Span::raw("  "),
                         Span::styled(
                             format!("{marker} "),
-                            Style::default().fg(theme::SUGGESTION),
+                            Style::default().fg(self.palette.suggestion),
                         ),
                     ];
-                    spans.extend(parse_inline_spans(&rest));
+                    spans.extend(parse_inline_spans(&rest, self.palette));
                     self.lines_cache.push(Line::from(spans));
                     self.block_state = BlockState::List;
                     self.first_block = false;
@@ -256,20 +267,18 @@ impl StreamingMarkdownState {
                 if self.first_block && self.lines_cache.is_empty() {
                     // Very first line of the entire stream — bullet prefix
                     spans.push(Span::styled(
-                        format!("{} ", theme::BLACK_CIRCLE),
-                        theme::bullet_style(),
+                        format!("{} ", theme::ASSISTANT_BULLET),
+                        self.palette.bullet_style(),
                     ));
+                    self.emitted_message_prefix = true;
                 } else if self.last_was_blank || self.first_block {
-                    // First line of a new paragraph — bullet prefix
-                    spans.push(Span::styled(
-                        format!("{} ", theme::BLACK_CIRCLE),
-                        theme::bullet_style(),
-                    ));
+                    // First line of a new paragraph — indent only
+                    spans.push(Span::raw("  "));
                 } else {
                     // Continuation line — indent
                     spans.push(Span::raw("  "));
                 }
-                spans.extend(parse_inline_spans(line));
+                spans.extend(parse_inline_spans(line, self.palette));
                 self.lines_cache.push(Line::from(spans));
                 self.first_block = false;
                 self.last_was_blank = false;
@@ -290,10 +299,10 @@ impl StreamingMarkdownState {
                 // Inside a code block — render as code line
                 Some(Line::from(vec![
                     Span::raw("  "),
-                    Span::styled("│ ", Style::default().fg(theme::BASH_BORDER)),
+                    Span::styled("│ ", Style::default().fg(self.palette.bash_border)),
                     Span::styled(
                         self.pending_line.clone(),
-                        Style::default().fg(theme::TEXT),
+                        Style::default().fg(self.palette.text),
                     ),
                 ]))
             }
@@ -309,20 +318,24 @@ impl StreamingMarkdownState {
                     let heading_text = &trimmed[heading_level + 1..];
                     let style = match heading_level {
                         1 => Style::default()
-                            .fg(theme::CLAUDE)
+                            .fg(self.palette.claude)
                             .add_modifier(Modifier::BOLD),
                         2 => Style::default()
-                            .fg(theme::SUGGESTION)
+                            .fg(self.palette.suggestion)
                             .add_modifier(Modifier::BOLD),
                         _ => Style::default()
-                            .fg(theme::TEXT)
+                            .fg(self.palette.text)
                             .add_modifier(Modifier::BOLD),
                     };
                     return Some(Line::from(vec![
-                        Span::styled(
-                            format!("{} ", theme::BLACK_CIRCLE),
-                            theme::bullet_style(),
-                        ),
+                        if !self.emitted_message_prefix {
+                            Span::styled(
+                                format!("{} ", theme::ASSISTANT_BULLET),
+                                self.palette.bullet_style(),
+                            )
+                        } else {
+                            Span::raw("  ")
+                        },
                         Span::styled(heading_text.to_string(), style),
                     ]));
                 }
@@ -331,18 +344,15 @@ impl StreamingMarkdownState {
                 let mut spans = Vec::new();
                 if self.lines_cache.is_empty() && self.first_block {
                     spans.push(Span::styled(
-                        format!("{} ", theme::BLACK_CIRCLE),
-                        theme::bullet_style(),
+                        format!("{} ", theme::ASSISTANT_BULLET),
+                        self.palette.bullet_style(),
                     ));
                 } else if self.last_was_blank {
-                    spans.push(Span::styled(
-                        format!("{} ", theme::BLACK_CIRCLE),
-                        theme::bullet_style(),
-                    ));
+                    spans.push(Span::raw("  "));
                 } else {
                     spans.push(Span::raw("  "));
                 }
-                spans.extend(parse_inline_spans(&self.pending_line));
+                spans.extend(parse_inline_spans(&self.pending_line, self.palette));
                 Some(Line::from(spans))
             }
         }
@@ -354,6 +364,7 @@ impl StreamingMarkdownState {
         self.pending_line.clear();
         self.block_state = BlockState::Paragraph;
         self.first_block = true;
+        self.emitted_message_prefix = false;
         self.last_was_blank = false;
     }
 }
@@ -364,7 +375,7 @@ impl StreamingMarkdownState {
 ///
 /// This is a standalone version of the parser from `ui.rs`, made public
 /// for use by the streaming markdown module.
-pub fn parse_inline_spans(text: &str) -> Vec<Span<'static>> {
+pub fn parse_inline_spans(text: &str, palette: Palette) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
@@ -376,7 +387,7 @@ pub fn parse_inline_spans(text: &str) -> Vec<Span<'static>> {
             if !plain.is_empty() {
                 spans.push(Span::styled(
                     std::mem::take(&mut plain),
-                    theme::assistant_text_style(),
+                    palette.assistant_text_style(),
                 ));
             }
             let mut j = i + 1;
@@ -387,7 +398,7 @@ pub fn parse_inline_spans(text: &str) -> Vec<Span<'static>> {
                 let content: String = chars[i + 1..j].iter().collect();
                 spans.push(Span::styled(
                     content,
-                    Style::default().fg(theme::TEXT).bg(theme::USER_MSG_BG),
+                    Style::default().fg(palette.text).bg(palette.user_msg_bg),
                 ));
                 i = j + 1;
                 continue;
@@ -399,7 +410,7 @@ pub fn parse_inline_spans(text: &str) -> Vec<Span<'static>> {
             if !plain.is_empty() {
                 spans.push(Span::styled(
                     std::mem::take(&mut plain),
-                    theme::assistant_text_style(),
+                    palette.assistant_text_style(),
                 ));
             }
             let mut j = i + 2;
@@ -411,7 +422,7 @@ pub fn parse_inline_spans(text: &str) -> Vec<Span<'static>> {
                 spans.push(Span::styled(
                     content,
                     Style::default()
-                        .fg(theme::TEXT)
+                        .fg(palette.text)
                         .add_modifier(Modifier::BOLD),
                 ));
                 i = j + 2;
@@ -424,7 +435,7 @@ pub fn parse_inline_spans(text: &str) -> Vec<Span<'static>> {
             if !plain.is_empty() {
                 spans.push(Span::styled(
                     std::mem::take(&mut plain),
-                    theme::assistant_text_style(),
+                    palette.assistant_text_style(),
                 ));
             }
             let mut j = i + 1;
@@ -436,7 +447,7 @@ pub fn parse_inline_spans(text: &str) -> Vec<Span<'static>> {
                 spans.push(Span::styled(
                     content,
                     Style::default()
-                        .fg(theme::TEXT)
+                        .fg(palette.text)
                         .add_modifier(Modifier::ITALIC),
                 ));
                 i = j + 1;
@@ -449,7 +460,7 @@ pub fn parse_inline_spans(text: &str) -> Vec<Span<'static>> {
     }
 
     if !plain.is_empty() {
-        spans.push(Span::styled(plain, theme::assistant_text_style()));
+        spans.push(Span::styled(plain, palette.assistant_text_style()));
     }
 
     if spans.is_empty() {
@@ -482,7 +493,7 @@ mod tests {
 
     #[test]
     fn test_push_delta_basic_text() {
-        let mut state = StreamingMarkdownState::new();
+        let mut state = StreamingMarkdownState::new(Palette::dark());
         state.push_delta("Hello world\n");
         assert_eq!(state.lines_cache.len(), 1);
         assert!(state.pending_line.is_empty());
@@ -490,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_push_delta_partial_line() {
-        let mut state = StreamingMarkdownState::new();
+        let mut state = StreamingMarkdownState::new(Palette::dark());
         state.push_delta("Hello");
         assert!(state.lines_cache.is_empty());
         assert_eq!(state.pending_line, "Hello");
@@ -502,7 +513,7 @@ mod tests {
 
     #[test]
     fn test_heading_detection() {
-        let mut state = StreamingMarkdownState::new();
+        let mut state = StreamingMarkdownState::new(Palette::dark());
         state.push_delta("## My Heading\n");
         assert_eq!(state.lines_cache.len(), 1);
         // The line should contain styled heading spans
@@ -512,7 +523,7 @@ mod tests {
 
     #[test]
     fn test_code_block_state_across_deltas() {
-        let mut state = StreamingMarkdownState::new();
+        let mut state = StreamingMarkdownState::new(Palette::dark());
         state.push_delta("```rust\n");
         assert_eq!(state.block_state, BlockState::CodeBlock { lang: Some("rust".to_string()) });
 
@@ -530,45 +541,45 @@ mod tests {
 
     #[test]
     fn test_unordered_list() {
-        let mut state = StreamingMarkdownState::new();
+        let mut state = StreamingMarkdownState::new(Palette::dark());
         state.push_delta("- item one\n- item two\n");
         assert_eq!(state.lines_cache.len(), 2);
     }
 
     #[test]
     fn test_ordered_list() {
-        let mut state = StreamingMarkdownState::new();
+        let mut state = StreamingMarkdownState::new(Palette::dark());
         state.push_delta("1. first\n2. second\n");
         assert_eq!(state.lines_cache.len(), 2);
     }
 
     #[test]
     fn test_inline_bold() {
-        let spans = parse_inline_spans("hello **world** there");
+        let spans = parse_inline_spans("hello **world** there", Palette::dark());
         assert!(spans.len() >= 3);
     }
 
     #[test]
     fn test_inline_code() {
-        let spans = parse_inline_spans("use `foo` here");
+        let spans = parse_inline_spans("use `foo` here", Palette::dark());
         assert!(spans.len() >= 3);
     }
 
     #[test]
     fn test_inline_italic() {
-        let spans = parse_inline_spans("this is *italic* text");
+        let spans = parse_inline_spans("this is *italic* text", Palette::dark());
         assert!(spans.len() >= 3);
     }
 
     #[test]
     fn test_render_pending_line_empty() {
-        let state = StreamingMarkdownState::new();
+        let state = StreamingMarkdownState::new(Palette::dark());
         assert!(state.render_pending_line().is_none());
     }
 
     #[test]
     fn test_render_pending_line_with_content() {
-        let mut state = StreamingMarkdownState::new();
+        let mut state = StreamingMarkdownState::new(Palette::dark());
         state.push_delta("Hello partial");
         let line = state.render_pending_line();
         assert!(line.is_some());
@@ -576,7 +587,7 @@ mod tests {
 
     #[test]
     fn test_render_pending_line_in_code_block() {
-        let mut state = StreamingMarkdownState::new();
+        let mut state = StreamingMarkdownState::new(Palette::dark());
         state.push_delta("```rust\nfn main");
         let line = state.render_pending_line();
         assert!(line.is_some());
@@ -587,7 +598,7 @@ mod tests {
 
     #[test]
     fn test_is_empty() {
-        let mut state = StreamingMarkdownState::new();
+        let mut state = StreamingMarkdownState::new(Palette::dark());
         assert!(state.is_empty());
         state.push_delta("x");
         assert!(!state.is_empty());
@@ -595,7 +606,7 @@ mod tests {
 
     #[test]
     fn test_clear() {
-        let mut state = StreamingMarkdownState::new();
+        let mut state = StreamingMarkdownState::new(Palette::dark());
         state.push_delta("## Heading\nSome text\n");
         assert!(!state.is_empty());
         state.clear();
@@ -605,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_multiple_paragraphs() {
-        let mut state = StreamingMarkdownState::new();
+        let mut state = StreamingMarkdownState::new(Palette::dark());
         state.push_delta("First paragraph.\n\nSecond paragraph.\n");
         // line 1: "First paragraph." (with bullet)
         // line 2: blank
@@ -614,8 +625,17 @@ mod tests {
     }
 
     #[test]
+    fn test_second_paragraph_uses_indent_not_second_prefix() {
+        let mut state = StreamingMarkdownState::new(Palette::dark());
+        state.push_delta("First paragraph.\n\nSecond paragraph.\n");
+
+        assert_eq!(state.lines_cache[0].spans[0].content.as_ref(), "• ");
+        assert_eq!(state.lines_cache[2].spans[0].content.as_ref(), "  ");
+    }
+
+    #[test]
     fn test_line_cache_growth() {
-        let mut state = StreamingMarkdownState::new();
+        let mut state = StreamingMarkdownState::new(Palette::dark());
         for i in 0..500 {
             state.push_delta(&format!("Line {i}\n"));
         }
@@ -624,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_heading_pending_line() {
-        let mut state = StreamingMarkdownState::new();
+        let mut state = StreamingMarkdownState::new(Palette::dark());
         state.push_delta("## Heading in progress");
         let pending = state.render_pending_line().unwrap();
         // Should be styled as heading
@@ -633,7 +653,7 @@ mod tests {
 
     #[test]
     fn test_performance_500_lines() {
-        let mut state = StreamingMarkdownState::new();
+        let mut state = StreamingMarkdownState::new(Palette::dark());
         // Push 500 lines of mixed markdown content
         for i in 0..100 {
             state.push_delta(&format!("## Heading {i}\n"));

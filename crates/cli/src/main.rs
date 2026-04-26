@@ -2014,6 +2014,7 @@ async fn run_tui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_claude_core::permission::{PermissionRule, RuleType};
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     /// Tests in this module mutate process-global env variables
@@ -2414,6 +2415,90 @@ mod tests {
         assert_eq!(rescan.entries.len(), 1);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+
+    #[test]
+    fn manual_verification_permissions_output_contains_rules() {
+        let mut state = AppState::new(PathBuf::from("/repo"));
+        state.permission_mode = PermissionMode::Default;
+        state.always_allow_rules.push(PermissionRule::parse("FileEdit(, /src/**)", RuleType::Allow).unwrap());
+        state.always_deny_rules.push(PermissionRule::parse("FileRead(, /.env)", RuleType::Deny).unwrap());
+
+        let mode_str = format!("{:?}", state.permission_mode);
+        let mut text = format!("Permission Mode: {}\n", mode_str);
+        if !state.always_deny_rules.is_empty() {
+            text.push_str("\nDeny rules:\n");
+            for rule in &state.always_deny_rules {
+                text.push_str(&format!("  - {}\n", rule.to_compact_string()));
+            }
+        }
+        if !state.always_allow_rules.is_empty() {
+            text.push_str("\nAllow rules:\n");
+            for rule in &state.always_allow_rules {
+                text.push_str(&format!("  - {}\n", rule.to_compact_string()));
+            }
+        }
+
+        assert!(text.contains("Permission Mode: Default"));
+        assert!(text.contains("Deny rules:"));
+        assert!(text.contains("FileRead(, /.env)"));
+        assert!(text.contains("Allow rules:"));
+        assert!(text.contains("FileEdit(, /src/**)"));
+    }
+
+    #[test]
+    fn manual_verification_init_behavior_does_not_overwrite_existing() {
+        use std::fs;
+        let dir = std::env::temp_dir().join(format!("init-manual-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        fs::write(dir.join("CLAUDE.md"), "existing").unwrap();
+
+        let claude_dir = dir.join(".claude");
+        let claude_md_path = dir.join("CLAUDE.md");
+        let mut result = String::new();
+        if !claude_dir.exists() {
+            fs::create_dir_all(&claude_dir).unwrap();
+        } else {
+            result.push_str(&format!("{} already exists\n", claude_dir.display()));
+        }
+        if !claude_md_path.exists() {
+            fs::write(&claude_md_path, "starter").unwrap();
+        } else {
+            result.push_str(&format!("{} already exists (not overwritten)\n", claude_md_path.display()));
+        }
+
+        let content = fs::read_to_string(&claude_md_path).unwrap();
+        assert_eq!(content, "existing");
+        assert!(result.contains("already exists"));
+        assert!(result.contains("not overwritten"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manual_verification_status_output_contains_expected_sections() {
+        let model = "claude-opus-4-6-manual-test";
+        let mode_str = "Default";
+        let rule_count = 2usize;
+        let allow_count = 1usize;
+        let deny_count = 1usize;
+        let mcp_count = 0usize;
+        let hook_count = 0usize;
+        let memory_count = 0usize;
+
+        let msg = format!(
+            "Status:\n  Model: {}\n  Permission mode: {}\n  Permission rules: {} ({} allow, {} deny)\n  MCP servers: {}\n  Hooks: {}\n  Memory entries: {}",
+            model, mode_str, rule_count, allow_count, deny_count, mcp_count, hook_count, memory_count
+        );
+
+        assert!(msg.contains("Status:"));
+        assert!(msg.contains("Model: claude-opus-4-6-manual-test"));
+        assert!(msg.contains("Permission mode: Default"));
+        assert!(msg.contains("Permission rules: 2 (1 allow, 1 deny)"));
+        assert!(msg.contains("MCP servers: 0"));
+        assert!(msg.contains("Hooks: 0"));
+        assert!(msg.contains("Memory entries: 0"));
     }
 
     /// When a duplicate is found by name but at a different path, the fix

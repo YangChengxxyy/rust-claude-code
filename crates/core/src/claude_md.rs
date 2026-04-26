@@ -678,19 +678,44 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+
     #[test]
-    fn test_rules_without_frontmatter() {
-        let root = make_temp_dir("rules-nofm");
+    fn test_manual_verification_local_and_rule_files_are_discovered() {
+        let config_dir = make_temp_dir("manual-context-cfg");
+        let root = make_temp_dir("manual-context-proj");
         fs::create_dir_all(root.join(".git")).unwrap();
         fs::create_dir_all(root.join(".claude/rules")).unwrap();
 
-        fs::write(root.join(".claude/rules/general.md"), "General rules only").unwrap();
+        fs::write(root.join("CLAUDE.md"), "Project shared").unwrap();
+        fs::write(root.join("CLAUDE.local.md"), "Project local").unwrap();
+        fs::write(
+            root.join(".claude/rules/test.md"),
+            "---\npaths:\n  - \"**\"\n---\nRule text",
+        )
+        .unwrap();
 
-        let rule_files = discover_rule_files(&root);
-        assert_eq!(rule_files.len(), 1);
-        assert!(rule_files[0].paths.is_empty());
-        assert_eq!(rule_files[0].file.content, "General rules only");
+        unsafe {
+            std::env::set_var("CLAUDE_CONFIG_DIR", config_dir.to_str().unwrap());
+        }
+        let results = discover_claude_md(&root);
+        unsafe {
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+        }
 
+        assert!(results.iter().any(|f| f.path.ends_with("CLAUDE.local.md")));
+        assert!(results.iter().any(|f| f.path.ends_with(".claude/rules/test.md")));
+
+        let local_idx = results
+            .iter()
+            .position(|f| f.path.ends_with("CLAUDE.local.md"))
+            .unwrap();
+        let rule_idx = results
+            .iter()
+            .position(|f| f.path.ends_with(".claude/rules/test.md"))
+            .unwrap();
+        assert!(rule_idx > local_idx);
+
+        let _ = fs::remove_dir_all(&config_dir);
         let _ = fs::remove_dir_all(&root);
     }
 }

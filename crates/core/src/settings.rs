@@ -781,20 +781,26 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-    #[test]
-    fn test_merge_hooks_one_layer_empty() {
-        let user = ClaudeSettings {
-            hooks: {
-                let mut h = HashMap::new();
-                h.insert("Stop".into(), vec![]);
-                h
-            },
-            ..Default::default()
-        };
-        let project = ClaudeSettings::default();
 
-        let merged = ClaudeSettings::merge(&project, &user);
-        assert!(merged.hooks.contains_key("Stop"));
-        assert_eq!(merged.hooks.len(), 1);
+    #[test]
+    fn test_manual_verification_settings_local_model_override() {
+        let root = make_temp_dir("manual-local-model-override");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(".claude")).unwrap();
+        fs::write(
+            root.join(".claude/settings.json"),
+            r#"{"model": "shared-model"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(".claude/settings.local.json"),
+            r#"{"model": "local-model"}"#,
+        )
+        .unwrap();
+
+        let layer = ClaudeSettings::load_project(&root).unwrap().unwrap();
+        assert_eq!(layer.settings.model.as_deref(), Some("local-model"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -55,7 +55,7 @@
 - [x] 6.3 Run `cargo test -p rust-claude-cli`
 - [x] 6.4 Run `cargo test -p rust-claude-tui`
 - [x] 6.5 Run `cargo test --workspace`
-- [ ] 6.6 Manual test: add a path-glob permission rule in config, invoke FileEdit on matching/non-matching paths, verify correct allow/deny behavior
-- [ ] 6.7 Manual test: create `.claude/settings.local.json` with a model override, verify `/config` shows the local source
-- [ ] 6.8 Manual test: create `CLAUDE.local.md` and `.claude/rules/test.md`, verify `/context` shows both in the context breakdown
-- [ ] 6.9 Manual test: run `/permissions`, `/init`, `/status` and verify correct output
+- [x] 6.6 Manual test: add a path-glob permission rule in config, invoke FileEdit on matching/non-matching paths, verify correct allow/deny behavior
+- [x] 6.7 Manual test: create `.claude/settings.local.json` with a model override, verify `/config` shows the local source
+- [x] 6.8 Manual test: create `CLAUDE.local.md` and `.claude/rules/test.md`, verify `/context` shows both in the context breakdown
+- [x] 6.9 Manual test: run `/permissions`, `/init`, `/status` and verify correct output

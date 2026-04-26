@@ -1616,10 +1616,7 @@ mod tests {
             is_read_only: false,
             file_path: Some("/repo/other/file.rs"),
         });
-        assert!(matches!(
-            non_matching,
-            PermissionCheck::NeedsConfirmation { .. }
-        ));
+        assert!(matches!(non_matching, PermissionCheck::NeedsConfirmation { .. }));
 
         let denied = manager.check_permission(PermissionRequest {
             tool_name: "FileEdit",
@@ -1628,5 +1625,33 @@ mod tests {
             file_path: Some("/repo/target/generated.rs"),
         });
         assert!(matches!(denied, PermissionCheck::Denied { .. }));
+    }
+
+    #[test]
+    fn test_ask_rule_with_path_pattern() {
+        let mut manager = PermissionManager::new(PermissionMode::Default);
+        manager.project_root = Some(PathBuf::from("/repo"));
+        manager.add_ask_rule(PermissionRule {
+            tool_name: "FileEdit".to_string(),
+            pattern: None,
+            path_pattern: Some("/config/**".to_string()),
+            rule_type: RuleType::Ask,
+        });
+
+        let check = manager.check_permission(PermissionRequest {
+            tool_name: "FileEdit",
+            command: None,
+            is_read_only: false,
+            file_path: Some("/repo/config/app.json"),
+        });
+        assert!(matches!(check, PermissionCheck::NeedsConfirmation { .. }));
+
+        let check = manager.check_permission(PermissionRequest {
+            tool_name: "FileEdit",
+            command: None,
+            is_read_only: false,
+            file_path: Some("/repo/src/main.rs"),
+        });
+        assert!(matches!(check, PermissionCheck::NeedsConfirmation { .. }));
     }
 }

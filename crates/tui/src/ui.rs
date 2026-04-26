@@ -59,10 +59,7 @@ pub fn build_chat_lines(app: &App) -> Vec<Line<'static>> {
             "[Thinking]".to_string()
         };
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("{} ", theme::BLACK_CIRCLE),
-                palette.spinner_style(),
-            ),
+            Span::styled(format!("{} ", theme::BLACK_CIRCLE), palette.spinner_style()),
             Span::styled(
                 header_text,
                 Style::default()
@@ -81,9 +78,7 @@ pub fn build_chat_lines(app: &App) -> Vec<Line<'static>> {
                 let styled_spans: Vec<Span> = cached_line
                     .spans
                     .iter()
-                    .map(|span| {
-                        Span::styled(span.content.to_string(), thinking_style)
-                    })
+                    .map(|span| Span::styled(span.content.to_string(), thinking_style))
                     .collect();
                 lines.push(Line::from(styled_spans));
             }
@@ -91,9 +86,7 @@ pub fn build_chat_lines(app: &App) -> Vec<Line<'static>> {
                 let styled_spans: Vec<Span> = pending
                     .spans
                     .iter()
-                    .map(|span| {
-                        Span::styled(span.content.to_string(), thinking_style)
-                    })
+                    .map(|span| Span::styled(span.content.to_string(), thinking_style))
                     .collect();
                 lines.push(Line::from(styled_spans));
             }
@@ -115,14 +108,8 @@ pub fn build_chat_lines(app: &App) -> Vec<Line<'static>> {
         let display_name = ChatMessage::user_facing_tool_name(&tool_state.name);
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("{} ", theme::BLACK_CIRCLE),
-                palette.bullet_style(),
-            ),
-            Span::styled(
-                format!("{display_name} "),
-                palette.tool_name_style(),
-            ),
+            Span::styled(format!("{} ", theme::BLACK_CIRCLE), palette.bullet_style()),
+            Span::styled(format!("{display_name} "), palette.tool_name_style()),
             Span::styled("constructing...", palette.tool_desc_style()),
         ]));
         if !tool_state.accumulated_json.is_empty() {
@@ -174,15 +161,29 @@ fn count_visual_lines(lines: &[Line<'static>], viewport_width: u16) -> u16 {
 }
 
 fn line_display_width(line: &Line<'static>) -> usize {
-    let width: usize = line.spans.iter().map(|span| display_width(span.content.as_ref())).sum();
+    let width: usize = line
+        .spans
+        .iter()
+        .map(|span| display_width(span.content.as_ref()))
+        .sum();
     width.max(1)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MarkdownBlock {
-    Heading { level: usize, text: String },
-    ListItem { ordered: bool, marker: String, text: String },
-    CodeBlock { language: Option<String>, code: String },
+    Heading {
+        level: usize,
+        text: String,
+    },
+    ListItem {
+        ordered: bool,
+        marker: String,
+        text: String,
+    },
+    CodeBlock {
+        language: Option<String>,
+        code: String,
+    },
     Paragraph(String),
     Blank,
 }
@@ -224,6 +225,10 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     if app.permission_dialog.is_some() {
         draw_permission_dialog(f, app, full);
+    }
+
+    if app.session_picker.is_some() {
+        draw_session_picker(f, app, full);
     }
 }
 
@@ -285,16 +290,25 @@ fn render_message(
                 Span::styled(
                     format!(" {prefix} "),
                     if is_selected {
-                        Style::default().fg(palette.claude).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(palette.claude)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(palette.subtle)
                     },
                 ),
-                Span::styled("Thinking", palette.spinner_style().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Thinking",
+                    palette.spinner_style().add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(" — "),
                 Span::styled(summary.clone(), Style::default().fg(palette.inactive)),
                 Span::styled(
-                    if is_expanded { " [Tab to collapse]" } else { " [Tab to expand]" },
+                    if is_expanded {
+                        " [Tab to collapse]"
+                    } else {
+                        " [Tab to expand]"
+                    },
                     Style::default().fg(palette.subtle),
                 ),
             ]));
@@ -307,7 +321,11 @@ fn render_message(
                 }
             }
         }
-        ChatMessage::ToolUse { name, input_summary, diff_lines } => {
+        ChatMessage::ToolUse {
+            name,
+            input_summary,
+            diff_lines,
+        } => {
             let display_name = ChatMessage::user_facing_tool_name(name);
 
             if name == "Bash" {
@@ -427,23 +445,39 @@ fn render_markdown_message(text: &str, lines: &mut Vec<Line<'static>>, palette: 
                     lines.push(Line::from(""));
                 }
                 let style = match level {
-                    1 => Style::default().fg(palette.claude).add_modifier(Modifier::BOLD),
-                    2 => Style::default().fg(palette.suggestion).add_modifier(Modifier::BOLD),
-                    _ => Style::default().fg(palette.text).add_modifier(Modifier::BOLD),
+                    1 => Style::default()
+                        .fg(palette.claude)
+                        .add_modifier(Modifier::BOLD),
+                    2 => Style::default()
+                        .fg(palette.suggestion)
+                        .add_modifier(Modifier::BOLD),
+                    _ => Style::default()
+                        .fg(palette.text)
+                        .add_modifier(Modifier::BOLD),
                 };
                 let prefix = if !used_message_prefix {
                     used_message_prefix = true;
-                    Span::styled(format!("{} ", theme::ASSISTANT_BULLET), palette.bullet_style())
+                    Span::styled(
+                        format!("{} ", theme::ASSISTANT_BULLET),
+                        palette.bullet_style(),
+                    )
                 } else {
                     Span::raw("  ")
                 };
                 lines.push(Line::from(vec![prefix, Span::styled(text, style)]));
             }
-            MarkdownBlock::ListItem { ordered: _, marker, text } => {
+            MarkdownBlock::ListItem {
+                ordered: _,
+                marker,
+                text,
+            } => {
                 lines.push(Line::from(vec![
                     Span::raw("  "),
-                    Span::styled(format!("{marker} "), Style::default().fg(palette.suggestion)),
-                    ]));
+                    Span::styled(
+                        format!("{marker} "),
+                        Style::default().fg(palette.suggestion),
+                    ),
+                ]));
                 if let Some(last) = lines.last_mut() {
                     last.spans.extend(parse_inline_spans(&text, palette));
                 }
@@ -462,13 +496,13 @@ fn render_markdown_message(text: &str, lines: &mut Vec<Line<'static>>, palette: 
                 };
                 lines.push(Line::from(vec![
                     Span::raw(code_prefix),
-                    Span::styled(format!("┌─ {title}"), Style::default().fg(palette.bash_border)),
+                    Span::styled(
+                        format!("┌─ {title}"),
+                        Style::default().fg(palette.bash_border),
+                    ),
                 ]));
-                let highlighted = crate::highlight::highlight_code_block(
-                    &code,
-                    language.as_deref(),
-                    &palette,
-                );
+                let highlighted =
+                    crate::highlight::highlight_code_block(&code, language.as_deref(), &palette);
                 for highlighted_line in highlighted {
                     let mut spans = vec![
                         Span::raw("  "),
@@ -562,9 +596,7 @@ fn parse_markdown_blocks(text: &str) -> Vec<MarkdownBlock> {
         }
 
         let heading_level = trimmed.chars().take_while(|c| *c == '#').count();
-        if (1..=3).contains(&heading_level)
-            && trimmed.chars().nth(heading_level) == Some(' ')
-        {
+        if (1..=3).contains(&heading_level) && trimmed.chars().nth(heading_level) == Some(' ') {
             flush_paragraph(&mut paragraph, &mut blocks);
             blocks.push(MarkdownBlock::Heading {
                 level: heading_level,
@@ -573,7 +605,10 @@ fn parse_markdown_blocks(text: &str) -> Vec<MarkdownBlock> {
             continue;
         }
 
-        if let Some(text) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+        if let Some(text) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
             flush_paragraph(&mut paragraph, &mut blocks);
             blocks.push(MarkdownBlock::ListItem {
                 ordered: false,
@@ -639,7 +674,10 @@ fn parse_inline_spans(text: &str, palette: Palette) -> Vec<Span<'static>> {
     while i < chars.len() {
         if chars[i] == '`' {
             if !plain.is_empty() {
-                spans.push(Span::styled(std::mem::take(&mut plain), palette.assistant_text_style()));
+                spans.push(Span::styled(
+                    std::mem::take(&mut plain),
+                    palette.assistant_text_style(),
+                ));
             }
             let mut j = i + 1;
             while j < chars.len() && chars[j] != '`' {
@@ -649,9 +687,7 @@ fn parse_inline_spans(text: &str, palette: Palette) -> Vec<Span<'static>> {
                 let content: String = chars[i + 1..j].iter().collect();
                 spans.push(Span::styled(
                     content,
-                    Style::default()
-                        .fg(palette.text)
-                        .bg(palette.user_msg_bg),
+                    Style::default().fg(palette.text).bg(palette.user_msg_bg),
                 ));
                 i = j + 1;
                 continue;
@@ -660,7 +696,10 @@ fn parse_inline_spans(text: &str, palette: Palette) -> Vec<Span<'static>> {
 
         if i + 1 < chars.len() && chars[i] == '*' && chars[i + 1] == '*' {
             if !plain.is_empty() {
-                spans.push(Span::styled(std::mem::take(&mut plain), palette.assistant_text_style()));
+                spans.push(Span::styled(
+                    std::mem::take(&mut plain),
+                    palette.assistant_text_style(),
+                ));
             }
             let mut j = i + 2;
             while j + 1 < chars.len() && !(chars[j] == '*' && chars[j + 1] == '*') {
@@ -670,7 +709,9 @@ fn parse_inline_spans(text: &str, palette: Palette) -> Vec<Span<'static>> {
                 let content: String = chars[i + 2..j].iter().collect();
                 spans.push(Span::styled(
                     content,
-                    Style::default().fg(palette.text).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(palette.text)
+                        .add_modifier(Modifier::BOLD),
                 ));
                 i = j + 2;
                 continue;
@@ -679,7 +720,10 @@ fn parse_inline_spans(text: &str, palette: Palette) -> Vec<Span<'static>> {
 
         if chars[i] == '*' {
             if !plain.is_empty() {
-                spans.push(Span::styled(std::mem::take(&mut plain), palette.assistant_text_style()));
+                spans.push(Span::styled(
+                    std::mem::take(&mut plain),
+                    palette.assistant_text_style(),
+                ));
             }
             let mut j = i + 1;
             while j < chars.len() && chars[j] != '*' {
@@ -689,7 +733,9 @@ fn parse_inline_spans(text: &str, palette: Palette) -> Vec<Span<'static>> {
                 let content: String = chars[i + 1..j].iter().collect();
                 spans.push(Span::styled(
                     content,
-                    Style::default().fg(palette.text).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(palette.text)
+                        .add_modifier(Modifier::ITALIC),
                 ));
                 i = j + 1;
                 continue;
@@ -713,13 +759,9 @@ fn parse_inline_spans(text: &str, palette: Palette) -> Vec<Span<'static>> {
 fn draw_spinner_line(f: &mut Frame, app: &App, area: Rect) {
     let palette = app.palette();
     let content = if app.is_thinking {
-        Line::from(vec![
-            Span::styled("Thinking…", palette.spinner_style()),
-        ])
+        Line::from(vec![Span::styled("Thinking…", palette.spinner_style())])
     } else if app.is_streaming {
-        Line::from(vec![
-            Span::styled("Streaming…", palette.spinner_style()),
-        ])
+        Line::from(vec![Span::styled("Streaming…", palette.spinner_style())])
     } else {
         Line::from("")
     };
@@ -739,7 +781,11 @@ fn draw_input_area(f: &mut Frame, app: &App, area: Rect) {
         .borders(Borders::ALL)
         .border_set(border::ROUNDED)
         .border_style(border_style)
-        .title(if app.is_streaming { " Input (locked) " } else { " Input " });
+        .title(if app.is_streaming {
+            " Input (locked) "
+        } else {
+            " Input "
+        });
 
     let input_style = if app.is_streaming {
         palette.input_disabled_style()
@@ -751,8 +797,7 @@ fn draw_input_area(f: &mut Frame, app: &App, area: Rect) {
     // Do NOT enable .wrap() — the cursor position calculation maps logical
     // lines 1-to-1 to visual lines.  Wrapping would cause cursor misplacement
     // because the Y offset is derived from the logical line number.
-    let paragraph = Paragraph::new(input_text)
-        .block(block);
+    let paragraph = Paragraph::new(input_text).block(block);
 
     f.render_widget(paragraph, area);
 
@@ -764,7 +809,10 @@ fn draw_input_area(f: &mut Frame, app: &App, area: Rect) {
             .nth(row)
             .unwrap_or_default()
             .to_string();
-        let cursor_x = area.x + 1 + 2 + display_width(&current_line[..char_to_byte(&current_line, col)]) as u16;
+        let cursor_x = area.x
+            + 1
+            + 2
+            + display_width(&current_line[..char_to_byte(&current_line, col)]) as u16;
         let cursor_y = area.y + 1 + row as u16;
         f.set_cursor(
             cursor_x.min(area.right().saturating_sub(1)),
@@ -776,14 +824,12 @@ fn draw_input_area(f: &mut Frame, app: &App, area: Rect) {
 fn build_input_text(app: &App, input_style: Style) -> Text<'static> {
     let text = app.input_text();
     if text.is_empty() && !app.is_streaming {
-        return Text::from(Line::from(vec![
-            Span::styled(
-                "> ",
-                Style::default()
-                    .fg(app.palette().suggestion)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        return Text::from(Line::from(vec![Span::styled(
+            "> ",
+            Style::default()
+                .fg(app.palette().suggestion)
+                .add_modifier(Modifier::BOLD),
+        )]));
     }
 
     let mut lines = Vec::new();
@@ -868,7 +914,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let line = Line::from(vec![
         Span::styled(
             &left,
-            Style::default().fg(palette.claude).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(palette.claude)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled(padding, palette.status_bar_style()),
         Span::styled(&right, palette.status_bar_style()),
@@ -921,13 +969,22 @@ fn draw_permission_dialog_compact(
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Tool: ".to_string(), Style::default().fg(palette.inactive)),
+            Span::styled(
+                "  Tool: ".to_string(),
+                Style::default().fg(palette.inactive),
+            ),
             Span::styled(display_name.to_string(), palette.tool_name_style()),
         ]),
         Line::from(vec![
-            Span::styled("  Args: ".to_string(), Style::default().fg(palette.inactive)),
             Span::styled(
-                truncate_display(&dialog.input_summary, (dialog_width as usize).saturating_sub(10)),
+                "  Args: ".to_string(),
+                Style::default().fg(palette.inactive),
+            ),
+            Span::styled(
+                truncate_display(
+                    &dialog.input_summary,
+                    (dialog_width as usize).saturating_sub(10),
+                ),
                 Style::default().fg(palette.text),
             ),
         ]),
@@ -991,7 +1048,10 @@ fn draw_permission_dialog_with_diff(
     let mut header_lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Tool: ".to_string(), Style::default().fg(palette.inactive)),
+            Span::styled(
+                "  Tool: ".to_string(),
+                Style::default().fg(palette.inactive),
+            ),
             Span::styled(display_name.to_string(), palette.tool_name_style()),
         ]),
     ];
@@ -999,7 +1059,10 @@ fn draw_permission_dialog_with_diff(
     // File path with optional replace_all indicator
     if let Some(ref path) = dialog.file_path {
         let mut path_spans = vec![
-            Span::styled("  File: ".to_string(), Style::default().fg(palette.inactive)),
+            Span::styled(
+                "  File: ".to_string(),
+                Style::default().fg(palette.inactive),
+            ),
             Span::styled(path.clone(), Style::default().fg(palette.text)),
         ];
         if dialog.replace_all {
@@ -1023,7 +1086,9 @@ fn draw_permission_dialog_with_diff(
             let rendered = crate::diff::render_diff_lines(diff_lines, palette, chunks[1].width);
             let total_lines = rendered.len();
             let visible_lines = diff_height as usize;
-            let scroll = dialog.diff_scroll.min(total_lines.saturating_sub(visible_lines));
+            let scroll = dialog
+                .diff_scroll
+                .min(total_lines.saturating_sub(visible_lines));
 
             // Scroll indicator
             let mut diff_display_lines: Vec<Line<'static>> = Vec::new();
@@ -1078,6 +1143,97 @@ fn render_permission_options(lines: &mut Vec<Line<'static>>, selected: usize, pa
             Span::styled(*label, style),
         ]));
     }
+}
+
+fn draw_session_picker(f: &mut Frame, app: &App, area: Rect) {
+    let picker = match &app.session_picker {
+        Some(picker) => picker,
+        None => return,
+    };
+    let palette = app.palette();
+    let width = ((area.width as u32 * 85 / 100) as u16)
+        .min(120)
+        .max(50)
+        .min(area.width.saturating_sub(4));
+    let height = ((area.height as u32 * 70 / 100) as u16)
+        .min(area.height.saturating_sub(2))
+        .max(12);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let picker_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, picker_area);
+    let block = Block::default()
+        .title(" Resume Session ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_set(border::ROUNDED)
+        .border_style(Style::default().fg(palette.claude));
+    let inner = block.inner(picker_area);
+    f.render_widget(block, picker_area);
+
+    let mut lines = Vec::new();
+    if picker.loading {
+        lines.push(Line::from(Span::styled(
+            "  Loading recent sessions...",
+            Style::default().fg(palette.inactive),
+        )));
+    } else if let Some(error) = &picker.error {
+        lines.push(Line::from(Span::styled(
+            format!("  {error}"),
+            Style::default().fg(palette.error),
+        )));
+    } else if picker.sessions.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  No saved sessions found.",
+            Style::default().fg(palette.inactive),
+        )));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "  Updated              ",
+                Style::default().fg(palette.inactive),
+            ),
+            Span::styled("Model        ", Style::default().fg(palette.inactive)),
+            Span::styled("Msgs  Summary", Style::default().fg(palette.inactive)),
+        ]));
+        let visible_rows = inner.height.saturating_sub(3) as usize;
+        let end = (picker.scroll + visible_rows).min(picker.sessions.len());
+        for (idx, session) in picker.sessions[picker.scroll..end].iter().enumerate() {
+            let absolute_idx = picker.scroll + idx;
+            let selected = absolute_idx == picker.selected;
+            let prefix = if selected { "> " } else { "  " };
+            let style = if selected {
+                Style::default()
+                    .fg(palette.claude)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text)
+            };
+            let updated = truncate_display(&session.updated_at, 20);
+            let model = truncate_display(&session.model_setting, 12);
+            let summary_width = inner.width.saturating_sub(43) as usize;
+            let summary = truncate_display(&session.first_user_summary, summary_width.max(10));
+            lines.push(Line::from(vec![
+                Span::styled(prefix.to_string(), style),
+                Span::styled(format!("{updated:<20} "), style),
+                Span::styled(format!("{model:<12} "), style),
+                Span::styled(format!("{:<4} ", session.message_count), style),
+                Span::styled(summary, style),
+            ]));
+        }
+        let mut footer = String::from("  Enter resume  Esc cancel  ↑↓ select");
+        if picker.skipped > 0 {
+            footer.push_str(&format!("  skipped {} unreadable", picker.skipped));
+        }
+        lines.push(Line::from(Span::styled(
+            footer,
+            Style::default().fg(palette.inactive),
+        )));
+    }
+
+    let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    f.render_widget(paragraph, inner);
 }
 
 fn draw_todo_panel(f: &mut Frame, app: &App, area: Rect) {
@@ -1198,8 +1354,12 @@ mod tests {
     fn test_parse_markdown_heading_list_code() {
         let blocks = parse_markdown_blocks("# Title\n\n- item\n\n```rust\nfn main() {}\n```");
         assert!(matches!(blocks[0], MarkdownBlock::Heading { .. }));
-        assert!(blocks.iter().any(|b| matches!(b, MarkdownBlock::ListItem { .. })));
-        assert!(blocks.iter().any(|b| matches!(b, MarkdownBlock::CodeBlock { .. })));
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, MarkdownBlock::ListItem { .. })));
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, MarkdownBlock::CodeBlock { .. })));
     }
 
     #[test]
@@ -1213,7 +1373,13 @@ mod tests {
     #[test]
     fn test_tool_result_uses_bright_text_for_success() {
         let mut lines = Vec::new();
-        let app = App::new("test".into(), "test".into(), "default".into(), None, rust_claude_core::config::Theme::Dark);
+        let app = App::new(
+            "test".into(),
+            "test".into(),
+            "default".into(),
+            None,
+            rust_claude_core::config::Theme::Dark,
+        );
         render_message(
             &ChatMessage::ToolResult {
                 name: "Bash".into(),
@@ -1272,7 +1438,9 @@ mod tests {
         let line = Line::from(vec![
             Span::styled(
                 &left,
-                Style::default().fg(app.palette().claude).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(app.palette().claude)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(padding, app.palette().status_bar_style()),
             Span::styled(&right, app.palette().status_bar_style()),
@@ -1306,13 +1474,20 @@ mod tests {
         let mut lines = Vec::new();
         render_markdown_message(text, &mut lines, palette);
         // Find code lines (those with │ prefix) and check they have multiple styled spans
-        let code_lines: Vec<_> = lines.iter().filter(|l| {
-            l.spans.iter().any(|s| s.content.as_ref() == "│ ")
-        }).collect();
-        assert!(!code_lines.is_empty(), "Should have code lines with │ prefix");
+        let code_lines: Vec<_> = lines
+            .iter()
+            .filter(|l| l.spans.iter().any(|s| s.content.as_ref() == "│ "))
+            .collect();
+        assert!(
+            !code_lines.is_empty(),
+            "Should have code lines with │ prefix"
+        );
         // At least one code line should have more than 3 spans (prefix + border + highlighted tokens)
         let has_highlighting = code_lines.iter().any(|l| l.spans.len() > 3);
-        assert!(has_highlighting, "Code lines should have syntax highlighting (>3 spans)");
+        assert!(
+            has_highlighting,
+            "Code lines should have syntax highlighting (>3 spans)"
+        );
     }
 
     #[test]
@@ -1322,7 +1497,10 @@ mod tests {
         let diff_lines = diff::compute_diff("hello", "world");
         // render_diff_lines produces output for the diff
         let rendered = diff::render_diff_lines(&diff_lines, &palette, 80);
-        assert!(!rendered.is_empty(), "Small diff should produce rendered lines");
+        assert!(
+            !rendered.is_empty(),
+            "Small diff should produce rendered lines"
+        );
         // Should have both removed and added lines
         assert!(
             diff_lines.iter().any(|d| d.kind == diff::DiffKind::Removed),
@@ -1361,7 +1539,10 @@ mod tests {
             diff_lines: Some(diff_lines.clone()),
         };
         match &msg {
-            ChatMessage::ToolUse { diff_lines: Some(dl), .. } => {
+            ChatMessage::ToolUse {
+                diff_lines: Some(dl),
+                ..
+            } => {
                 assert!(!dl.is_empty());
             }
             _ => panic!("Expected ToolUse with diff_lines"),
@@ -1373,9 +1554,10 @@ mod tests {
             diff_lines: None,
         };
         match &bash_msg {
-            ChatMessage::ToolUse { diff_lines: None, .. } => {}
+            ChatMessage::ToolUse {
+                diff_lines: None, ..
+            } => {}
             _ => panic!("Bash ToolUse should have diff_lines: None"),
         }
     }
 }
-

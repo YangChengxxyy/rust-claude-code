@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -10,9 +11,10 @@ use rust_claude_core::{
     hooks::HooksConfig,
     mcp_config::McpServersConfig,
     memory,
-    message::ContentBlock,
+    message::{ContentBlock, Message, Role, Usage},
     model::get_runtime_main_loop_model,
     permission::PermissionMode,
+    session::{ContextSnapshot, SessionSummary},
     settings::{ClaudeSettings, ParsedPermissions, SettingsLayer},
     state::AppState,
 };
@@ -22,7 +24,7 @@ use rust_claude_tools::{
     FileWriteTool, GlobTool, GrepTool, LspTool, NotebookEditTool, TaskTool, ToolRegistry,
     WebFetchTool, WebSearchTool,
 };
-use rust_claude_tui::{App, AppEvent, TerminalGuard, TuiBridge, UserCommand};
+use rust_claude_tui::{App, AppEvent, ChatMessage, TerminalGuard, TuiBridge, UserCommand};
 use tokio::sync::{mpsc, Mutex};
 
 use rust_claude_cli::compaction::CompactionService;
@@ -462,33 +464,12 @@ async fn main() -> Result<()> {
     state.always_allow_rules = resolved.always_allow.clone();
     state.always_deny_rules = resolved.always_deny.clone();
 
-    // Helper: restore full session state from a loaded SessionFile.
-    let restore_session = |state: &mut rust_claude_core::state::AppState,
-                           prev: &session::SessionFile| {
-        state.messages = prev.messages.clone();
-        if !prev.model_setting.is_empty() {
-            state.session.model_setting = prev.model_setting.clone();
-        }
-        if let Some(usage) = &prev.total_usage {
-            state.total_usage = usage.clone();
-        }
-        state.permission_mode = prev.permission_mode;
-        if !prev.always_allow_rules.is_empty() {
-            state.always_allow_rules = prev.always_allow_rules.clone();
-        }
-        if !prev.always_deny_rules.is_empty() {
-            state.always_deny_rules = prev.always_deny_rules.clone();
-        }
-        state.session.model =
-            get_runtime_main_loop_model(&state.session.model_setting, state.permission_mode, false);
-    };
-
     if let Some(session_id) = &cli.resume_session {
         match session::load_session_by_id(session_id) {
             Ok(Some(prev)) => {
                 let msg_count = prev.messages.len();
                 let id = prev.id.clone();
-                restore_session(&mut state, &prev);
+                session::restore_app_state_from_session(&mut state, &prev);
                 println!("Resumed session {} ({} messages)", id, msg_count);
             }
             Ok(None) => return Err(anyhow!("session '{}' not found", session_id)),
@@ -499,7 +480,7 @@ async fn main() -> Result<()> {
             Ok(Some(prev)) => {
                 let msg_count = prev.messages.len();
                 let id = prev.id.clone();
-                restore_session(&mut state, &prev);
+                session::restore_app_state_from_session(&mut state, &prev);
                 println!("Continuing session {} ({} messages)", id, msg_count);
             }
             Ok(None) => {
@@ -1025,6 +1006,246 @@ fn build_tools() -> ToolRegistry {
     tools
 }
 
+fn usage_to_u64(usage: &Usage) -> (u64, u64, u64, u64) {
+    (
+        usage.input_tokens as u64,
+        usage.output_tokens as u64,
+        usage.cache_read_input_tokens as u64,
+        usage.cache_creation_input_tokens as u64,
+    )
+}
+
+fn messages_to_chat_messages(messages: &[Message]) -> Vec<ChatMessage> {
+    let mut out = Vec::new();
+    for message in messages {
+        for block in &message.content {
+            match (message.role.clone(), block) {
+                (Role::User, ContentBlock::Text { text }) => {
+                    out.push(ChatMessage::User(text.clone()))
+                }
+                (
+                    Role::User,
+                    ContentBlock::ToolResult {
+                        content, is_error, ..
+                    },
+                ) => out.push(ChatMessage::ToolResult {
+                    name: "Tool".into(),
+                    output_summary: content.clone(),
+                    is_error: *is_error,
+                }),
+                (Role::Assistant, ContentBlock::Text { text }) => {
+                    out.push(ChatMessage::Assistant(text.clone()))
+                }
+                (Role::Assistant, ContentBlock::Thinking { thinking, .. }) => {
+                    out.push(ChatMessage::Thinking {
+                        summary: format!("Thought for ~{} chars", thinking.chars().count()),
+                        content: thinking.clone(),
+                    })
+                }
+                (Role::Assistant, ContentBlock::ToolUse { name, input, .. }) => {
+                    out.push(ChatMessage::ToolUse {
+                        name: name.clone(),
+                        input_summary: serde_json::to_string(input).unwrap_or_default(),
+                        diff_lines: None,
+                    })
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+fn model_context_capacity(model: &str) -> Option<u32> {
+    let lower = model.to_ascii_lowercase();
+    if lower.contains("[1m]") || lower.contains("1m") {
+        Some(1_000_000)
+    } else if lower.contains("claude-") {
+        Some(200_000)
+    } else {
+        None
+    }
+}
+
+fn estimate_tokens(text: &str) -> u32 {
+    ((text.chars().count() as u32).saturating_add(3) / 4).max(1)
+}
+
+fn estimate_block_tokens(block: &ContentBlock) -> u32 {
+    match block {
+        ContentBlock::Text { text } => estimate_tokens(text),
+        ContentBlock::ToolUse { input, .. } => estimate_tokens(&input.to_string()),
+        ContentBlock::ToolResult { content, .. } => estimate_tokens(content),
+        ContentBlock::Thinking { thinking, .. } => estimate_tokens(thinking),
+        ContentBlock::Image { .. } => 1000,
+        ContentBlock::Unknown => 0,
+    }
+}
+
+fn build_context_snapshot(state: &AppState) -> ContextSnapshot {
+    let system_prompt_tokens = state
+        .session
+        .system_prompt
+        .as_ref()
+        .map(|prompt| estimate_tokens(prompt))
+        .unwrap_or(0);
+    let mut message_tokens = 0u32;
+    let mut tool_result_tokens = 0u32;
+    for message in &state.messages {
+        for block in &message.content {
+            let tokens = estimate_block_tokens(block);
+            if matches!(block, ContentBlock::ToolResult { .. }) {
+                tool_result_tokens = tool_result_tokens.saturating_add(tokens);
+            } else {
+                message_tokens = message_tokens.saturating_add(tokens);
+            }
+        }
+    }
+
+    let reported_used = state
+        .total_usage
+        .input_tokens
+        .saturating_add(state.total_usage.cache_read_input_tokens)
+        .saturating_add(state.total_usage.cache_creation_input_tokens);
+    let estimated_used = system_prompt_tokens
+        .saturating_add(message_tokens)
+        .saturating_add(tool_result_tokens);
+    let used_tokens = reported_used.max(estimated_used);
+    let context_capacity = model_context_capacity(&state.session.model);
+    let remaining_tokens = context_capacity.map(|capacity| capacity.saturating_sub(used_tokens));
+
+    ContextSnapshot {
+        model: state.session.model.clone(),
+        context_capacity,
+        used_tokens,
+        system_prompt_tokens,
+        message_tokens,
+        tool_result_tokens,
+        remaining_tokens,
+    }
+}
+
+fn default_export_path() -> PathBuf {
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("rust-claude-code")
+        .join("exports")
+        .join(format!("session-{timestamp}.md"))
+}
+
+fn format_transcript_markdown(state: &AppState) -> String {
+    let mut out = String::new();
+    out.push_str("# rust-claude conversation export\n\n");
+    out.push_str(&format!("- Model: `{}`\n", state.session.model));
+    out.push_str(&format!(
+        "- Model setting: `{}`\n",
+        state.session.model_setting
+    ));
+    out.push_str(&format!("- Working directory: `{}`\n", state.cwd.display()));
+    out.push_str(&format!(
+        "- Exported at: `{}`\n",
+        chrono::Local::now().to_rfc3339()
+    ));
+    out.push_str(&format!("- Messages: `{}`\n\n", state.messages.len()));
+
+    for (idx, message) in state.messages.iter().enumerate() {
+        let role = match message.role {
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+        };
+        out.push_str(&format!("## {}. {}\n\n", idx + 1, role));
+        for block in &message.content {
+            match block {
+                ContentBlock::Text { text } => {
+                    out.push_str(text);
+                    out.push_str("\n\n");
+                }
+                ContentBlock::Thinking { thinking, .. } => {
+                    out.push_str("### Thinking\n\n```text\n");
+                    out.push_str(thinking);
+                    out.push_str("\n```\n\n");
+                }
+                ContentBlock::ToolUse { id, name, input } => {
+                    out.push_str(&format!("### Tool Use: {name} ({id})\n\n```json\n"));
+                    out.push_str(
+                        &serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string()),
+                    );
+                    out.push_str("\n```\n\n");
+                }
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => {
+                    out.push_str(&format!(
+                        "### Tool Result: {tool_use_id}{}\n\n```text\n",
+                        if *is_error { " (error)" } else { "" }
+                    ));
+                    out.push_str(content);
+                    out.push_str("\n```\n\n");
+                }
+                ContentBlock::Image { .. } => {
+                    out.push_str("[image content]\n\n");
+                }
+                ContentBlock::Unknown => {
+                    out.push_str("[unknown content block]\n\n");
+                }
+            }
+        }
+    }
+    out
+}
+
+fn export_conversation(state: &AppState, path: Option<PathBuf>) -> Result<PathBuf> {
+    let path = path.unwrap_or_else(default_export_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, format_transcript_markdown(state))?;
+    Ok(path)
+}
+
+fn latest_assistant_text(messages: &[Message]) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::Assistant)
+        .map(|message| {
+            message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn copy_to_clipboard(text: &str) -> Result<()> {
+    copy_text_with(text, |text| {
+        let mut clipboard = arboard::Clipboard::new()
+            .map_err(|e| anyhow!("clipboard provider unavailable: {e}"))?;
+        clipboard
+            .set_text(text.to_string())
+            .map_err(|e| anyhow!("failed to set clipboard text: {e}"))
+    })
+}
+
+fn copy_text_with<F>(text: &str, copy_fn: F) -> Result<()>
+where
+    F: FnOnce(&str) -> Result<()>,
+{
+    if text.trim().is_empty() {
+        return Err(anyhow!("clipboard text is empty"));
+    }
+    copy_fn(text)
+}
+
 async fn run_tui(
     app_state: Arc<Mutex<AppState>>,
     config: Config,
@@ -1208,6 +1429,177 @@ async fn run_tui(
                     worker_bridge
                         .send_assistant_message(&format!("Theme switched to: {theme_str}"))
                         .await;
+                }
+                UserCommand::LoadCustomTheme => {
+                    worker_bridge
+                        .send_assistant_message("Custom themes are loaded directly by the TUI.")
+                        .await;
+                }
+                UserCommand::ListSessions => {
+                    let result =
+                        tokio::task::spawn_blocking(|| session::list_recent_sessions_report(20))
+                            .await
+                            .unwrap_or_else(|e| Err(anyhow!("session list task join failed: {e}")));
+                    match result {
+                        Ok((sessions, skipped)) => {
+                            worker_bridge.send_session_list(sessions, skipped).await;
+                        }
+                        Err(error) => {
+                            worker_bridge
+                                .send_error(&format!("Failed to list sessions: {error}"))
+                                .await;
+                        }
+                    }
+                }
+                UserCommand::ResumeSession(session_id) => {
+                    if active_query_task
+                        .as_ref()
+                        .is_some_and(|handle| !handle.is_finished())
+                    {
+                        worker_bridge
+                            .send_error("Cannot resume another session while a response is active. Cancel or wait for it to finish first.")
+                            .await;
+                        continue;
+                    }
+
+                    let loaded = tokio::task::spawn_blocking({
+                        let session_id = session_id.clone();
+                        move || session::load_session_by_id(&session_id)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow!("session resume task join failed: {e}")));
+
+                    match loaded {
+                        Ok(Some(prev)) => {
+                            let summary: SessionSummary = prev.summary();
+                            let chat_messages = messages_to_chat_messages(&prev.messages);
+                            let (
+                                runtime_model,
+                                model_setting,
+                                permission_mode_display,
+                                git_branch,
+                                usage,
+                            ) = {
+                                let mut state = worker_state.lock().await;
+                                session::restore_app_state_from_session(&mut state, &prev);
+                                (
+                                    state.session.model.clone(),
+                                    state.session.model_setting.clone(),
+                                    format!("{:?}", state.permission_mode),
+                                    state.git_context.as_ref().map(|g| g.branch.clone()),
+                                    state.total_usage.clone(),
+                                )
+                            };
+                            let (
+                                input_tokens,
+                                output_tokens,
+                                cache_read_input_tokens,
+                                cache_creation_input_tokens,
+                            ) = usage_to_u64(&usage);
+                            worker_bridge
+                                .send_session_resumed(
+                                    summary,
+                                    chat_messages,
+                                    runtime_model,
+                                    model_setting,
+                                    permission_mode_display,
+                                    git_branch,
+                                    input_tokens,
+                                    output_tokens,
+                                    cache_read_input_tokens,
+                                    cache_creation_input_tokens,
+                                )
+                                .await;
+                        }
+                        Ok(None) => {
+                            worker_bridge
+                                .send_error(&format!("Session '{}' not found", session_id))
+                                .await;
+                        }
+                        Err(error) => {
+                            worker_bridge
+                                .send_error(&format!(
+                                    "Failed to resume session '{}': {error}",
+                                    session_id
+                                ))
+                                .await;
+                        }
+                    }
+                }
+                UserCommand::ShowContext => {
+                    let snapshot = {
+                        let state = worker_state.lock().await;
+                        build_context_snapshot(&state)
+                    };
+                    worker_bridge.send_context_snapshot(snapshot).await;
+                }
+                UserCommand::ExportConversation { path } => {
+                    let state_snapshot = { worker_state.lock().await.clone() };
+                    let result = tokio::task::spawn_blocking(move || {
+                        export_conversation(&state_snapshot, path)
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow!("export task join failed: {e}")));
+                    match result {
+                        Ok(path) => {
+                            worker_bridge
+                                .send_assistant_message(&format!(
+                                    "Exported conversation to {}",
+                                    path.display()
+                                ))
+                                .await;
+                        }
+                        Err(error) => {
+                            worker_bridge
+                                .send_error(&format!("Failed to export conversation: {error}"))
+                                .await;
+                        }
+                    }
+                }
+                UserCommand::CopyLatestAssistant => {
+                    let (text, active_stream) = {
+                        let state = worker_state.lock().await;
+                        (
+                            latest_assistant_text(&state.messages),
+                            active_query_task
+                                .as_ref()
+                                .is_some_and(|handle| !handle.is_finished()),
+                        )
+                    };
+                    match text {
+                        Some(text) => {
+                            let result =
+                                tokio::task::spawn_blocking(move || copy_to_clipboard(&text))
+                                    .await
+                                    .unwrap_or_else(|e| {
+                                        Err(anyhow!("clipboard task join failed: {e}"))
+                                    });
+                            match result {
+                                Ok(()) => {
+                                    let suffix = if active_stream {
+                                        " Previous completed assistant response copied."
+                                    } else {
+                                        ""
+                                    };
+                                    worker_bridge
+                                        .send_assistant_message(&format!(
+                                            "Copied latest assistant response to clipboard.{suffix}"
+                                        ))
+                                        .await;
+                                }
+                                Err(error) => {
+                                    worker_bridge
+                                        .send_error(&format!("Failed to copy response: {error}"))
+                                        .await;
+                                }
+                            }
+                        }
+                        None => {
+                            worker_bridge
+                                .send_assistant_message("No completed assistant response to copy.")
+                                .await;
+                        }
+                    }
                 }
                 UserCommand::ShowConfig => {
                     let provenance = { worker_state.lock().await.config_provenance.clone() };
@@ -1559,6 +1951,7 @@ mod tests {
             disallowed_tools: None,
             max_tokens: None,
             no_stream: false,
+            theme: None,
             thinking: false,
             no_thinking: false,
             verbose: false,
@@ -1605,6 +1998,7 @@ mod tests {
             disallowed_tools: None,
             max_tokens: None,
             no_stream: false,
+            theme: None,
             thinking: false,
             no_thinking: false,
             verbose: false,
@@ -1649,6 +2043,7 @@ mod tests {
             disallowed_tools: None,
             max_tokens: None,
             no_stream: false,
+            theme: None,
             thinking: false,
             no_thinking: false,
             verbose: false,
@@ -1656,6 +2051,111 @@ mod tests {
             resume_session: None,
             settings: None,
         }
+    }
+
+    #[test]
+    fn context_snapshot_uses_known_capacity_and_tool_breakdown() {
+        let mut state = AppState::new(PathBuf::from("/repo"));
+        state.session.model = "claude-sonnet-4-6".into();
+        state.session.system_prompt = Some("system prompt".into());
+        state.messages.push(Message::user("hello from the user"));
+        state.messages.push(Message::tool_results(&[(
+            "toolu_1".into(),
+            "tool output with a few words".into(),
+            false,
+        )]));
+        state.total_usage = Usage {
+            input_tokens: 100,
+            output_tokens: 25,
+            cache_creation_input_tokens: 5,
+            cache_read_input_tokens: 10,
+        };
+
+        let snapshot = build_context_snapshot(&state);
+
+        assert_eq!(snapshot.context_capacity, Some(200_000));
+        assert_eq!(snapshot.used_tokens, 115);
+        assert!(snapshot.system_prompt_tokens > 0);
+        assert!(snapshot.message_tokens > 0);
+        assert!(snapshot.tool_result_tokens > 0);
+        assert_eq!(snapshot.remaining_tokens, Some(199_885));
+    }
+
+    #[test]
+    fn context_snapshot_handles_unknown_capacity() {
+        let mut state = AppState::new(PathBuf::from("/repo"));
+        state.session.model = "local-model".into();
+        state.messages.push(Message::user("hello"));
+
+        let snapshot = build_context_snapshot(&state);
+
+        assert_eq!(snapshot.context_capacity, None);
+        assert_eq!(snapshot.remaining_tokens, None);
+        assert!(snapshot.used_tokens > 0);
+    }
+
+    #[test]
+    fn export_conversation_writes_markdown_with_metadata_and_tools() {
+        let dir = std::env::temp_dir().join(format!(
+            "export-test-{}-{}",
+            std::process::id(),
+            chrono::Local::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("conversation.md");
+
+        let mut state = AppState::new(PathBuf::from("/repo"));
+        state.session.model = "claude-sonnet-4-6".into();
+        state.session.model_setting = "sonnet".into();
+        state.messages.push(Message::user("hello"));
+        state.messages.push(Message::assistant(vec![
+            ContentBlock::text("hi"),
+            ContentBlock::tool_use("toolu_1", "Bash", serde_json::json!({"command": "pwd"})),
+        ]));
+        state.messages.push(Message::tool_results(&[(
+            "toolu_1".into(),
+            "/repo".into(),
+            false,
+        )]));
+
+        let written = export_conversation(&state, Some(path.clone())).unwrap();
+        let content = std::fs::read_to_string(&written).unwrap();
+
+        assert_eq!(written, path);
+        assert!(content.contains("# rust-claude conversation export"));
+        assert!(content.contains("- Model: `claude-sonnet-4-6`"));
+        assert!(content.contains("## 1. User"));
+        assert!(content.contains("### Tool Use: Bash"));
+        assert!(content.contains("### Tool Result: toolu_1"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn latest_assistant_text_ignores_non_text_and_selects_latest() {
+        let messages = vec![
+            Message::assistant(vec![ContentBlock::text("old")]),
+            Message::user("question"),
+            Message::assistant(vec![
+                ContentBlock::thinking("hidden"),
+                ContentBlock::text("new"),
+            ]),
+        ];
+
+        assert_eq!(latest_assistant_text(&messages), Some("new".into()));
+        assert_eq!(latest_assistant_text(&[Message::user("none")]), None);
+    }
+
+    #[test]
+    fn copy_text_with_maps_empty_and_provider_errors() {
+        let empty = copy_text_with("", |_| Ok(())).unwrap_err();
+        assert!(empty.to_string().contains("clipboard text is empty"));
+
+        let provider =
+            copy_text_with("text", |_| Err(anyhow!("provider unavailable"))).unwrap_err();
+        assert!(provider.to_string().contains("provider unavailable"));
     }
 
     /// Regression: user-scope `deny` rules must survive when a project-scope

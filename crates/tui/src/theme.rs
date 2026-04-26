@@ -2,6 +2,8 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use rust_claude_core::config::Theme as ConfigTheme;
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
@@ -141,6 +143,79 @@ pub const BLACK_CIRCLE: &str = "⏺";
 pub const ASSISTANT_BULLET: &str = "•";
 pub const RESPONSE_PREFIX: &str = "⎿";
 
+#[derive(Debug, Deserialize)]
+struct CustomThemeFile {
+    claude: String,
+    text: String,
+    subtle: String,
+    inactive: String,
+    success: String,
+    error: String,
+    warning: String,
+    bash_border: String,
+    suggestion: String,
+    prompt_border: String,
+    plan_mode: String,
+    user_msg_bg: String,
+    bash_msg_bg: String,
+    diff_added: String,
+    diff_removed: String,
+    diff_added_word: String,
+    diff_removed_word: String,
+}
+
+pub fn custom_theme_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home)
+        .join(".config")
+        .join("rust-claude-code")
+        .join("theme.json")
+}
+
+pub fn load_custom_palette_default() -> Result<Palette, String> {
+    load_custom_palette(&custom_theme_path())
+}
+
+pub fn load_custom_palette(path: &Path) -> Result<Palette, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let theme: CustomThemeFile = serde_json::from_str(&content)
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+    Ok(Palette {
+        claude: parse_rgb_color("claude", &theme.claude)?,
+        text: parse_rgb_color("text", &theme.text)?,
+        subtle: parse_rgb_color("subtle", &theme.subtle)?,
+        inactive: parse_rgb_color("inactive", &theme.inactive)?,
+        success: parse_rgb_color("success", &theme.success)?,
+        error: parse_rgb_color("error", &theme.error)?,
+        warning: parse_rgb_color("warning", &theme.warning)?,
+        bash_border: parse_rgb_color("bash_border", &theme.bash_border)?,
+        suggestion: parse_rgb_color("suggestion", &theme.suggestion)?,
+        prompt_border: parse_rgb_color("prompt_border", &theme.prompt_border)?,
+        plan_mode: parse_rgb_color("plan_mode", &theme.plan_mode)?,
+        user_msg_bg: parse_rgb_color("user_msg_bg", &theme.user_msg_bg)?,
+        bash_msg_bg: parse_rgb_color("bash_msg_bg", &theme.bash_msg_bg)?,
+        diff_added: parse_rgb_color("diff_added", &theme.diff_added)?,
+        diff_removed: parse_rgb_color("diff_removed", &theme.diff_removed)?,
+        diff_added_word: parse_rgb_color("diff_added_word", &theme.diff_added_word)?,
+        diff_removed_word: parse_rgb_color("diff_removed_word", &theme.diff_removed_word)?,
+    })
+}
+
+fn parse_rgb_color(field: &str, value: &str) -> Result<Color, String> {
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(format!("{field} must be a #RRGGBB color"));
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16)
+        .map_err(|_| format!("{field} has an invalid red channel"))?;
+    let g = u8::from_str_radix(&hex[2..4], 16)
+        .map_err(|_| format!("{field} has an invalid green channel"))?;
+    let b = u8::from_str_radix(&hex[4..6], 16)
+        .map_err(|_| format!("{field} has an invalid blue channel"))?;
+    Ok(Color::Rgb(r, g, b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +251,110 @@ mod tests {
     fn test_tool_name_style_is_bold() {
         let style = Palette::dark().tool_name_style();
         assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_load_custom_palette() {
+        let path = std::env::temp_dir().join(format!(
+            "theme-test-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("thread")
+        ));
+        std::fs::write(
+            &path,
+            r##"{
+  "claude": "#010203",
+  "text": "#111111",
+  "subtle": "#222222",
+  "inactive": "#333333",
+  "success": "#444444",
+  "error": "#555555",
+  "warning": "#666666",
+  "bash_border": "#777777",
+  "suggestion": "#888888",
+  "prompt_border": "#999999",
+  "plan_mode": "#aaaaaa",
+  "user_msg_bg": "#bbbbbb",
+  "bash_msg_bg": "#cccccc",
+  "diff_added": "#dddddd",
+  "diff_removed": "#eeeeee",
+  "diff_added_word": "#123456",
+  "diff_removed_word": "#abcdef"
+}"##,
+        )
+        .unwrap();
+
+        let palette = load_custom_palette(&path).unwrap();
+        assert_eq!(palette.claude, Color::Rgb(1, 2, 3));
+        assert_eq!(palette.diff_removed_word, Color::Rgb(171, 205, 239));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_load_custom_palette_rejects_invalid_color() {
+        let path = std::env::temp_dir().join(format!(
+            "theme-invalid-test-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("thread")
+        ));
+        std::fs::write(
+            &path,
+            r##"{
+  "claude": "nope",
+  "text": "#111111",
+  "subtle": "#222222",
+  "inactive": "#333333",
+  "success": "#444444",
+  "error": "#555555",
+  "warning": "#666666",
+  "bash_border": "#777777",
+  "suggestion": "#888888",
+  "prompt_border": "#999999",
+  "plan_mode": "#aaaaaa",
+  "user_msg_bg": "#bbbbbb",
+  "bash_msg_bg": "#cccccc",
+  "diff_added": "#dddddd",
+  "diff_removed": "#eeeeee",
+  "diff_added_word": "#123456",
+  "diff_removed_word": "#abcdef"
+}"##,
+        )
+        .unwrap();
+
+        let error = load_custom_palette(&path).unwrap_err();
+        assert!(error.contains("claude must be a #RRGGBB color"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_load_custom_palette_reports_missing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "missing-theme-test-{}-{}.json",
+            std::process::id(),
+            chrono_like_unique_suffix()
+        ));
+        let error = load_custom_palette(&path).unwrap_err();
+        assert!(error.contains("failed to read"));
+    }
+
+    #[test]
+    fn test_load_custom_palette_reports_invalid_json() {
+        let path = std::env::temp_dir().join(format!(
+            "invalid-json-theme-test-{}-{}.json",
+            std::process::id(),
+            chrono_like_unique_suffix()
+        ));
+        std::fs::write(&path, "{not json").unwrap();
+
+        let error = load_custom_palette(&path).unwrap_err();
+        assert!(error.contains("failed to parse"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn chrono_like_unique_suffix() -> String {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos().to_string())
+            .unwrap_or_else(|_| "0".into())
     }
 }

@@ -1,7 +1,9 @@
 use crossterm::event::{KeyEvent, MouseEvent};
 use rust_claude_core::compaction::CompactionResult;
 use rust_claude_core::config::{ConfigProvenance, Theme};
+use rust_claude_core::session::{ContextSnapshot, SessionSummary};
 use rust_claude_core::state::TodoItem;
+use std::path::PathBuf;
 
 use crate::diff::DiffLine;
 
@@ -13,7 +15,15 @@ pub enum UserCommand {
     SetMode(String),
     SetModel(String),
     SetTheme(Theme),
+    LoadCustomTheme,
     CancelStream,
+    ListSessions,
+    ResumeSession(String),
+    ShowContext,
+    ExportConversation {
+        path: Option<PathBuf>,
+    },
+    CopyLatestAssistant,
     ShowConfig,
     ShowCost,
     ShowDiff,
@@ -97,6 +107,23 @@ pub enum AppEvent {
         base_url_source: String,
         theme_source: String,
     },
+    SessionList {
+        sessions: Vec<SessionSummary>,
+        skipped: usize,
+    },
+    SessionResumed {
+        summary: SessionSummary,
+        messages: Vec<ChatMessage>,
+        model: String,
+        model_setting: String,
+        permission_mode: String,
+        git_branch: Option<String>,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+    },
+    ContextSnapshot(ContextSnapshot),
     /// An error to display to the user.
     Error(String),
     /// Terminal resize event.
@@ -176,11 +203,13 @@ impl ChatMessage {
     /// The body text of the message.
     pub fn body(&self) -> &str {
         match self {
-            ChatMessage::User(s)
-            | ChatMessage::Assistant(s)
-            | ChatMessage::System(s) => s,
+            ChatMessage::User(s) | ChatMessage::Assistant(s) | ChatMessage::System(s) => s,
             ChatMessage::Thinking { content, .. } => content,
-            ChatMessage::ToolUse { name, input_summary, .. } => {
+            ChatMessage::ToolUse {
+                name,
+                input_summary,
+                ..
+            } => {
                 if input_summary.is_empty() {
                     name
                 } else {
@@ -208,10 +237,15 @@ impl ChatMessage {
     }
 }
 
-pub fn format_provenance_summary(provenance: &ConfigProvenance) -> (String, String, String, String) {
+pub fn format_provenance_summary(
+    provenance: &ConfigProvenance,
+) -> (String, String, String, String) {
     (
         provenance.model.to_string(),
-        format!("allow:{} deny:{}", provenance.always_allow, provenance.always_deny),
+        format!(
+            "allow:{} deny:{}",
+            provenance.always_allow, provenance.always_deny
+        ),
         provenance.base_url.to_string(),
         provenance.theme.to_string(),
     )

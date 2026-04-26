@@ -3,13 +3,12 @@ use std::io::Stdout;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 use rust_claude_core::config::Theme;
+use rust_claude_core::session::{ContextSnapshot, SessionSummary};
 use rust_claude_core::state::TodoItem;
 use tokio::sync::mpsc;
 
@@ -54,6 +53,26 @@ const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         description: "Show current git working tree diff",
     },
     SlashCommandSpec {
+        name: "/resume",
+        usage: "/resume [session-id]",
+        description: "Resume a saved session",
+    },
+    SlashCommandSpec {
+        name: "/context",
+        usage: "/context",
+        description: "Show context window usage",
+    },
+    SlashCommandSpec {
+        name: "/export",
+        usage: "/export [path]",
+        description: "Export conversation as Markdown",
+    },
+    SlashCommandSpec {
+        name: "/copy",
+        usage: "/copy",
+        description: "Copy latest assistant response",
+    },
+    SlashCommandSpec {
         name: "/mode",
         usage: "/mode <mode>",
         description: "Switch permission mode",
@@ -70,8 +89,8 @@ const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "/theme",
-        usage: "/theme <dark|light>",
-        description: "Switch TUI theme",
+        usage: "/theme [dark|light|custom]",
+        description: "Show or switch TUI theme",
     },
     SlashCommandSpec {
         name: "/todo",
@@ -103,7 +122,10 @@ const SLASH_COMMANDS: &[SlashCommandSpec] = &[
 fn slash_command_help_text() -> String {
     let mut text = String::from("Available commands:\n");
     for command in SLASH_COMMANDS {
-        text.push_str(&format!("  {:<22} — {}\n", command.usage, command.description));
+        text.push_str(&format!(
+            "  {:<22} — {}\n",
+            command.usage, command.description
+        ));
     }
     text.push_str(
         "\nEditing:\n  Enter submits\n  Shift+Enter inserts newline\n  Up/Down browse history or move multi-line cursor\n  PageUp/PageDown scroll chat history\n  Ctrl+Home/Ctrl+End jump to oldest/latest chat content\n  Ctrl+A/Ctrl+E/Home/End move within line\n  Ctrl+Left/Ctrl+Right move by word\n  Escape or Ctrl+C cancels active stream\n  Ctrl+L redraws the screen\n  Tab toggles latest thinking block",
@@ -365,6 +387,44 @@ pub struct StreamingToolState {
     pub accumulated_json: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionPicker {
+    pub sessions: Vec<SessionSummary>,
+    pub selected: usize,
+    pub scroll: usize,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub skipped: usize,
+}
+
+impl SessionPicker {
+    pub fn loading() -> Self {
+        Self {
+            sessions: Vec::new(),
+            selected: 0,
+            scroll: 0,
+            loading: true,
+            error: None,
+            skipped: 0,
+        }
+    }
+
+    fn with_sessions(sessions: Vec<SessionSummary>, skipped: usize) -> Self {
+        Self {
+            sessions,
+            selected: 0,
+            scroll: 0,
+            loading: false,
+            error: None,
+            skipped,
+        }
+    }
+
+    fn selected_session(&self) -> Option<&SessionSummary> {
+        self.sessions.get(self.selected)
+    }
+}
+
 /// Main TUI application state.
 pub struct App {
     /// Chat message history.
@@ -416,6 +476,7 @@ pub struct App {
 
     // -- permission dialog --
     pub permission_dialog: Option<PermissionDialog>,
+    pub session_picker: Option<SessionPicker>,
 
     // -- task panel --
     pub todo_visible: bool,
@@ -431,11 +492,14 @@ pub struct App {
     pub terminal_width: u16,
     pub terminal_height: u16,
     pub theme: Theme,
+    pub custom_palette: Option<crate::theme::Palette>,
+    pub active_theme_name: String,
 }
 
 impl App {
     pub fn palette(&self) -> crate::theme::Palette {
-        crate::theme::Palette::from_config(self.theme)
+        self.custom_palette
+            .unwrap_or_else(|| crate::theme::Palette::from_config(self.theme))
     }
 
     pub fn new(
@@ -479,6 +543,7 @@ impl App {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             permission_dialog: None,
+            session_picker: None,
             todo_visible: false,
             tasks: Vec::new(),
             history,
@@ -488,6 +553,8 @@ impl App {
             terminal_width: 80,
             terminal_height: 24,
             theme,
+            custom_palette: None,
+            active_theme_name: format!("{:?}", theme).to_lowercase(),
         }
     }
 
@@ -692,7 +759,10 @@ impl App {
         if !self.streaming_thinking.is_empty() {
             let thinking_text = std::mem::take(&mut self.streaming_thinking);
             self.streaming_thinking_md.clear();
-            let summary = format!("Thought for ~{} chars (cancelled)", thinking_text.chars().count());
+            let summary = format!(
+                "Thought for ~{} chars (cancelled)",
+                thinking_text.chars().count()
+            );
             self.messages.push(ChatMessage::Thinking {
                 summary,
                 content: thinking_text,
@@ -708,9 +778,8 @@ impl App {
         self.streaming_thinking.clear();
         self.streaming_thinking_md.clear();
         self.streaming_tool = None;
-        self.messages.push(ChatMessage::System(
-            "Cancelled current response.".into(),
-        ));
+        self.messages
+            .push(ChatMessage::System("Cancelled current response.".into()));
         self.sync_chat_viewport();
     }
 
@@ -841,13 +910,14 @@ impl App {
     }
 
     /// Process a keyboard event.
-    pub async fn handle_key_event(
-        &mut self,
-        key: KeyEvent,
-        user_tx: &mpsc::Sender<UserCommand>,
-    ) {
+    pub async fn handle_key_event(&mut self, key: KeyEvent, user_tx: &mpsc::Sender<UserCommand>) {
         if self.permission_dialog.is_some() {
             self.handle_permission_key(key);
+            return;
+        }
+
+        if self.session_picker.is_some() {
+            self.handle_session_picker_key(key, user_tx).await;
             return;
         }
 
@@ -885,17 +955,23 @@ impl App {
                 }
                 self.submit_input(user_tx).await;
             }
-            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming => {
+            KeyCode::Char('e')
+                if key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming =>
+            {
                 self.input_buffer.move_end();
             }
-            KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming => {
+            KeyCode::Char('a')
+                if key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming =>
+            {
                 self.input_buffer.move_home();
             }
             KeyCode::Char(' ') if !self.is_streaming => {
                 self.input_buffer.insert_char(' ');
                 self.reset_input_navigation();
             }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming => {
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming =>
+            {
                 self.input_buffer.insert_char(c);
                 self.reset_input_navigation();
             }
@@ -907,10 +983,14 @@ impl App {
                 self.input_buffer.delete();
                 self.reset_input_navigation();
             }
-            KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming => {
+            KeyCode::Left
+                if key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming =>
+            {
                 self.input_buffer.move_word_left();
             }
-            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming => {
+            KeyCode::Right
+                if key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming =>
+            {
                 self.input_buffer.move_word_right();
             }
             KeyCode::Left if !self.is_streaming => self.input_buffer.move_left(),
@@ -954,6 +1034,70 @@ impl App {
         self.clamp_chat_scroll();
     }
 
+    async fn handle_session_picker_key(
+        &mut self,
+        key: KeyEvent,
+        user_tx: &mpsc::Sender<UserCommand>,
+    ) {
+        let page_size = self.session_picker_visible_rows();
+        let picker = match self.session_picker.as_mut() {
+            Some(picker) => picker,
+            None => return,
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                self.session_picker = None;
+            }
+            KeyCode::Up => {
+                picker.selected = picker.selected.saturating_sub(1);
+                picker.scroll = picker.scroll.min(picker.selected);
+            }
+            KeyCode::Down => {
+                if !picker.sessions.is_empty() {
+                    picker.selected = (picker.selected + 1).min(picker.sessions.len() - 1);
+                    if picker.selected >= picker.scroll + page_size {
+                        picker.scroll = picker.selected + 1 - page_size;
+                    }
+                }
+            }
+            KeyCode::PageUp => {
+                picker.selected = picker.selected.saturating_sub(page_size);
+                picker.scroll = picker.scroll.saturating_sub(page_size).min(picker.selected);
+            }
+            KeyCode::PageDown => {
+                if !picker.sessions.is_empty() {
+                    picker.selected = (picker.selected + page_size).min(picker.sessions.len() - 1);
+                    if picker.selected >= picker.scroll + page_size {
+                        picker.scroll = picker.selected + 1 - page_size;
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                if picker.loading {
+                    return;
+                }
+                if self.is_streaming {
+                    self.messages.push(ChatMessage::System(
+                        "Cannot resume another session while a response is active. Cancel or wait for it to finish first.".into(),
+                    ));
+                    self.sync_chat_viewport();
+                    return;
+                }
+                if let Some(session) = picker.selected_session() {
+                    let id = session.id.clone();
+                    self.session_picker = None;
+                    let _ = user_tx.send(UserCommand::ResumeSession(id)).await;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn session_picker_visible_rows(&self) -> usize {
+        ((self.terminal_height as usize * 60 / 100).saturating_sub(6)).max(3)
+    }
+
     fn handle_mouse_event(&mut self, mouse: MouseEvent) {
         let chat_area = ui::chat_viewport_area(
             self,
@@ -982,7 +1126,9 @@ impl App {
 
         match key.code {
             // Direct hotkeys always work
-            KeyCode::Esc | KeyCode::Char('n') => self.finish_permission_dialog(PermissionResponse::Deny),
+            KeyCode::Esc | KeyCode::Char('n') => {
+                self.finish_permission_dialog(PermissionResponse::Deny)
+            }
             KeyCode::Char('y') => self.finish_permission_dialog(PermissionResponse::Allow),
             KeyCode::Char('a') => self.finish_permission_dialog(PermissionResponse::AlwaysAllow),
             KeyCode::Char('d') => self.finish_permission_dialog(PermissionResponse::AlwaysDeny),
@@ -1075,7 +1221,8 @@ impl App {
                     self.streaming_thinking.clear();
                     self.scroll_offset = 0;
                     self.follow_output = true;
-                    self.messages.push(ChatMessage::System("Session cleared.".into()));
+                    self.messages
+                        .push(ChatMessage::System("Session cleared.".into()));
                 }
                 self.sync_chat_viewport();
             }
@@ -1097,7 +1244,10 @@ impl App {
                 if let Some(mode_str) = arg {
                     match mode_str {
                         "default" | "accept-edits" | "bypass" | "plan" | "dont-ask" => {
-                            match user_tx.send(UserCommand::SetMode(mode_str.to_string())).await {
+                            match user_tx
+                                .send(UserCommand::SetMode(mode_str.to_string()))
+                                .await
+                            {
                                 Ok(()) => self.messages.push(ChatMessage::System(format!(
                                     "Switching permission mode to: {mode_str}"
                                 ))),
@@ -1124,7 +1274,10 @@ impl App {
             }
             "/model" => {
                 if let Some(model_str) = arg {
-                    match user_tx.send(UserCommand::SetModel(model_str.to_string())).await {
+                    match user_tx
+                        .send(UserCommand::SetModel(model_str.to_string()))
+                        .await
+                    {
                         Ok(()) => self.messages.push(ChatMessage::System(format!(
                             "Switching model to: {model_str}"
                         ))),
@@ -1152,6 +1305,8 @@ impl App {
                         Some(theme) => match user_tx.send(UserCommand::SetTheme(theme)).await {
                             Ok(()) => {
                                 self.theme = theme;
+                                self.custom_palette = None;
+                                self.active_theme_name = theme_str.to_string();
                                 self.messages.push(ChatMessage::System(format!(
                                     "Switching theme to: {theme_str}"
                                 )));
@@ -1161,70 +1316,85 @@ impl App {
                             )),
                         },
                         None => {
-                            self.messages.push(ChatMessage::System(
-                                "Unknown theme. Valid themes: dark, light".into(),
-                            ));
+                            if theme_str == "custom" {
+                                match crate::theme::load_custom_palette_default() {
+                                    Ok(palette) => {
+                                        self.custom_palette = Some(palette);
+                                        self.active_theme_name = "custom".into();
+                                        self.messages.push(ChatMessage::System(
+                                            "Custom theme loaded from ~/.config/rust-claude-code/theme.json".into(),
+                                        ));
+                                    }
+                                    Err(error) => {
+                                        self.messages.push(ChatMessage::System(format!(
+                                            "Failed to load custom theme: {error}"
+                                        )));
+                                    }
+                                }
+                            } else {
+                                self.messages.push(ChatMessage::System(
+                                    "Unknown theme. Valid themes: dark, light, custom".into(),
+                                ));
+                            }
                         }
                     }
                     self.sync_chat_viewport();
                 } else {
                     self.messages.push(ChatMessage::System(format!(
-                        "Current theme: {:?}. Usage: /theme <dark|light>",
-                        self.theme
+                        "Current theme: {}. Available themes: dark, light, custom. Usage: /theme [dark|light|custom]",
+                        self.active_theme_name
                     )));
                     self.sync_chat_viewport();
                 }
             }
-            "/memory" => {
-                match arg {
-                    None => {
-                        let _ = user_tx.send(UserCommand::ShowMemory).await;
-                    }
-                    Some("remember") => {
-                        if parts.len() < 6 {
-                            self.messages.push(ChatMessage::System(
-                                "Usage: /memory remember <type> <path> <title> <description> <body>".into(),
-                            ));
-                            self.sync_chat_viewport();
-                        } else {
-                            let memory_type = parts[2].to_string();
-                            let path = parts[3].to_string();
-                            let title = parts[4].to_string();
-                            let description = parts[5].to_string();
-                            let body = parts[6..].join(" ");
-                            let _ = user_tx
-                                .send(UserCommand::RememberMemory {
-                                    memory_type,
-                                    path,
-                                    title,
-                                    description,
-                                    body,
-                                })
-                                .await;
-                        }
-                    }
-                    Some("forget") => {
-                        if parts.len() < 3 {
-                            self.messages.push(ChatMessage::System(
-                                "Usage: /memory forget <path>".into(),
-                            ));
-                            self.sync_chat_viewport();
-                        } else {
-                            let _ = user_tx
-                                .send(UserCommand::ForgetMemory {
-                                    path: parts[2].to_string(),
-                                })
-                                .await;
-                        }
-                    }
-                    Some(_) => {
+            "/memory" => match arg {
+                None => {
+                    let _ = user_tx.send(UserCommand::ShowMemory).await;
+                }
+                Some("remember") => {
+                    if parts.len() < 6 {
                         self.messages.push(ChatMessage::System(
-                            "Usage: /memory [remember|forget] ...".into(),
+                            "Usage: /memory remember <type> <path> <title> <description> <body>"
+                                .into(),
                         ));
                         self.sync_chat_viewport();
+                    } else {
+                        let memory_type = parts[2].to_string();
+                        let path = parts[3].to_string();
+                        let title = parts[4].to_string();
+                        let description = parts[5].to_string();
+                        let body = parts[6..].join(" ");
+                        let _ = user_tx
+                            .send(UserCommand::RememberMemory {
+                                memory_type,
+                                path,
+                                title,
+                                description,
+                                body,
+                            })
+                            .await;
                     }
                 }
-            }
+                Some("forget") => {
+                    if parts.len() < 3 {
+                        self.messages
+                            .push(ChatMessage::System("Usage: /memory forget <path>".into()));
+                        self.sync_chat_viewport();
+                    } else {
+                        let _ = user_tx
+                            .send(UserCommand::ForgetMemory {
+                                path: parts[2].to_string(),
+                            })
+                            .await;
+                    }
+                }
+                Some(_) => {
+                    self.messages.push(ChatMessage::System(
+                        "Usage: /memory [remember|forget] ...".into(),
+                    ));
+                    self.sync_chat_viewport();
+                }
+            },
             "/todo" => self.todo_visible = !self.todo_visible,
             "/config" => {
                 let _ = user_tx.send(UserCommand::ShowConfig).await;
@@ -1234,6 +1404,41 @@ impl App {
             }
             "/diff" => {
                 let _ = user_tx.send(UserCommand::ShowDiff).await;
+            }
+            "/resume" => {
+                if self.is_streaming {
+                    self.messages.push(ChatMessage::System(
+                        "Cannot resume another session while a response is active. Cancel or wait for it to finish first.".into(),
+                    ));
+                    self.sync_chat_viewport();
+                } else if let Some(session_id) = arg {
+                    let _ = user_tx
+                        .send(UserCommand::ResumeSession(session_id.to_string()))
+                        .await;
+                } else {
+                    self.session_picker = Some(SessionPicker::loading());
+                    let _ = user_tx.send(UserCommand::ListSessions).await;
+                }
+            }
+            "/context" => {
+                let _ = user_tx.send(UserCommand::ShowContext).await;
+            }
+            "/export" => {
+                let path = cmd
+                    .strip_prefix("/export")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from);
+                let _ = user_tx.send(UserCommand::ExportConversation { path }).await;
+            }
+            "/copy" => {
+                let _ = user_tx.send(UserCommand::CopyLatestAssistant).await;
+                if self.is_streaming {
+                    self.messages.push(ChatMessage::System(
+                        "Active streaming response is not yet copyable; copying the previous completed assistant response if available.".into(),
+                    ));
+                    self.sync_chat_viewport();
+                }
             }
             "/hooks" => {
                 let _ = user_tx.send(UserCommand::ShowHooks).await;
@@ -1251,7 +1456,10 @@ impl App {
                 let detail = if has_slash_command(name) {
                     format!("Command parsing error: {}", name)
                 } else {
-                    format!("Unknown command: {}. Type /help for available commands.", name)
+                    format!(
+                        "Unknown command: {}. Type /help for available commands.",
+                        name
+                    )
                 };
                 self.messages.push(ChatMessage::System(detail));
                 self.sync_chat_viewport();
@@ -1278,11 +1486,7 @@ impl App {
                 self.is_thinking = false;
                 let buffered = std::mem::take(&mut self.streaming_thinking);
                 self.streaming_thinking_md.clear();
-                let final_text = if text.is_empty() {
-                    buffered
-                } else {
-                    text
-                };
+                let final_text = if text.is_empty() { buffered } else { text };
                 if !final_text.is_empty() {
                     let summary = format!("Thought for ~{} chars", final_text.chars().count());
                     self.messages.push(ChatMessage::Thinking {
@@ -1340,7 +1544,10 @@ impl App {
                 if !self.streaming_thinking.is_empty() {
                     let thinking_text = std::mem::take(&mut self.streaming_thinking);
                     self.streaming_thinking_md.clear();
-                    let summary = format!("Thought for ~{} chars (cancelled)", thinking_text.chars().count());
+                    let summary = format!(
+                        "Thought for ~{} chars (cancelled)",
+                        thinking_text.chars().count()
+                    );
                     self.messages.push(ChatMessage::Thinking {
                         summary,
                         content: thinking_text,
@@ -1366,7 +1573,10 @@ impl App {
                 });
                 self.sync_chat_viewport();
             }
-            AppEvent::ToolInputDelta { name: _, json_fragment } => {
+            AppEvent::ToolInputDelta {
+                name: _,
+                json_fragment,
+            } => {
                 if let Some(ref mut tool_state) = self.streaming_tool {
                     tool_state.accumulated_json.push_str(&json_fragment);
                     self.sync_chat_viewport();
@@ -1385,7 +1595,11 @@ impl App {
                 });
                 self.sync_chat_viewport();
             }
-            AppEvent::ToolResult { name, output, is_error } => {
+            AppEvent::ToolResult {
+                name,
+                output,
+                is_error,
+            } => {
                 let summary = truncate(&output, 200);
                 self.messages.push(ChatMessage::ToolResult {
                     name,
@@ -1439,8 +1653,63 @@ impl App {
                 )));
                 self.sync_chat_viewport();
             }
+            AppEvent::SessionList { sessions, skipped } => {
+                self.session_picker = Some(SessionPicker::with_sessions(sessions, skipped));
+            }
+            AppEvent::SessionResumed {
+                summary,
+                messages,
+                model,
+                model_setting,
+                permission_mode,
+                git_branch,
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+            } => {
+                self.messages = messages;
+                self.messages.push(ChatMessage::System(format!(
+                    "Resumed session {} ({} messages)",
+                    summary.id, summary.message_count
+                )));
+                self.model = model;
+                self.model_setting = model_setting;
+                self.permission_mode = permission_mode;
+                self.git_branch = git_branch;
+                self.input_tokens = input_tokens;
+                self.output_tokens = output_tokens;
+                self.cache_read_input_tokens = cache_read_input_tokens;
+                self.cache_creation_input_tokens = cache_creation_input_tokens;
+                self.streaming_text.clear();
+                self.streaming_text_raw.clear();
+                self.streaming_thinking.clear();
+                self.streaming_tool = None;
+                self.is_streaming = false;
+                self.is_thinking = false;
+                self.session_picker = None;
+                self.jump_chat_to_latest();
+            }
+            AppEvent::ContextSnapshot(snapshot) => {
+                self.messages
+                    .push(ChatMessage::System(format_context_snapshot(
+                        &snapshot,
+                        self.terminal_width,
+                    )));
+                self.sync_chat_viewport();
+            }
             AppEvent::Error(msg) => {
                 self.messages.push(ChatMessage::System(msg));
+                if let Some(picker) = self.session_picker.as_mut() {
+                    picker.loading = false;
+                    picker.error = Some(
+                        self.messages
+                            .last()
+                            .map(ChatMessage::body)
+                            .unwrap_or("")
+                            .to_string(),
+                    );
+                }
                 self.streaming_text.clear();
                 self.streaming_thinking.clear();
                 self.is_streaming = false;
@@ -1533,10 +1802,7 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
                 .get("operation")
                 .and_then(|v| v.as_str())
                 .unwrap_or("?");
-            let path = input
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
             if path.is_empty() {
                 op.to_string()
             } else {
@@ -1555,6 +1821,84 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
             .unwrap_or_default(),
         _ => truncate(&input.to_string(), 80),
     }
+}
+
+fn format_context_snapshot(snapshot: &ContextSnapshot, terminal_width: u16) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("Context usage ({})", snapshot.model));
+    match snapshot.context_capacity {
+        Some(capacity) => {
+            let pct = if capacity == 0 {
+                0.0
+            } else {
+                snapshot.used_tokens as f64 * 100.0 / capacity as f64
+            };
+            lines.push(format!(
+                "  used: {} / {} tokens ({:.1}%)",
+                snapshot.used_tokens, capacity, pct
+            ));
+            lines.push(format!(
+                "  remaining: {} tokens",
+                snapshot.remaining_tokens.unwrap_or(0)
+            ));
+            if terminal_width >= 72 {
+                lines.push(format!(
+                    "  [{}]",
+                    context_bar(
+                        snapshot.system_prompt_tokens,
+                        snapshot.message_tokens,
+                        snapshot.tool_result_tokens,
+                        snapshot.remaining_tokens.unwrap_or(0),
+                        capacity,
+                        40,
+                    )
+                ));
+                lines.push("  S=system M=messages T=tool results .=remaining".into());
+            }
+        }
+        None => {
+            lines.push(format!("  used: {} tokens", snapshot.used_tokens));
+            lines.push("  remaining: unavailable (unknown model context capacity)".into());
+        }
+    }
+    lines.push(format!(
+        "  system prompt: {} tokens",
+        snapshot.system_prompt_tokens
+    ));
+    lines.push(format!("  messages: {} tokens", snapshot.message_tokens));
+    lines.push(format!(
+        "  tool results: {} tokens",
+        snapshot.tool_result_tokens
+    ));
+    lines.join("\n")
+}
+
+fn context_bar(
+    system: u32,
+    messages: u32,
+    tools: u32,
+    remaining: u32,
+    capacity: u32,
+    width: usize,
+) -> String {
+    if capacity == 0 || width == 0 {
+        return String::new();
+    }
+    let segments = [
+        ('S', system),
+        ('M', messages),
+        ('T', tools),
+        ('.', remaining),
+    ];
+    let mut bar = String::new();
+    for (ch, tokens) in segments {
+        let count = ((tokens as f64 / capacity as f64) * width as f64).round() as usize;
+        bar.push_str(&ch.to_string().repeat(count));
+    }
+    if bar.len() < width {
+        bar.push_str(&".".repeat(width - bar.len()));
+    }
+    bar.chars().take(width).collect()
 }
 
 /// Extract diff information from a tool's input for the permission dialog.
@@ -1589,10 +1933,7 @@ fn extract_diff_info(
                 .get("file_path")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let content = input
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
             // For FileWrite, show all content as additions (new file)
             let diff_lines = diff::compute_diff("", content);
             (Some(diff_lines), true, file_path, false)
@@ -1701,7 +2042,13 @@ mod tests {
 
     #[test]
     fn test_stream_start_reenables_streaming_after_tool_use_turn() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.handle_app_event(AppEvent::StreamEnd);
         assert!(!app.is_streaming);
 
@@ -1718,7 +2065,15 @@ mod tests {
         assert!(help.contains("/config"));
         assert!(help.contains("/cost"));
         assert!(help.contains("/diff"));
-        assert!(help.contains("/theme"));
+        assert!(help.contains("/resume [session-id]"));
+        assert!(help.contains("/context"));
+        assert!(help.contains("/export [path]"));
+        assert!(help.contains("/copy"));
+        assert!(help.contains("/theme [dark|light|custom]"));
+        assert!(has_slash_command("/resume"));
+        assert!(has_slash_command("/context"));
+        assert!(has_slash_command("/export"));
+        assert!(has_slash_command("/copy"));
     }
 
     #[test]
@@ -1741,14 +2096,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_paste_preserves_multiline_content() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.handle_paste("line1\r\nline2".into());
         assert_eq!(app.input_text(), "line1\nline2");
     }
 
     #[test]
     fn test_tab_toggles_selected_thinking_expansion() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.messages.push(ChatMessage::Thinking {
             summary: "Thought for ~10 chars".into(),
             content: "reasoning".into(),
@@ -1764,10 +2131,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_ctrl_c_cancels_stream_instead_of_quit() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.is_streaming = true;
         let (tx, mut rx) = mpsc::channel(1);
-        app.handle_key_event(key_ctrl(KeyCode::Char('c')), &tx).await;
+        app.handle_key_event(key_ctrl(KeyCode::Char('c')), &tx)
+            .await;
         assert!(!app.should_quit);
         assert!(!app.is_streaming);
         assert_eq!(rx.recv().await, Some(UserCommand::CancelStream));
@@ -1775,7 +2149,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_shift_enter_inserts_newline() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         let (tx, _rx) = mpsc::channel(1);
         app.handle_key_event(key(KeyCode::Char('a')), &tx).await;
         app.handle_key_event(key_shift(KeyCode::Enter), &tx).await;
@@ -1785,7 +2165,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_up_down_browse_history() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.history = vec!["first".into(), "second".into()];
         let (tx, _rx) = mpsc::channel(1);
         app.handle_key_event(key(KeyCode::Up), &tx).await;
@@ -1796,10 +2182,15 @@ mod tests {
         assert_eq!(app.input_text(), "second");
     }
 
-
     #[tokio::test]
     async fn test_page_navigation_preserves_draft() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.input_buffer = InputBuffer::from_text("draft");
         app.messages = (0..40)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
@@ -1815,7 +2206,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_page_down_restores_follow_output_at_bottom() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.messages = (0..80)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
             .collect();
@@ -1833,7 +2230,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_ctrl_home_and_end_jump_chat_boundaries() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.messages = (0..80)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
             .collect();
@@ -1849,7 +2252,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_page_up_from_follow_output_moves_up_from_latest() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.messages = (0..80)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
             .collect();
@@ -1868,7 +2277,13 @@ mod tests {
 
     #[test]
     fn test_mouse_scroll_up_moves_away_from_latest() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.messages = (0..80)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
             .collect();
@@ -1886,7 +2301,13 @@ mod tests {
 
     #[test]
     fn test_mouse_scroll_down_returns_to_latest() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.messages = (0..80)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
             .collect();
@@ -1904,7 +2325,13 @@ mod tests {
 
     #[test]
     fn test_mouse_scroll_outside_chat_area_does_not_scroll_chat() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.todo_visible = true;
         app.messages = (0..80)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
@@ -1923,7 +2350,13 @@ mod tests {
 
     #[test]
     fn test_sync_chat_viewport_preserves_history_view() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.messages = (0..80)
             .map(|i| ChatMessage::Assistant(format!("message {i}")))
             .collect();
@@ -1937,7 +2370,13 @@ mod tests {
     }
     #[tokio::test]
     async fn test_mode_command_sends_control_message() {
-        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "claude-sonnet-4-6".into(),
+            "opusplan".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/mode plan");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1948,7 +2387,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_command_sends_control_message() {
-        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "claude-sonnet-4-6".into(),
+            "opusplan".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/model opus[1m]");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1959,7 +2404,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_command_without_args_shows_setting_and_runtime() {
-        let mut app = App::new("claude-opus-4-6".into(), "opusplan".into(), "Plan".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "claude-opus-4-6".into(),
+            "opusplan".into(),
+            "Plan".into(),
+            None,
+            Theme::Dark,
+        );
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/model");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1975,7 +2426,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_theme_command_sends_control_message_and_updates_local_theme() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/theme light");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1983,11 +2440,239 @@ mod tests {
         let sent = rx.recv().await.unwrap();
         assert_eq!(sent, UserCommand::SetTheme(Theme::Light));
         assert_eq!(app.theme, Theme::Light);
+        assert_eq!(app.active_theme_name, "light");
+    }
+
+    #[tokio::test]
+    async fn test_theme_without_args_lists_themes() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text("/theme");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        assert!(rx.try_recv().is_err());
+        assert!(matches!(
+            app.messages.last(),
+            Some(ChatMessage::System(msg))
+                if msg.contains("Available themes: dark, light, custom")
+                    && msg.contains("/theme [dark|light|custom]")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_resume_without_args_opens_picker_and_requests_sessions() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text("/resume");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        assert!(app
+            .session_picker
+            .as_ref()
+            .is_some_and(|picker| picker.loading));
+        assert_eq!(rx.recv().await, Some(UserCommand::ListSessions));
+    }
+
+    #[tokio::test]
+    async fn test_resume_with_id_sends_resume_command() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text("/resume 20260426_120000");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        assert_eq!(
+            rx.recv().await,
+            Some(UserCommand::ResumeSession("20260426_120000".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_blocks_while_streaming() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
+        app.is_streaming = true;
+        app.session_picker = Some(SessionPicker::with_sessions(
+            vec![SessionSummary {
+                id: "one".into(),
+                model: "claude".into(),
+                model_setting: "sonnet".into(),
+                cwd: "/tmp".into(),
+                created_at: "2026-04-26T10:00:00+08:00".into(),
+                updated_at: "2026-04-26T10:00:00+08:00".into(),
+                message_count: 1,
+                first_user_summary: "first".into(),
+                total_usage: None,
+            }],
+            0,
+        ));
+        let (tx, mut rx) = mpsc::channel(1);
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        assert!(app.session_picker.is_some());
+        assert!(rx.try_recv().is_err());
+        assert!(matches!(
+            app.messages.last(),
+            Some(ChatMessage::System(msg)) if msg.contains("Cannot resume another session")
+        ));
+    }
+
+    #[test]
+    fn test_session_list_empty_and_error_states() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
+        app.session_picker = Some(SessionPicker::loading());
+
+        app.handle_app_event(AppEvent::SessionList {
+            sessions: Vec::new(),
+            skipped: 0,
+        });
+        let picker = app.session_picker.as_ref().unwrap();
+        assert!(!picker.loading);
+        assert!(picker.sessions.is_empty());
+
+        app.handle_app_event(AppEvent::Error("Session 'missing' not found".into()));
+        assert!(app
+            .session_picker
+            .as_ref()
+            .and_then(|picker| picker.error.as_ref())
+            .is_some_and(|error| error.contains("missing")));
+    }
+
+    #[tokio::test]
+    async fn test_context_export_and_copy_commands_dispatch() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, mut rx) = mpsc::channel(3);
+
+        app.input_buffer = InputBuffer::from_text("/context");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+        assert_eq!(rx.recv().await, Some(UserCommand::ShowContext));
+
+        app.input_buffer = InputBuffer::from_text("/export /tmp/session export.md");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+        assert_eq!(
+            rx.recv().await,
+            Some(UserCommand::ExportConversation {
+                path: Some(PathBuf::from("/tmp/session export.md"))
+            })
+        );
+
+        app.input_buffer = InputBuffer::from_text("/copy");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+        assert_eq!(rx.recv().await, Some(UserCommand::CopyLatestAssistant));
+    }
+
+    #[tokio::test]
+    async fn test_session_picker_navigation_and_confirm() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
+        app.session_picker = Some(SessionPicker::with_sessions(
+            vec![
+                SessionSummary {
+                    id: "one".into(),
+                    model: "claude".into(),
+                    model_setting: "sonnet".into(),
+                    cwd: "/tmp".into(),
+                    created_at: "2026-04-26T10:00:00+08:00".into(),
+                    updated_at: "2026-04-26T10:00:00+08:00".into(),
+                    message_count: 1,
+                    first_user_summary: "first".into(),
+                    total_usage: None,
+                },
+                SessionSummary {
+                    id: "two".into(),
+                    model: "claude".into(),
+                    model_setting: "opus".into(),
+                    cwd: "/tmp".into(),
+                    created_at: "2026-04-26T11:00:00+08:00".into(),
+                    updated_at: "2026-04-26T11:00:00+08:00".into(),
+                    message_count: 2,
+                    first_user_summary: "second".into(),
+                    total_usage: None,
+                },
+            ],
+            0,
+        ));
+        let (tx, mut rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::Down), &tx).await;
+        assert_eq!(app.session_picker.as_ref().unwrap().selected, 1);
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        assert_eq!(
+            rx.recv().await,
+            Some(UserCommand::ResumeSession("two".into()))
+        );
+        assert!(app.session_picker.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_session_picker_cancel_preserves_input() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
+        app.input_buffer = InputBuffer::from_text("draft");
+        app.session_picker = Some(SessionPicker::loading());
+        let (tx, mut rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::Esc), &tx).await;
+
+        assert!(app.session_picker.is_none());
+        assert_eq!(app.input_text(), "draft");
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn test_memory_command_sends_show_memory() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/memory");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -1998,7 +2683,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_remember_command_sends_payload() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text(
             "/memory remember feedback feedback/testing.md Testing Use-real-db Use real database",
@@ -2020,7 +2711,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_forget_command_sends_payload() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/memory forget feedback/testing.md");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -2036,7 +2733,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_remember_without_args_shows_usage() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/memory remember");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -2051,7 +2754,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_forget_without_args_shows_usage() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/memory forget");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -2066,7 +2775,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_unknown_subcommand_shows_usage() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
         let (tx, mut rx) = mpsc::channel(1);
         app.input_buffer = InputBuffer::from_text("/memory bogus");
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
@@ -2081,7 +2796,13 @@ mod tests {
 
     #[test]
     fn test_status_update_changes_displayed_model_and_mode() {
-        let mut app = App::new("claude-sonnet-4-6".into(), "opusplan".into(), "Default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "claude-sonnet-4-6".into(),
+            "opusplan".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
         app.handle_app_event(AppEvent::StatusUpdate {
             model: "claude-opus-4-6".into(),
             model_setting: "opusplan".into(),
@@ -2097,7 +2818,13 @@ mod tests {
 
     #[test]
     fn test_thinking_complete_creates_message() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.handle_app_event(AppEvent::ThinkingComplete("reasoning".into()));
         assert!(matches!(
             app.messages.last(),
@@ -2110,7 +2837,13 @@ mod tests {
     /// correctly for the "no store" case.
     #[test]
     fn test_memory_no_store_response_displays_as_assistant() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
         let msg = "No memory store is available for the current project.";
         app.handle_app_event(AppEvent::AssistantMessage(msg.into()));
 
@@ -2123,7 +2856,13 @@ mod tests {
     /// Verify that memory status text for an empty store displays correctly.
     #[test]
     fn test_memory_empty_store_response_displays_as_assistant() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
         let msg = "Memory store:\n  project_root: /repo\n  memory_dir: /memory\n  entrypoint: /memory/MEMORY.md\n  entries: 0\n\nNo memory entries found.";
         app.handle_app_event(AppEvent::AssistantMessage(msg.into()));
 
@@ -2137,7 +2876,13 @@ mod tests {
     /// Verify that memory status text for a populated store displays correctly.
     #[test]
     fn test_memory_populated_store_response_displays_as_assistant() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "Default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
         let msg = "Memory store:\n  project_root: /repo\n  memory_dir: /memory\n  entrypoint: /memory/MEMORY.md\n  entries: 2\n\nVisible memories:\n- [feedback] testing.md — DB test guidance (1 days old)\n- [project] deploy.md — Deploy process (3 days old)\n";
         app.handle_app_event(AppEvent::AssistantMessage(msg.into()));
 
@@ -2151,7 +2896,13 @@ mod tests {
 
     #[test]
     fn test_cancel_during_text_streaming_clears_state() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.is_streaming = true;
         app.handle_app_event(AppEvent::StreamDelta("Hello ".into()));
         app.handle_app_event(AppEvent::StreamDelta("world".into()));
@@ -2169,7 +2920,13 @@ mod tests {
 
     #[test]
     fn test_cancel_during_thinking_streaming_preserves_thinking() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.is_streaming = true;
         app.handle_app_event(AppEvent::ThinkingStart);
         app.handle_app_event(AppEvent::ThinkingDelta("Let me think about this...".into()));
@@ -2179,10 +2936,19 @@ mod tests {
         // Cancel
         app.cancel_stream_local();
         // Thinking should be finalized as a message with (cancelled)
-        let thinking_msg = app.messages.iter().find(|m| matches!(m, ChatMessage::Thinking { .. }));
-        assert!(thinking_msg.is_some(), "Thinking should be preserved as a message");
+        let thinking_msg = app
+            .messages
+            .iter()
+            .find(|m| matches!(m, ChatMessage::Thinking { .. }));
+        assert!(
+            thinking_msg.is_some(),
+            "Thinking should be preserved as a message"
+        );
         if let Some(ChatMessage::Thinking { summary, content }) = thinking_msg {
-            assert!(summary.contains("cancelled"), "Summary should note cancellation");
+            assert!(
+                summary.contains("cancelled"),
+                "Summary should note cancellation"
+            );
             assert_eq!(content, "Let me think about this...");
         }
         assert!(app.streaming_thinking.is_empty());
@@ -2192,9 +2958,17 @@ mod tests {
 
     #[test]
     fn test_cancel_during_tool_input_streaming_clears_tool_state() {
-        let mut app = App::new("test-model".into(), "test-model".into(), "default".into(), None, Theme::Dark);
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
         app.is_streaming = true;
-        app.handle_app_event(AppEvent::ToolInputStreamStart { name: "Bash".into() });
+        app.handle_app_event(AppEvent::ToolInputStreamStart {
+            name: "Bash".into(),
+        });
         app.handle_app_event(AppEvent::ToolInputDelta {
             name: "Bash".into(),
             json_fragment: r#"{"command": "ls"#.into(),
@@ -2273,8 +3047,7 @@ mod tests {
         let input = serde_json::json!({
             "command": "ls -la"
         });
-        let (diff_lines, is_file_tool, file_path, _) =
-            extract_diff_info("Bash", &input);
+        let (diff_lines, is_file_tool, file_path, _) = extract_diff_info("Bash", &input);
         assert!(!is_file_tool);
         assert!(diff_lines.is_none());
         assert!(file_path.is_none());
@@ -2307,4 +3080,3 @@ mod tests {
         assert!(dialog.diff_scroll < max);
     }
 }
-

@@ -1,9 +1,10 @@
 use rust_claude_core::compaction::CompactionResult;
 use rust_claude_core::config::ConfigProvenance;
+use rust_claude_core::session::{ContextSnapshot, SessionSummary};
 use rust_claude_core::state::TodoItem;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::events::{format_provenance_summary, AppEvent, PermissionResponse};
+use crate::events::{format_provenance_summary, AppEvent, ChatMessage, PermissionResponse};
 
 /// Bridge used by the query loop to send events into the TUI.
 #[derive(Debug, Clone)]
@@ -39,7 +40,10 @@ impl TuiBridge {
     }
 
     pub async fn send_stream_delta(&self, text: &str) {
-        let _ = self.event_tx.send(AppEvent::StreamDelta(text.to_string())).await;
+        let _ = self
+            .event_tx
+            .send(AppEvent::StreamDelta(text.to_string()))
+            .await;
     }
 
     pub async fn send_stream_end(&self) {
@@ -144,6 +148,51 @@ impl TuiBridge {
                 base_url_source,
                 theme_source,
             })
+            .await;
+    }
+
+    pub async fn send_session_list(&self, sessions: Vec<SessionSummary>, skipped: usize) {
+        let _ = self
+            .event_tx
+            .send(AppEvent::SessionList { sessions, skipped })
+            .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_session_resumed(
+        &self,
+        summary: SessionSummary,
+        messages: Vec<ChatMessage>,
+        model: String,
+        model_setting: String,
+        permission_mode: String,
+        git_branch: Option<String>,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+    ) {
+        let _ = self
+            .event_tx
+            .send(AppEvent::SessionResumed {
+                summary,
+                messages,
+                model,
+                model_setting,
+                permission_mode,
+                git_branch,
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+            })
+            .await;
+    }
+
+    pub async fn send_context_snapshot(&self, snapshot: ContextSnapshot) {
+        let _ = self
+            .event_tx
+            .send(AppEvent::ContextSnapshot(snapshot))
             .await;
     }
 

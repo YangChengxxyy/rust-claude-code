@@ -1,7 +1,9 @@
 use std::path::Path;
 use std::process::Stdio;
 
-use rust_claude_mcp::jsonrpc::{check_response, parse_response, write_message, JsonRpcRequest, JsonRpcNotification};
+use rust_claude_mcp::jsonrpc::{
+    check_response, parse_response, write_message, JsonRpcNotification, JsonRpcRequest,
+};
 use tokio::io::BufReader;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
@@ -55,7 +57,10 @@ impl LspTransport {
         self
     }
 
-    pub async fn send_request(&self, request: &JsonRpcRequest) -> Result<serde_json::Value, LspError> {
+    pub async fn send_request(
+        &self,
+        request: &JsonRpcRequest,
+    ) -> Result<serde_json::Value, LspError> {
         let request_id = request.id;
         let body = serde_json::to_vec(request)?;
 
@@ -86,7 +91,10 @@ impl LspTransport {
     }
 
     /// Send a JSON-RPC notification (no id, no response expected).
-    pub async fn send_notification(&self, notification: &JsonRpcNotification) -> Result<(), LspError> {
+    pub async fn send_notification(
+        &self,
+        notification: &JsonRpcNotification,
+    ) -> Result<(), LspError> {
         let body = serde_json::to_vec(notification)?;
         let mut stdin = self.stdin.lock().await;
         write_message(&mut *stdin, &body)

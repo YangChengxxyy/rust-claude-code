@@ -113,10 +113,7 @@ pub fn filter_supported_servers(
 
 /// Merge two `mcpServers` maps. The `high` layer (e.g. project) overrides
 /// the `low` layer (e.g. user) for the same server name.
-pub fn merge_mcp_servers(
-    high: &McpServersConfig,
-    low: &McpServersConfig,
-) -> McpServersConfig {
+pub fn merge_mcp_servers(high: &McpServersConfig, low: &McpServersConfig) -> McpServersConfig {
     let mut merged = low.clone();
     for (name, config) in high {
         merged.insert(name.clone(), config.clone());
@@ -161,26 +158,34 @@ mod tests {
         let json = r#"{"type": "sse", "command": "some-server"}"#;
         let config: McpServerConfig = serde_json::from_str(json).unwrap();
         assert!(!config.is_supported_transport());
-        assert!(matches!(config.transport_type, McpTransportType::Unsupported(ref t) if t == "sse"));
+        assert!(
+            matches!(config.transport_type, McpTransportType::Unsupported(ref t) if t == "sse")
+        );
     }
 
     #[test]
     fn test_filter_supported_servers() {
         let mut servers = McpServersConfig::new();
-        servers.insert("fs".into(), McpServerConfig {
-            transport_type: McpTransportType::Stdio,
-            command: "npx".into(),
-            args: vec![],
-            env: HashMap::new(),
-            cwd: None,
-        });
-        servers.insert("remote".into(), McpServerConfig {
-            transport_type: McpTransportType::Unsupported("sse".into()),
-            command: "http-server".into(),
-            args: vec![],
-            env: HashMap::new(),
-            cwd: None,
-        });
+        servers.insert(
+            "fs".into(),
+            McpServerConfig {
+                transport_type: McpTransportType::Stdio,
+                command: "npx".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+        );
+        servers.insert(
+            "remote".into(),
+            McpServerConfig {
+                transport_type: McpTransportType::Unsupported("sse".into()),
+                command: "http-server".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+        );
 
         let (supported, skipped) = filter_supported_servers(&servers);
         assert_eq!(supported.len(), 1);
@@ -192,21 +197,27 @@ mod tests {
     #[test]
     fn test_merge_mcp_servers_different_names() {
         let mut low = McpServersConfig::new();
-        low.insert("github".into(), McpServerConfig {
-            transport_type: McpTransportType::Stdio,
-            command: "gh-mcp".into(),
-            args: vec![],
-            env: HashMap::new(),
-            cwd: None,
-        });
+        low.insert(
+            "github".into(),
+            McpServerConfig {
+                transport_type: McpTransportType::Stdio,
+                command: "gh-mcp".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+        );
         let mut high = McpServersConfig::new();
-        high.insert("filesystem".into(), McpServerConfig {
-            transport_type: McpTransportType::Stdio,
-            command: "fs-mcp".into(),
-            args: vec![],
-            env: HashMap::new(),
-            cwd: None,
-        });
+        high.insert(
+            "filesystem".into(),
+            McpServerConfig {
+                transport_type: McpTransportType::Stdio,
+                command: "fs-mcp".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+        );
 
         let merged = merge_mcp_servers(&high, &low);
         assert_eq!(merged.len(), 2);
@@ -217,21 +228,27 @@ mod tests {
     #[test]
     fn test_merge_mcp_servers_same_name_high_wins() {
         let mut low = McpServersConfig::new();
-        low.insert("filesystem".into(), McpServerConfig {
-            transport_type: McpTransportType::Stdio,
-            command: "a".into(),
-            args: vec![],
-            env: HashMap::new(),
-            cwd: None,
-        });
+        low.insert(
+            "filesystem".into(),
+            McpServerConfig {
+                transport_type: McpTransportType::Stdio,
+                command: "a".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+        );
         let mut high = McpServersConfig::new();
-        high.insert("filesystem".into(), McpServerConfig {
-            transport_type: McpTransportType::Stdio,
-            command: "b".into(),
-            args: vec![],
-            env: HashMap::new(),
-            cwd: None,
-        });
+        high.insert(
+            "filesystem".into(),
+            McpServerConfig {
+                transport_type: McpTransportType::Stdio,
+                command: "b".into(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+            },
+        );
 
         let merged = merge_mcp_servers(&high, &low);
         assert_eq!(merged.len(), 1);

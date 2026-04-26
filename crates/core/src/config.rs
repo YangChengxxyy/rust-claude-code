@@ -295,27 +295,43 @@ impl Config {
         }
         if let Some(value) = overrides.bearer_auth.value {
             self.bearer_auth = value;
-            self.provenance.bearer_auth = overrides.bearer_auth.source.unwrap_or(ConfigSource::Default);
+            self.provenance.bearer_auth = overrides
+                .bearer_auth
+                .source
+                .unwrap_or(ConfigSource::Default);
         }
         if let Some(value) = overrides.system_prompt.value {
             self.system_prompt = value;
-            self.provenance.system_prompt = overrides.system_prompt.source.unwrap_or(ConfigSource::Default);
+            self.provenance.system_prompt = overrides
+                .system_prompt
+                .source
+                .unwrap_or(ConfigSource::Default);
         }
         if let Some(value) = overrides.max_tokens.value {
             self.max_tokens = value;
-            self.provenance.max_tokens = overrides.max_tokens.source.unwrap_or(ConfigSource::Default);
+            self.provenance.max_tokens =
+                overrides.max_tokens.source.unwrap_or(ConfigSource::Default);
         }
         if let Some(value) = overrides.permission_mode.value {
             self.permission_mode = value;
-            self.provenance.permission_mode = overrides.permission_mode.source.unwrap_or(ConfigSource::Default);
+            self.provenance.permission_mode = overrides
+                .permission_mode
+                .source
+                .unwrap_or(ConfigSource::Default);
         }
         if let Some(value) = overrides.always_allow.value {
             self.always_allow = value;
-            self.provenance.always_allow = overrides.always_allow.source.unwrap_or(ConfigSource::Default);
+            self.provenance.always_allow = overrides
+                .always_allow
+                .source
+                .unwrap_or(ConfigSource::Default);
         }
         if let Some(value) = overrides.always_deny.value {
             self.always_deny = value;
-            self.provenance.always_deny = overrides.always_deny.source.unwrap_or(ConfigSource::Default);
+            self.provenance.always_deny = overrides
+                .always_deny
+                .source
+                .unwrap_or(ConfigSource::Default);
         }
         if let Some(value) = overrides.stream.value {
             self.stream = value;

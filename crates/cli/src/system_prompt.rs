@@ -105,9 +105,20 @@ fn build_tool_section(tools: &ToolRegistry) -> String {
 
 fn build_memory_section(memory_store: Option<&ScannedMemoryStore>) -> Option<String> {
     let memory = memory_store?;
-    let mut lines = vec![build_memory_contract_prompt(), String::new(), "# memoryStore".to_string(), String::new()];
-    lines.push(format!("- memory_dir: {}", memory.store.memory_dir.display()));
-    lines.push(format!("- entrypoint: {}", memory.store.entrypoint.display()));
+    let mut lines = vec![
+        build_memory_contract_prompt(),
+        String::new(),
+        "# memoryStore".to_string(),
+        String::new(),
+    ];
+    lines.push(format!(
+        "- memory_dir: {}",
+        memory.store.memory_dir.display()
+    ));
+    lines.push(format!(
+        "- entrypoint: {}",
+        memory.store.entrypoint.display()
+    ));
     lines.push(format!("- entry_count: {}", memory.entries.len()));
 
     if let Some(index) = &memory.index {
@@ -252,7 +263,15 @@ mod tests {
     fn test_build_system_prompt_with_custom_append() {
         let cwd = PathBuf::from("/tmp/test");
         let tools = ToolRegistry::new();
-        let prompt = build_system_prompt(&cwd, &tools, &[], None, &[], None, Some("Custom instructions here"));
+        let prompt = build_system_prompt(
+            &cwd,
+            &tools,
+            &[],
+            None,
+            &[],
+            None,
+            Some("Custom instructions here"),
+        );
         assert!(prompt.contains("Custom instructions here"));
     }
 
@@ -335,7 +354,8 @@ mod tests {
             path: PathBuf::from("/repo/CLAUDE.md"),
             content: "Project instructions here".to_string(),
         }];
-        let prompt = build_system_prompt(&cwd, &tools, &files, None, &[], None, Some("Custom append"));
+        let prompt =
+            build_system_prompt(&cwd, &tools, &files, None, &[], None, Some("Custom append"));
 
         let env_pos = prompt.find("# Environment").unwrap();
         let claude_md_pos = prompt.find("# claudeMd").unwrap();

@@ -11,7 +11,9 @@ async fn create_message_with_real_api_key() {
     let client = AnthropicClient::new(api_key).expect("client should initialize");
     let request = CreateMessageRequest::new(
         "claude-sonnet-4-20250514",
-        vec![rust_claude_api::ApiMessage::user("Reply with exactly: pong")],
+        vec![rust_claude_api::ApiMessage::user(
+            "Reply with exactly: pong",
+        )],
     )
     .with_max_tokens(32);
 
@@ -39,7 +41,9 @@ async fn create_message_stream_with_real_api_key() {
     let client = AnthropicClient::new(api_key).expect("client should initialize");
     let request = CreateMessageRequest::new(
         "claude-sonnet-4-20250514",
-        vec![rust_claude_api::ApiMessage::user("Reply with exactly: pong")],
+        vec![rust_claude_api::ApiMessage::user(
+            "Reply with exactly: pong",
+        )],
     )
     .with_max_tokens(32)
     .with_stream(true);

@@ -51,7 +51,9 @@ fn estimate_content_block_tokens(block: &ContentBlock) -> u32 {
         } => tool_use_id.len() + content.chars().count(),
         ContentBlock::Thinking { thinking, .. } => thinking.chars().count(),
         ContentBlock::Image { source } => match source {
-            crate::message::ImageSource::Base64 { media_type, data } => media_type.len() + data.len(),
+            crate::message::ImageSource::Base64 { media_type, data } => {
+                media_type.len() + data.len()
+            }
             crate::message::ImageSource::Url { url } => url.len(),
         },
         ContentBlock::Unknown => 0,
@@ -289,7 +291,11 @@ mod tests {
         let messages: Vec<Message> = (0..6)
             .map(|i| {
                 make_text_message(
-                    if i % 2 == 0 { Role::User } else { Role::Assistant },
+                    if i % 2 == 0 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
                     "hello world",
                 )
             })
@@ -310,7 +316,11 @@ mod tests {
         let messages: Vec<Message> = (0..6)
             .map(|i| {
                 make_text_message(
-                    if i % 2 == 0 { Role::User } else { Role::Assistant },
+                    if i % 2 == 0 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
                     &big_text,
                 )
             })
@@ -360,7 +370,11 @@ mod tests {
         let messages: Vec<Message> = (0..10)
             .map(|i| {
                 make_text_message(
-                    if i % 2 == 0 { Role::User } else { Role::Assistant },
+                    if i % 2 == 0 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
                     &text,
                 )
             })
@@ -385,7 +399,11 @@ mod tests {
         let messages: Vec<Message> = (0..6)
             .map(|i| {
                 make_text_message(
-                    if i % 2 == 0 { Role::User } else { Role::Assistant },
+                    if i % 2 == 0 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
                     &big_text,
                 )
             })
@@ -485,7 +503,11 @@ mod tests {
         let messages: Vec<Message> = (0..6)
             .map(|i| {
                 make_text_message(
-                    if i % 2 == 0 { Role::User } else { Role::Assistant },
+                    if i % 2 == 0 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
                     &text,
                 )
             })

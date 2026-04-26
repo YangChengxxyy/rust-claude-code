@@ -162,6 +162,8 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, ToolError::Execution(message) if message.contains("requires app_state")));
+        assert!(
+            matches!(error, ToolError::Execution(message) if message.contains("requires app_state"))
+        );
     }
 }

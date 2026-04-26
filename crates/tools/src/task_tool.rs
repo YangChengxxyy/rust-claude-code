@@ -263,10 +263,7 @@ mod tests {
     async fn test_invalid_command() {
         let app_state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
         let error = TaskTool::new()
-            .execute(
-                serde_json::json!({"command": "boom"}),
-                context(&app_state),
-            )
+            .execute(serde_json::json!({"command": "boom"}), context(&app_state))
             .await
             .unwrap_err();
         assert!(matches!(error, ToolError::InvalidInput(_)));

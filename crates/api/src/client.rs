@@ -30,7 +30,12 @@ pub struct AnthropicClient {
 
 impl AnthropicClient {
     pub fn new(api_key: impl Into<String>) -> Result<Self, ApiError> {
-        Self::from_http_client(api_key, Client::builder().timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS)).build()?)
+        Self::from_http_client(
+            api_key,
+            Client::builder()
+                .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+                .build()?,
+        )
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
@@ -125,8 +130,9 @@ impl AnthropicClient {
                 );
             }
             AuthMode::Bearer => {
-                let bearer = HeaderValue::from_str(&format!("Bearer {}", self.api_key))
-                    .map_err(|error| ApiError::Auth(format!("invalid authorization header value: {error}")))?;
+                let bearer = HeaderValue::from_str(&format!("Bearer {}", self.api_key)).map_err(
+                    |error| ApiError::Auth(format!("invalid authorization header value: {error}")),
+                )?;
                 headers.insert(reqwest::header::AUTHORIZATION, bearer);
             }
         }
@@ -215,7 +221,10 @@ mod tests {
             .unwrap()
             .with_base_url("https://example.com/");
 
-        assert_eq!(client.messages_endpoint(), "https://example.com/v1/messages");
+        assert_eq!(
+            client.messages_endpoint(),
+            "https://example.com/v1/messages"
+        );
     }
 
     #[test]
@@ -233,13 +242,14 @@ mod tests {
 
     #[test]
     fn test_bearer_auth_headers_use_authorization() {
-        let client = AnthropicClient::new("test-key")
-            .unwrap()
-            .with_bearer_auth();
+        let client = AnthropicClient::new("test-key").unwrap().with_bearer_auth();
 
         let headers = client.default_headers().unwrap();
 
-        assert_eq!(headers.get(reqwest::header::AUTHORIZATION).unwrap(), "Bearer test-key");
+        assert_eq!(
+            headers.get(reqwest::header::AUTHORIZATION).unwrap(),
+            "Bearer test-key"
+        );
         assert!(headers.get("x-api-key").is_none());
         assert!(headers.get("anthropic-version").is_none());
     }
@@ -253,7 +263,9 @@ mod tests {
         client.api_key = "bad\nkey".to_string();
 
         let error = client.default_headers().unwrap_err();
-        assert!(matches!(error, ApiError::Auth(message) if message.contains("invalid API key header value")));
+        assert!(
+            matches!(error, ApiError::Auth(message) if message.contains("invalid API key header value"))
+        );
     }
 
     #[test]
@@ -263,7 +275,9 @@ mod tests {
         client.anthropic_version = "2024-01-01\n".to_string();
 
         let error = client.default_headers().unwrap_err();
-        assert!(matches!(error, ApiError::Api { status: 0, message } if message.contains("invalid anthropic-version header value")));
+        assert!(
+            matches!(error, ApiError::Api { status: 0, message } if message.contains("invalid anthropic-version header value"))
+        );
     }
 
     #[test]
@@ -307,6 +321,8 @@ mod tests {
     fn test_error_response_falls_back_to_raw_body() {
         let error = map_error_response(StatusCode::BAD_REQUEST, "bad request");
 
-        assert!(matches!(error, ApiError::Api { status: 400, message } if message == "bad request"));
+        assert!(
+            matches!(error, ApiError::Api { status: 400, message } if message == "bad request")
+        );
     }
 }

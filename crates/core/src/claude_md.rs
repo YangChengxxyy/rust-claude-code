@@ -231,8 +231,14 @@ mod tests {
         fs::create_dir_all(&leaf).unwrap();
 
         let dirs = project_discovery_dirs(&leaf);
-        assert_eq!(dirs.first().unwrap().canonicalize().unwrap(), root.canonicalize().unwrap());
-        assert_eq!(dirs.last().unwrap().canonicalize().unwrap(), leaf.canonicalize().unwrap());
+        assert_eq!(
+            dirs.first().unwrap().canonicalize().unwrap(),
+            root.canonicalize().unwrap()
+        );
+        assert_eq!(
+            dirs.last().unwrap().canonicalize().unwrap(),
+            leaf.canonicalize().unwrap()
+        );
         let _ = fs::remove_dir_all(&root);
     }
 

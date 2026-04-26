@@ -822,10 +822,7 @@ mod tests {
         assert_eq!(loaded.always_allow[1].tool_name, "FileRead");
         assert_eq!(loaded.always_allow[1].pattern, None);
         assert_eq!(loaded.always_deny[0].tool_name, "Bash");
-        assert_eq!(
-            loaded.always_deny[0].pattern,
-            Some("rm -rf /".to_string())
-        );
+        assert_eq!(loaded.always_deny[0].pattern, Some("rm -rf /".to_string()));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

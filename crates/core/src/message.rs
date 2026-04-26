@@ -42,9 +42,7 @@ pub enum ContentBlock {
         signature: Option<String>,
     },
     #[serde(rename = "image")]
-    Image {
-        source: ImageSource,
-    },
+    Image { source: ImageSource },
     /// Catch-all for unknown/future content block types from the API.
     #[serde(other)]
     Unknown,
@@ -53,13 +51,8 @@ pub enum ContentBlock {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ImageSource {
-    Base64 {
-        media_type: String,
-        data: String,
-    },
-    Url {
-        url: String,
-    },
+    Base64 { media_type: String, data: String },
+    Url { url: String },
 }
 
 impl ContentBlock {
@@ -394,7 +387,10 @@ mod tests {
         let parsed: ContentBlock = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, block);
         match parsed {
-            ContentBlock::Thinking { thinking, signature } => {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
                 assert_eq!(thinking, "deep reasoning");
                 assert_eq!(signature, Some("sig_abc123".to_string()));
             }
@@ -424,7 +420,10 @@ mod tests {
         let json = r#"{"type":"thinking","thinking":"old reasoning"}"#;
         let parsed: ContentBlock = serde_json::from_str(json).unwrap();
         match parsed {
-            ContentBlock::Thinking { thinking, signature } => {
+            ContentBlock::Thinking {
+                thinking,
+                signature,
+            } => {
                 assert_eq!(thinking, "old reasoning");
                 assert_eq!(signature, None);
             }

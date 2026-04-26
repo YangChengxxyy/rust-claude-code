@@ -53,13 +53,18 @@ impl WebSearchTool {
             .next()
             .unwrap_or(url);
 
-        if blocked.iter().any(|domain| Self::domain_matches(host, domain)) {
+        if blocked
+            .iter()
+            .any(|domain| Self::domain_matches(host, domain))
+        {
             return false;
         }
         if allowed.is_empty() {
             return true;
         }
-        allowed.iter().any(|domain| Self::domain_matches(host, domain))
+        allowed
+            .iter()
+            .any(|domain| Self::domain_matches(host, domain))
     }
 
     /// Return true if `host` is exactly `domain` or is a subdomain of `domain`.
@@ -81,8 +86,9 @@ impl Tool for WebSearchTool {
     fn info(&self) -> ToolInfo {
         ToolInfo {
             name: "WebSearch".to_string(),
-            description: "Run a web search and return formatted results with optional domain filters"
-                .to_string(),
+            description:
+                "Run a web search and return formatted results with optional domain filters"
+                    .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -116,7 +122,9 @@ impl Tool for WebSearchTool {
 
         let filtered = results
             .into_iter()
-            .filter(|result| Self::domain_allowed(&result.url, &input.allowed_domains, &input.blocked_domains))
+            .filter(|result| {
+                Self::domain_allowed(&result.url, &input.allowed_domains, &input.blocked_domains)
+            })
             .collect::<Vec<_>>();
 
         let content = if filtered.is_empty() {

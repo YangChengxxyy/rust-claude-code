@@ -164,24 +164,30 @@ mod tests {
     fn test_hook_event_display() {
         assert_eq!(HookEvent::PreToolUse.to_string(), "PreToolUse");
         assert_eq!(HookEvent::PostToolUse.to_string(), "PostToolUse");
-        assert_eq!(
-            HookEvent::UserPromptSubmit.to_string(),
-            "UserPromptSubmit"
-        );
+        assert_eq!(HookEvent::UserPromptSubmit.to_string(), "UserPromptSubmit");
         assert_eq!(HookEvent::Stop.to_string(), "Stop");
         assert_eq!(HookEvent::Notification.to_string(), "Notification");
     }
 
     #[test]
     fn test_hook_event_from_str() {
-        assert_eq!(HookEvent::from_str("PreToolUse"), Some(HookEvent::PreToolUse));
-        assert_eq!(HookEvent::from_str("PostToolUse"), Some(HookEvent::PostToolUse));
+        assert_eq!(
+            HookEvent::from_str("PreToolUse"),
+            Some(HookEvent::PreToolUse)
+        );
+        assert_eq!(
+            HookEvent::from_str("PostToolUse"),
+            Some(HookEvent::PostToolUse)
+        );
         assert_eq!(
             HookEvent::from_str("UserPromptSubmit"),
             Some(HookEvent::UserPromptSubmit)
         );
         assert_eq!(HookEvent::from_str("Stop"), Some(HookEvent::Stop));
-        assert_eq!(HookEvent::from_str("Notification"), Some(HookEvent::Notification));
+        assert_eq!(
+            HookEvent::from_str("Notification"),
+            Some(HookEvent::Notification)
+        );
         assert_eq!(HookEvent::from_str("SubagentStart"), None);
         assert_eq!(HookEvent::from_str("unknown"), None);
     }
@@ -250,7 +256,10 @@ mod tests {
                 reason: "bad".into()
             }
         );
-        assert_ne!(HookResult::Continue, HookResult::Block { reason: "x".into() });
+        assert_ne!(
+            HookResult::Continue,
+            HookResult::Block { reason: "x".into() }
+        );
     }
 
     #[test]

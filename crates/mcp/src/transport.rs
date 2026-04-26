@@ -54,10 +54,7 @@ impl StdioTransport {
         }
 
         let mut child = cmd.spawn().map_err(|e| {
-            McpError::ProcessStartFailed(format!(
-                "failed to start '{}': {}",
-                command, e
-            ))
+            McpError::ProcessStartFailed(format!("failed to start '{}': {}", command, e))
         })?;
 
         let stdout = child
@@ -163,19 +160,16 @@ mod tests {
             None,
         );
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), McpError::ProcessStartFailed(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            McpError::ProcessStartFailed(_)
+        ));
     }
 
     #[tokio::test]
     async fn test_start_and_kill_process() {
         // Use a simple long-running process
-        let mut transport = StdioTransport::start(
-            "cat",
-            &[],
-            &HashMap::new(),
-            None,
-        )
-        .unwrap();
+        let mut transport = StdioTransport::start("cat", &[], &HashMap::new(), None).unwrap();
 
         assert!(transport.is_alive());
         transport.shutdown().await;
@@ -188,14 +182,9 @@ mod tests {
     async fn test_timeout_on_no_response() {
         // Start `sleep` which reads nothing and writes nothing.
         // The request will be sent but no response ever comes back.
-        let transport = StdioTransport::start(
-            "sleep",
-            &["60".to_string()],
-            &HashMap::new(),
-            None,
-        )
-        .unwrap()
-        .with_timeout_ms(200);
+        let transport = StdioTransport::start("sleep", &["60".to_string()], &HashMap::new(), None)
+            .unwrap()
+            .with_timeout_ms(200);
 
         let request = JsonRpcRequest::new("test/method", None);
         let result = transport.send_request(&request).await;

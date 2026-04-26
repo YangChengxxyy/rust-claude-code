@@ -26,7 +26,9 @@ pub struct AgentContext {
     /// Factory that produces a fresh ToolRegistry for the sub-agent.
     pub tool_registry_factory: Arc<dyn Fn() -> ToolRegistry + Send + Sync>,
     /// CLI-provided callback that runs a sub-agent and returns its final output.
-    pub run_subagent: Arc<dyn Fn(String, Vec<String>, Arc<Mutex<AppState>>, u32, u32) -> AgentRunFuture + Send + Sync>,
+    pub run_subagent: Arc<
+        dyn Fn(String, Vec<String>, Arc<Mutex<AppState>>, u32, u32) -> AgentRunFuture + Send + Sync,
+    >,
     /// Current nesting depth (0 = top-level).
     pub current_depth: u32,
     /// Maximum allowed nesting depth.
@@ -47,7 +49,11 @@ impl Default for AgentContext {
         AgentContext {
             tool_registry_factory: Arc::new(|| ToolRegistry::new()),
             run_subagent: Arc::new(|_, _, _, _, _| {
-                Box::pin(async { Err(ToolError::Execution("sub-agent runner not available".into())) })
+                Box::pin(async {
+                    Err(ToolError::Execution(
+                        "sub-agent runner not available".into(),
+                    ))
+                })
             }),
             current_depth: 0,
             max_depth: 3,

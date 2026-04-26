@@ -10,7 +10,8 @@ use crate::theme::Palette;
 
 // Task 2.1: Lazy-initialized singletons
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
-static THEME_SET: LazyLock<syntect::highlighting::ThemeSet> = LazyLock::new(syntect::highlighting::ThemeSet::load_defaults);
+static THEME_SET: LazyLock<syntect::highlighting::ThemeSet> =
+    LazyLock::new(syntect::highlighting::ThemeSet::load_defaults);
 
 /// Access the global default SyntaxSet.
 pub fn syntax_set() -> &'static SyntaxSet {
@@ -50,9 +51,19 @@ pub fn build_custom_theme(palette: &Palette) -> Theme {
 
     // Scope-derived colors
     let keyword_color = if is_dark {
-        SyntectColor { r: 0xCC, g: 0x78, b: 0x32, a: 0xFF }
+        SyntectColor {
+            r: 0xCC,
+            g: 0x78,
+            b: 0x32,
+            a: 0xFF,
+        }
     } else {
-        SyntectColor { r: 0xAF, g: 0x50, b: 0x14, a: 0xFF }
+        SyntectColor {
+            r: 0xAF,
+            g: 0x50,
+            b: 0x14,
+            a: 0xFF,
+        }
     };
 
     let string_color = ratatui_to_syntect(palette.success);
@@ -60,18 +71,38 @@ pub fn build_custom_theme(palette: &Palette) -> Theme {
 
     // Distinct blue/purple for types
     let type_color = if is_dark {
-        SyntectColor { r: 0x7A, g: 0x9E, b: 0xC2, a: 0xFF }
+        SyntectColor {
+            r: 0x7A,
+            g: 0x9E,
+            b: 0xC2,
+            a: 0xFF,
+        }
     } else {
-        SyntectColor { r: 0x5A, g: 0x6E, b: 0xA0, a: 0xFF }
+        SyntectColor {
+            r: 0x5A,
+            g: 0x6E,
+            b: 0xA0,
+            a: 0xFF,
+        }
     };
 
     let function_color = ratatui_to_syntect(palette.claude);
 
     // Teal/cyan for numeric constants
     let numeric_color = if is_dark {
-        SyntectColor { r: 0x2A, g: 0xAA, b: 0xAA, a: 0xFF }
+        SyntectColor {
+            r: 0x2A,
+            g: 0xAA,
+            b: 0xAA,
+            a: 0xFF,
+        }
     } else {
-        SyntectColor { r: 0x1A, g: 0x88, b: 0x88, a: 0xFF }
+        SyntectColor {
+            r: 0x1A,
+            g: 0x88,
+            b: 0x88,
+            a: 0xFF,
+        }
     };
 
     let text_color = ratatui_to_syntect(palette.text);
@@ -130,35 +161,129 @@ fn theme_item(scope: &str, color: SyntectColor, modifier: Option<Modifier>) -> T
 fn ratatui_to_syntect(color: RatatuiColor) -> SyntectColor {
     match color {
         RatatuiColor::Rgb(r, g, b) => SyntectColor { r, g, b, a: 0xFF },
-        RatatuiColor::Black => SyntectColor { r: 0x00, g: 0x00, b: 0x00, a: 0xFF },
-        RatatuiColor::Red => SyntectColor { r: 0xFF, g: 0x00, b: 0x00, a: 0xFF },
-        RatatuiColor::Green => SyntectColor { r: 0x00, g: 0xFF, b: 0x00, a: 0xFF },
-        RatatuiColor::Yellow => SyntectColor { r: 0xFF, g: 0xFF, b: 0x00, a: 0xFF },
-        RatatuiColor::Blue => SyntectColor { r: 0x00, g: 0x00, b: 0xFF, a: 0xFF },
-        RatatuiColor::Magenta => SyntectColor { r: 0xFF, g: 0x00, b: 0xFF, a: 0xFF },
-        RatatuiColor::Cyan => SyntectColor { r: 0x00, g: 0xFF, b: 0xFF, a: 0xFF },
-        RatatuiColor::Gray => SyntectColor { r: 0x80, g: 0x80, b: 0x80, a: 0xFF },
-        RatatuiColor::DarkGray => SyntectColor { r: 0x40, g: 0x40, b: 0x40, a: 0xFF },
-        RatatuiColor::LightRed => SyntectColor { r: 0xFF, g: 0x80, b: 0x80, a: 0xFF },
-        RatatuiColor::LightGreen => SyntectColor { r: 0x80, g: 0xFF, b: 0x80, a: 0xFF },
-        RatatuiColor::LightYellow => SyntectColor { r: 0xFF, g: 0xFF, b: 0x80, a: 0xFF },
-        RatatuiColor::LightBlue => SyntectColor { r: 0x80, g: 0x80, b: 0xFF, a: 0xFF },
-        RatatuiColor::LightMagenta => SyntectColor { r: 0xFF, g: 0x80, b: 0xFF, a: 0xFF },
-        RatatuiColor::LightCyan => SyntectColor { r: 0x80, g: 0xFF, b: 0xFF, a: 0xFF },
-        RatatuiColor::White => SyntectColor { r: 0xFF, g: 0xFF, b: 0xFF, a: 0xFF },
-        _ => SyntectColor { r: 0xFF, g: 0xFF, b: 0xFF, a: 0xFF },
+        RatatuiColor::Black => SyntectColor {
+            r: 0x00,
+            g: 0x00,
+            b: 0x00,
+            a: 0xFF,
+        },
+        RatatuiColor::Red => SyntectColor {
+            r: 0xFF,
+            g: 0x00,
+            b: 0x00,
+            a: 0xFF,
+        },
+        RatatuiColor::Green => SyntectColor {
+            r: 0x00,
+            g: 0xFF,
+            b: 0x00,
+            a: 0xFF,
+        },
+        RatatuiColor::Yellow => SyntectColor {
+            r: 0xFF,
+            g: 0xFF,
+            b: 0x00,
+            a: 0xFF,
+        },
+        RatatuiColor::Blue => SyntectColor {
+            r: 0x00,
+            g: 0x00,
+            b: 0xFF,
+            a: 0xFF,
+        },
+        RatatuiColor::Magenta => SyntectColor {
+            r: 0xFF,
+            g: 0x00,
+            b: 0xFF,
+            a: 0xFF,
+        },
+        RatatuiColor::Cyan => SyntectColor {
+            r: 0x00,
+            g: 0xFF,
+            b: 0xFF,
+            a: 0xFF,
+        },
+        RatatuiColor::Gray => SyntectColor {
+            r: 0x80,
+            g: 0x80,
+            b: 0x80,
+            a: 0xFF,
+        },
+        RatatuiColor::DarkGray => SyntectColor {
+            r: 0x40,
+            g: 0x40,
+            b: 0x40,
+            a: 0xFF,
+        },
+        RatatuiColor::LightRed => SyntectColor {
+            r: 0xFF,
+            g: 0x80,
+            b: 0x80,
+            a: 0xFF,
+        },
+        RatatuiColor::LightGreen => SyntectColor {
+            r: 0x80,
+            g: 0xFF,
+            b: 0x80,
+            a: 0xFF,
+        },
+        RatatuiColor::LightYellow => SyntectColor {
+            r: 0xFF,
+            g: 0xFF,
+            b: 0x80,
+            a: 0xFF,
+        },
+        RatatuiColor::LightBlue => SyntectColor {
+            r: 0x80,
+            g: 0x80,
+            b: 0xFF,
+            a: 0xFF,
+        },
+        RatatuiColor::LightMagenta => SyntectColor {
+            r: 0xFF,
+            g: 0x80,
+            b: 0xFF,
+            a: 0xFF,
+        },
+        RatatuiColor::LightCyan => SyntectColor {
+            r: 0x80,
+            g: 0xFF,
+            b: 0xFF,
+            a: 0xFF,
+        },
+        RatatuiColor::White => SyntectColor {
+            r: 0xFF,
+            g: 0xFF,
+            b: 0xFF,
+            a: 0xFF,
+        },
+        _ => SyntectColor {
+            r: 0xFF,
+            g: 0xFF,
+            b: 0xFF,
+            a: 0xFF,
+        },
     }
 }
 
 fn syntect_style_to_ratatui(style: syntect::highlighting::Style) -> Style {
     let mut ratatui_style = Style::default().fg(syntect_to_ratatui(style.foreground));
-    if style.font_style.contains(syntect::highlighting::FontStyle::BOLD) {
+    if style
+        .font_style
+        .contains(syntect::highlighting::FontStyle::BOLD)
+    {
         ratatui_style = ratatui_style.add_modifier(Modifier::BOLD);
     }
-    if style.font_style.contains(syntect::highlighting::FontStyle::ITALIC) {
+    if style
+        .font_style
+        .contains(syntect::highlighting::FontStyle::ITALIC)
+    {
         ratatui_style = ratatui_style.add_modifier(Modifier::ITALIC);
     }
-    if style.font_style.contains(syntect::highlighting::FontStyle::UNDERLINE) {
+    if style
+        .font_style
+        .contains(syntect::highlighting::FontStyle::UNDERLINE)
+    {
         ratatui_style = ratatui_style.add_modifier(Modifier::UNDERLINED);
     }
     ratatui_style
@@ -182,13 +307,11 @@ pub fn highlight_line(
     highlight_state: &mut syntect::highlighting::HighlightState,
     highlighter: &Highlighter,
 ) -> Vec<(Style, String)> {
-    let ops = parse_state.parse_line(line, &SYNTAX_SET).unwrap_or_default();
-    let iter = syntect::highlighting::HighlightIterator::new(
-        highlight_state,
-        &ops,
-        line,
-        highlighter,
-    );
+    let ops = parse_state
+        .parse_line(line, &SYNTAX_SET)
+        .unwrap_or_default();
+    let iter =
+        syntect::highlighting::HighlightIterator::new(highlight_state, &ops, line, highlighter);
     iter.map(|(style, text)| (syntect_style_to_ratatui(style), text.to_string()))
         .collect()
 }
@@ -203,19 +326,22 @@ pub fn new_highlight_state(highlighter: &Highlighter) -> syntect::highlighting::
 /// Supports common aliases and falls back through multiple lookup strategies.
 /// For languages not in syntect defaults (e.g., TypeScript, TOML), maps to the
 /// closest available syntax (TypeScript→JavaScript).
-pub fn resolve_syntax<'a>(language: &str, syntax_set: &'a SyntaxSet) -> Option<&'a SyntaxReference> {
+pub fn resolve_syntax<'a>(
+    language: &str,
+    syntax_set: &'a SyntaxSet,
+) -> Option<&'a SyntaxReference> {
     let normalized = language.to_lowercase();
 
     // Map aliases to file-extension tokens that syntect knows about.
     // syntect's default set uses file extensions for token lookup.
     let token = match normalized.as_str() {
-        "ts" | "tsx" | "typescript" => "js",  // TypeScript not in defaults, use JS
+        "ts" | "tsx" | "typescript" => "js", // TypeScript not in defaults, use JS
         "py" | "python" => "py",
         "sh" | "shell" => "sh",
         "bash" | "zsh" => "bash",
         "js" | "jsx" | "javascript" => "js",
         "yml" => "yaml",
-        "toml" => "toml",  // Not in defaults — will gracefully fail
+        "toml" => "toml", // Not in defaults — will gracefully fail
         "c++" | "cpp" | "cxx" => "cpp",
         "c#" | "csharp" => "cs",
         other => other,
@@ -379,7 +505,10 @@ mod tests {
         assert!(syntax.is_some());
         let name = syntax.unwrap().name.as_str();
         assert!(
-            name.contains("Shell") || name.contains("Bourne") || name.contains("Bash") || name.contains("bash"),
+            name.contains("Shell")
+                || name.contains("Bourne")
+                || name.contains("Bash")
+                || name.contains("bash"),
             "Expected Shell/Bash syntax, got {}",
             name
         );
@@ -392,7 +521,10 @@ mod tests {
         assert!(syntax.is_some());
         let name = syntax.unwrap().name.as_str();
         assert!(
-            name.contains("Shell") || name.contains("Bourne") || name.contains("Bash") || name.contains("bash"),
+            name.contains("Shell")
+                || name.contains("Bourne")
+                || name.contains("Bash")
+                || name.contains("bash"),
             "Expected Shell/Bash syntax, got {}",
             name
         );

@@ -69,24 +69,22 @@ impl Tool for McpProxyTool {
                 if call_result.is_error {
                     Ok(ToolResult::error(context.tool_use_id, call_result.content))
                 } else {
-                    Ok(ToolResult::success(context.tool_use_id, call_result.content))
+                    Ok(ToolResult::success(
+                        context.tool_use_id,
+                        call_result.content,
+                    ))
                 }
             }
-            Err(e) => {
-                Ok(ToolResult::error(
-                    context.tool_use_id,
-                    format!("MCP tool call failed: {}", e),
-                ))
-            }
+            Err(e) => Ok(ToolResult::error(
+                context.tool_use_id,
+                format!("MCP tool call failed: {}", e),
+            )),
         }
     }
 }
 
 /// Register all discovered MCP tools from the manager into a `ToolRegistry`.
-pub fn register_mcp_tools(
-    registry: &mut crate::registry::ToolRegistry,
-    manager: &Arc<McpManager>,
-) {
+pub fn register_mcp_tools(registry: &mut crate::registry::ToolRegistry, manager: &Arc<McpManager>) {
     for (qualified_name, tool_info) in manager.discovered_tools() {
         let proxy = McpProxyTool::new(
             qualified_name,
@@ -151,13 +149,10 @@ mod tests {
         let context = ToolContext {
             tool_use_id: "test_id".into(),
             app_state: None,
-                    agent_context: None,
+            agent_context: None,
         };
 
-        let result = tool
-            .execute(serde_json::json!({}), context)
-            .await
-            .unwrap();
+        let result = tool.execute(serde_json::json!({}), context).await.unwrap();
 
         assert!(result.is_error);
         assert!(result.content.contains("MCP tool call failed"));

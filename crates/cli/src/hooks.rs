@@ -150,11 +150,7 @@ impl HookRunner {
 
     /// Collect all `HookConfig` entries that match the given event and optional tool name.
     /// Returns configs in configuration order (user hooks first, project hooks after).
-    fn get_matching_hooks(
-        &self,
-        event: &HookEvent,
-        tool_name: Option<&str>,
-    ) -> Vec<&HookConfig> {
+    fn get_matching_hooks(&self, event: &HookEvent, tool_name: Option<&str>) -> Vec<&HookConfig> {
         let event_key = event.as_str();
         let groups = match self.hooks.get(event_key) {
             Some(groups) => groups,
@@ -182,10 +178,7 @@ impl HookRunner {
 
             for hook in &group.hooks {
                 if hook.type_ != "command" {
-                    eprintln!(
-                        "Warning: unsupported hook type '{}', skipping",
-                        hook.type_
-                    );
+                    eprintln!("Warning: unsupported hook type '{}', skipping", hook.type_);
                     continue;
                 }
                 if hook.command.is_none() {
@@ -315,9 +308,7 @@ impl HookRunner {
             Ok(resp) => {
                 if resp.decision.as_deref() == Some("block") {
                     HookResult::Block {
-                        reason: resp
-                            .reason
-                            .unwrap_or_else(|| "Blocked by hook".to_string()),
+                        reason: resp.reason.unwrap_or_else(|| "Blocked by hook".to_string()),
                     }
                 } else {
                     HookResult::Continue
@@ -338,11 +329,7 @@ mod tests {
     use rust_claude_core::hooks::HookEventGroup;
     use std::collections::HashMap;
 
-    fn make_hooks_config(
-        event: &str,
-        matcher: Option<&str>,
-        command: &str,
-    ) -> HooksConfig {
+    fn make_hooks_config(event: &str, matcher: Option<&str>, command: &str) -> HooksConfig {
         let mut config = HashMap::new();
         config.insert(
             event.to_string(),
@@ -434,8 +421,7 @@ mod tests {
 
     #[test]
     fn test_parse_approve_json() {
-        let result =
-            HookRunner::parse_pre_tool_use_result(r#"{"decision": "approve"}"#, 0);
+        let result = HookRunner::parse_pre_tool_use_result(r#"{"decision": "approve"}"#, 0);
         assert_eq!(result, HookResult::Continue);
     }
 
@@ -455,8 +441,7 @@ mod tests {
 
     #[test]
     fn test_parse_block_without_reason() {
-        let result =
-            HookRunner::parse_pre_tool_use_result(r#"{"decision": "block"}"#, 0);
+        let result = HookRunner::parse_pre_tool_use_result(r#"{"decision": "block"}"#, 0);
         assert_eq!(
             result,
             HookResult::Block {
@@ -496,10 +481,7 @@ mod tests {
 
     #[test]
     fn test_parse_exit_code_2_with_json_reason() {
-        let result = HookRunner::parse_pre_tool_use_result(
-            r#"{"reason": "policy violation"}"#,
-            2,
-        );
+        let result = HookRunner::parse_pre_tool_use_result(r#"{"reason": "policy violation"}"#, 2);
         assert_eq!(
             result,
             HookResult::Block {
@@ -604,7 +586,9 @@ mod tests {
                     matcher: None,
                     hooks: vec![HookConfig {
                         type_: "command".to_string(),
-                        command: Some(r#"echo '{"decision":"block","reason":"first"}'"#.to_string()),
+                        command: Some(
+                            r#"echo '{"decision":"block","reason":"first"}'"#.to_string(),
+                        ),
                         timeout: None,
                     }],
                 },
@@ -613,7 +597,9 @@ mod tests {
                     hooks: vec![HookConfig {
                         type_: "command".to_string(),
                         // This would create a file if it ran — we check it doesn't
-                        command: Some("touch /tmp/rust-claude-hook-test-should-not-exist".to_string()),
+                        command: Some(
+                            "touch /tmp/rust-claude-hook-test-should-not-exist".to_string(),
+                        ),
                         timeout: None,
                     }],
                 },
@@ -639,7 +625,13 @@ mod tests {
         let hooks = make_hooks_config("PostToolUse", Some("Bash"), "cat > /dev/null");
         let runner = HookRunner::new(hooks, PathBuf::from("/tmp"));
         runner
-            .run_post_tool_use("Bash", &serde_json::json!({"command": "ls"}), "output", false, "")
+            .run_post_tool_use(
+                "Bash",
+                &serde_json::json!({"command": "ls"}),
+                "output",
+                false,
+                "",
+            )
             .await;
     }
 

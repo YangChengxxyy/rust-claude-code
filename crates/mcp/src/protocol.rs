@@ -96,10 +96,7 @@ pub struct McpClient {
 impl McpClient {
     /// Connect to an MCP server using the given config.
     /// This starts the process and performs the `initialize` handshake.
-    pub async fn connect(
-        server_name: &str,
-        config: &McpServerConfig,
-    ) -> Result<Self, McpError> {
+    pub async fn connect(server_name: &str, config: &McpServerConfig) -> Result<Self, McpError> {
         let transport = StdioTransport::start(
             &config.command,
             &config.args,
@@ -160,10 +157,8 @@ impl McpClient {
         );
 
         let result_value = self.transport.send_request(&request).await?;
-        let init_result: InitializeResult =
-            serde_json::from_value(result_value).map_err(|e| {
-                McpError::Protocol(format!("invalid initialize response: {e}"))
-            })?;
+        let init_result: InitializeResult = serde_json::from_value(result_value)
+            .map_err(|e| McpError::Protocol(format!("invalid initialize response: {e}")))?;
 
         self.initialize_result = Some(init_result);
 
@@ -189,10 +184,8 @@ impl McpClient {
         let request = JsonRpcRequest::new("tools/list", Some(serde_json::json!({})));
         let result_value = self.transport.send_request(&request).await?;
 
-        let tools_result: ToolsListResult =
-            serde_json::from_value(result_value).map_err(|e| {
-                McpError::Protocol(format!("invalid tools/list response: {e}"))
-            })?;
+        let tools_result: ToolsListResult = serde_json::from_value(result_value)
+            .map_err(|e| McpError::Protocol(format!("invalid tools/list response: {e}")))?;
 
         Ok(tools_result
             .tools
@@ -221,10 +214,8 @@ impl McpClient {
 
         let result_value = self.transport.send_request(&request).await?;
 
-        let call_result: ToolsCallResult =
-            serde_json::from_value(result_value).map_err(|e| {
-                McpError::Protocol(format!("invalid tools/call response: {e}"))
-            })?;
+        let call_result: ToolsCallResult = serde_json::from_value(result_value)
+            .map_err(|e| McpError::Protocol(format!("invalid tools/call response: {e}")))?;
 
         // Concatenate all text content items
         let text = call_result
@@ -286,7 +277,10 @@ mod tests {
 
         let tool: McpToolDefinition = serde_json::from_str(json).unwrap();
         assert_eq!(tool.name, "read_file");
-        assert_eq!(tool.description.as_deref(), Some("Read a file from the filesystem"));
+        assert_eq!(
+            tool.description.as_deref(),
+            Some("Read a file from the filesystem")
+        );
         assert!(tool.input_schema.is_object());
     }
 
@@ -331,7 +325,10 @@ mod tests {
 
         let result: ToolsCallResult = serde_json::from_str(json).unwrap();
         assert_eq!(result.content.len(), 1);
-        assert_eq!(result.content[0].text.as_deref(), Some("file contents here"));
+        assert_eq!(
+            result.content[0].text.as_deref(),
+            Some("file contents here")
+        );
         assert!(!result.is_error);
     }
 

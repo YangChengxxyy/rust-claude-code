@@ -78,10 +78,7 @@ impl LspTool {
                         .cloned()
                         .unwrap_or_default();
                     let line = start.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let character = start
-                        .get("character")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
+                    let character = start.get("character").and_then(|v| v.as_u64()).unwrap_or(0);
                     format!("{}:{}:{}", uri, line, character)
                 })
                 .collect::<Vec<_>>()
@@ -145,12 +142,17 @@ impl Tool for LspTool {
                     .as_ref()
                     .ok_or_else(|| ToolError::InvalidInput("missing path".to_string()))?;
                 let (line, character) = Self::require_position(&input)?;
-                let key = self.manager
+                let key = self
+                    .manager
                     .ensure_session(&cwd, path)
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
-                let value = self.manager
-                    .request(&key, LspRequest::go_to_definition(&Self::file_uri(path, &cwd), line, character))
+                let value = self
+                    .manager
+                    .request(
+                        &key,
+                        LspRequest::go_to_definition(&Self::file_uri(path, &cwd), line, character),
+                    )
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 Self::format_locations(value)?
@@ -161,12 +163,17 @@ impl Tool for LspTool {
                     .as_ref()
                     .ok_or_else(|| ToolError::InvalidInput("missing path".to_string()))?;
                 let (line, character) = Self::require_position(&input)?;
-                let key = self.manager
+                let key = self
+                    .manager
                     .ensure_session(&cwd, path)
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
-                let value = self.manager
-                    .request(&key, LspRequest::find_references(&Self::file_uri(path, &cwd), line, character))
+                let value = self
+                    .manager
+                    .request(
+                        &key,
+                        LspRequest::find_references(&Self::file_uri(path, &cwd), line, character),
+                    )
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 Self::format_locations(value)?
@@ -177,12 +184,17 @@ impl Tool for LspTool {
                     .as_ref()
                     .ok_or_else(|| ToolError::InvalidInput("missing path".to_string()))?;
                 let (line, character) = Self::require_position(&input)?;
-                let key = self.manager
+                let key = self
+                    .manager
                     .ensure_session(&cwd, path)
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
-                let value = self.manager
-                    .request(&key, LspRequest::hover(&Self::file_uri(path, &cwd), line, character))
+                let value = self
+                    .manager
+                    .request(
+                        &key,
+                        LspRequest::hover(&Self::file_uri(path, &cwd), line, character),
+                    )
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 serde_json::to_string_pretty(&value)
@@ -193,12 +205,17 @@ impl Tool for LspTool {
                     .path
                     .as_ref()
                     .ok_or_else(|| ToolError::InvalidInput("missing path".to_string()))?;
-                let key = self.manager
+                let key = self
+                    .manager
                     .ensure_session(&cwd, path)
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
-                let value = self.manager
-                    .request(&key, LspRequest::document_symbol(&Self::file_uri(path, &cwd)))
+                let value = self
+                    .manager
+                    .request(
+                        &key,
+                        LspRequest::document_symbol(&Self::file_uri(path, &cwd)),
+                    )
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
                 serde_json::to_string_pretty(&value)
@@ -209,15 +226,16 @@ impl Tool for LspTool {
                     .query
                     .as_deref()
                     .ok_or_else(|| ToolError::InvalidInput("missing query".to_string()))?;
-                let any_path = input
-                    .path
-                    .as_ref()
-                    .ok_or_else(|| ToolError::InvalidInput("missing path for language selection".to_string()))?;
-                let key = self.manager
+                let any_path = input.path.as_ref().ok_or_else(|| {
+                    ToolError::InvalidInput("missing path for language selection".to_string())
+                })?;
+                let key = self
+                    .manager
                     .ensure_session(&cwd, any_path)
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;
-                let value = self.manager
+                let value = self
+                    .manager
                     .request(&key, LspRequest::workspace_symbol(query))
                     .await
                     .map_err(|e| ToolError::Execution(e.to_string()))?;

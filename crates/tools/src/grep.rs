@@ -316,8 +316,8 @@ impl Tool for GrepTool {
         input: serde_json::Value,
         context: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let input: GrepInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+        let input: GrepInput =
+            serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
 
         let case_insensitive = input.case_insensitive.unwrap_or(false);
         let re = RegexBuilder::new(&input.pattern)
@@ -374,17 +374,23 @@ mod tests {
         ToolContext {
             tool_use_id: "tool_1".to_string(),
             app_state: None,
-                    agent_context: None,
+            agent_context: None,
         }
     }
 
     async fn setup_test_files(dir: &Path) {
-        fs::write(dir.join("main.rs"), "fn main() {\n    println!(\"hello\");\n}\n")
-            .await
-            .unwrap();
-        fs::write(dir.join("lib.rs"), "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n")
-            .await
-            .unwrap();
+        fs::write(
+            dir.join("main.rs"),
+            "fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .await
+        .unwrap();
+        fs::write(
+            dir.join("lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
+        )
+        .await
+        .unwrap();
         fs::write(dir.join("notes.txt"), "TODO: fix the bug\nDone: refactor\n")
             .await
             .unwrap();
@@ -606,7 +612,9 @@ mod tests {
     #[tokio::test]
     async fn test_grep_no_matches() {
         let dir = make_temp_dir("nomatch").await;
-        fs::write(dir.join("test.txt"), "hello world\n").await.unwrap();
+        fs::write(dir.join("test.txt"), "hello world\n")
+            .await
+            .unwrap();
 
         let tool = GrepTool::new();
         let result = tool

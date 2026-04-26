@@ -75,10 +75,7 @@ impl BashTool {
         let head = &output[..head_end];
         let tail = &output[tail_start..];
 
-        (
-            format!("{head}\n... output truncated ...\n{tail}"),
-            true,
-        )
+        (format!("{head}\n... output truncated ...\n{tail}"), true)
     }
 }
 
@@ -203,10 +200,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_bash_respects_workdir() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "rust-claude-tools-{}",
-            std::process::id()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("rust-claude-tools-{}", std::process::id()));
         tokio::fs::create_dir_all(&temp_dir).await.unwrap();
         let file_path = temp_dir.join("sample.txt");
         tokio::fs::write(&file_path, "hello").await.unwrap();

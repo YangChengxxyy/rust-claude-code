@@ -79,7 +79,8 @@ impl ToolRegistry {
     /// then remove any in the deny list.
     pub fn apply_tool_filters(&mut self, allowed: &[String], disallowed: &[String]) {
         if !allowed.is_empty() {
-            self.tools.retain(|name, _| allowed.iter().any(|a| a == name));
+            self.tools
+                .retain(|name, _| allowed.iter().any(|a| a == name));
         }
         for name in disallowed {
             self.tools.remove(name);
@@ -167,7 +168,15 @@ mod tests {
         let names = registry.names();
         assert_eq!(
             names,
-            vec!["Bash", "FileEdit", "FileRead", "FileWrite", "Glob", "Grep", "TodoWrite"]
+            vec![
+                "Bash",
+                "FileEdit",
+                "FileRead",
+                "FileWrite",
+                "Glob",
+                "Grep",
+                "TodoWrite"
+            ]
         );
     }
 }

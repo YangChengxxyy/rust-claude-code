@@ -238,7 +238,8 @@ impl StreamingMarkdownState {
                             // Cache theme and create initial highlight state
                             let theme = crate::highlight::build_custom_theme(&self.palette);
                             let highlighter = syntect::highlighting::Highlighter::new(&theme);
-                            self.highlight_hl_state = Some(crate::highlight::new_highlight_state(&highlighter));
+                            self.highlight_hl_state =
+                                Some(crate::highlight::new_highlight_state(&highlighter));
                             self.highlight_theme = Some(theme);
                         }
                     }
@@ -277,10 +278,8 @@ impl StreamingMarkdownState {
                     } else {
                         Span::raw("  ")
                     };
-                    self.lines_cache.push(Line::from(vec![
-                        prefix,
-                        Span::styled(heading_text, style),
-                    ]));
+                    self.lines_cache
+                        .push(Line::from(vec![prefix, Span::styled(heading_text, style)]));
                     self.block_state = BlockState::Paragraph;
                     self.first_block = false;
                     self.last_was_blank = false;
@@ -288,8 +287,9 @@ impl StreamingMarkdownState {
                 }
 
                 // Unordered list item
-                if let Some(text) =
-                    trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* "))
+                if let Some(text) = trimmed
+                    .strip_prefix("- ")
+                    .or_else(|| trimmed.strip_prefix("* "))
                 {
                     let mut spans = vec![
                         Span::raw("  "),
@@ -590,7 +590,12 @@ mod tests {
     fn test_code_block_state_across_deltas() {
         let mut state = StreamingMarkdownState::new(Palette::dark());
         state.push_delta("```rust\n");
-        assert_eq!(state.block_state, BlockState::CodeBlock { lang: Some("rust".to_string()) });
+        assert_eq!(
+            state.block_state,
+            BlockState::CodeBlock {
+                lang: Some("rust".to_string())
+            }
+        );
 
         state.push_delta("fn main() {\n");
         state.push_delta("    println!(\"hello\");\n");
@@ -722,7 +727,9 @@ mod tests {
         // Push 500 lines of mixed markdown content
         for i in 0..100 {
             state.push_delta(&format!("## Heading {i}\n"));
-            state.push_delta(&format!("Paragraph line with **bold** and `code` for item {i}.\n"));
+            state.push_delta(&format!(
+                "Paragraph line with **bold** and `code` for item {i}.\n"
+            ));
             state.push_delta(&format!("- List item {i}\n"));
             state.push_delta(&format!("```rust\nfn example_{i}() {{}}\n```\n"));
             state.push_delta("\n");

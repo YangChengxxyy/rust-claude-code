@@ -19,7 +19,9 @@ pub struct SseEvent {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
-    MessageStart { message: StreamMessage },
+    MessageStart {
+        message: StreamMessage,
+    },
     ContentBlockStart {
         index: usize,
         content_block: ContentBlock,
@@ -28,7 +30,9 @@ pub enum StreamEvent {
         index: usize,
         delta: ContentBlockDelta,
     },
-    ContentBlockStop { index: usize },
+    ContentBlockStop {
+        index: usize,
+    },
     MessageDelta {
         delta: MessageDelta,
         #[serde(default)]

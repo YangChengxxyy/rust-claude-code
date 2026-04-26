@@ -170,7 +170,10 @@ pub fn select_relevant_memories(
         .entries
         .iter()
         .filter_map(|entry| {
-            let mut haystacks = vec![entry.relative_path.to_lowercase(), entry.body.to_lowercase()];
+            let mut haystacks = vec![
+                entry.relative_path.to_lowercase(),
+                entry.body.to_lowercase(),
+            ];
             if let Some(name) = &entry.frontmatter.name {
                 haystacks.push(name.to_lowercase());
             }
@@ -180,7 +183,11 @@ pub fn select_relevant_memories(
 
             let score = query_terms
                 .iter()
-                .filter(|term| haystacks.iter().any(|haystack| haystack.contains(term.as_str())))
+                .filter(|term| {
+                    haystacks
+                        .iter()
+                        .any(|haystack| haystack.contains(term.as_str()))
+                })
                 .count();
 
             if score == 0 {
@@ -202,7 +209,11 @@ pub fn select_relevant_memories(
         .collect::<Vec<_>>();
 
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-    scored.into_iter().take(limit).map(|(_, _, memory)| memory).collect()
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, memory)| memory)
+        .collect()
 }
 
 pub fn build_relevant_memories_section(memories: &[RelevantMemory]) -> Option<String> {
@@ -319,11 +330,16 @@ pub fn rebuild_memory_index(store: &MemoryStore) -> std::io::Result<()> {
             .name
             .clone()
             .unwrap_or_else(|| entry.relative_path.clone());
-        let hook = entry
-            .frontmatter
-            .description
-            .clone()
-            .unwrap_or_else(|| format!("{} memory", entry.frontmatter.memory_type.map(|t| t.as_str()).unwrap_or("unknown")));
+        let hook = entry.frontmatter.description.clone().unwrap_or_else(|| {
+            format!(
+                "{} memory",
+                entry
+                    .frontmatter
+                    .memory_type
+                    .map(|t| t.as_str())
+                    .unwrap_or("unknown")
+            )
+        });
         lines.push(format!("- [{}]({}) - {}", title, entry.relative_path, hook));
     }
     let content = if lines.is_empty() {
@@ -420,9 +436,17 @@ fn parse_frontmatter(content: &str) -> (MemoryFrontmatter, String) {
         return (MemoryFrontmatter::default(), content.trim().to_string());
     }
 
-    let Some(end_idx) = lines.iter().enumerate().skip(1).find_map(|(i, line)| {
-        if *line == "---" { Some(i) } else { None }
-    }) else {
+    let Some(end_idx) =
+        lines.iter().enumerate().skip(1).find_map(
+            |(i, line)| {
+                if *line == "---" {
+                    Some(i)
+                } else {
+                    None
+                }
+            },
+        )
+    else {
         return (MemoryFrontmatter::default(), content.trim().to_string());
     };
 
@@ -516,13 +540,19 @@ mod tests {
         assert_eq!(frontmatter.name.as_deref(), Some("Test"));
         assert_eq!(frontmatter.description.as_deref(), Some("Desc"));
         assert_eq!(frontmatter.memory_type, Some(MemoryType::Project));
-        assert_eq!(frontmatter.extra.get("foo").map(String::as_str), Some("bar"));
+        assert_eq!(
+            frontmatter.extra.get("foo").map(String::as_str),
+            Some("bar")
+        );
         assert_eq!(body, "Body");
     }
 
     #[test]
     fn truncates_memory_entrypoint() {
-        let raw = (0..210).map(|i| format!("- line {i}")).collect::<Vec<_>>().join("\n");
+        let raw = (0..210)
+            .map(|i| format!("- line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let (content, truncated) = truncate_entrypoint(&raw);
         assert!(truncated);
         assert!(content.lines().count() <= MEMORY_ENTRY_MAX_LINES);
@@ -782,7 +812,8 @@ mod tests {
 
     #[test]
     fn correct_memory_entry_errors_on_nonexistent_target() {
-        let dir = std::env::temp_dir().join(format!("memory-correct-missing-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("memory-correct-missing-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let store = MemoryStore {

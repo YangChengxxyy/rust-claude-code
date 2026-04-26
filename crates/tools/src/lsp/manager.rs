@@ -27,7 +27,11 @@ impl LspManager {
         }
     }
 
-    pub async fn ensure_session(&self, cwd: &Path, target: &Path) -> Result<LspSessionKey, LspError> {
+    pub async fn ensure_session(
+        &self,
+        cwd: &Path,
+        target: &Path,
+    ) -> Result<LspSessionKey, LspError> {
         let language = detect_language_from_path(target)
             .ok_or_else(|| LspError::UnsupportedLanguage(target.display().to_string()))?;
         let key = LspSessionKey {
@@ -58,7 +62,11 @@ impl LspManager {
         Ok(key)
     }
 
-    pub async fn request(&self, key: &LspSessionKey, request: LspRequest) -> Result<serde_json::Value, LspError> {
+    pub async fn request(
+        &self,
+        key: &LspSessionKey,
+        request: LspRequest,
+    ) -> Result<serde_json::Value, LspError> {
         // Clone the Arc to release the lock before sending the request,
         // so concurrent LSP requests are not serialized.
         let transport = {

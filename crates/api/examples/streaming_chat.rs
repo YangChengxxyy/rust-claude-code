@@ -1,5 +1,7 @@
 use futures_util::StreamExt;
-use rust_claude_api::{AnthropicClient, ApiMessage, ContentBlockDelta, CreateMessageRequest, StreamEvent};
+use rust_claude_api::{
+    AnthropicClient, ApiMessage, ContentBlockDelta, CreateMessageRequest, StreamEvent,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -4,16 +4,16 @@ use futures_util::future::join_all;
 use futures_util::StreamExt;
 use rust_claude_api::{
     inject_cache_control_on_messages, ApiError, ApiMessage, ApiTool, ContentBlockAccumulator,
-    CreateMessageRequest, CreateMessageResponse, ModelClient, StreamEvent,
-    SystemBlock, SystemPrompt,
+    CreateMessageRequest, CreateMessageResponse, ModelClient, StreamEvent, SystemBlock,
+    SystemPrompt,
 };
 use rust_claude_core::{
     compaction::CompactionConfig,
     memory,
     message::{ContentBlock, Message, StopReason},
     model::{
-        get_runtime_main_loop_model, get_thinking_config_for_model,
-        normalize_model_string_for_api, usage_exceeds_200k_tokens,
+        get_runtime_main_loop_model, get_thinking_config_for_model, normalize_model_string_for_api,
+        usage_exceeds_200k_tokens,
     },
     permission::{PermissionCheck, PermissionRequest},
     state::AppState,
@@ -142,7 +142,9 @@ where
                 }
             }
 
-            let request = self.build_request(&app_state, scanned_memory.as_ref()).await;
+            let request = self
+                .build_request(&app_state, scanned_memory.as_ref())
+                .await;
             let use_stream = {
                 let state = app_state.lock().await;
                 state.session.stream
@@ -183,7 +185,8 @@ where
             if stop_reason == Some(StopReason::MaxTokens) {
                 // If the response has tool_use blocks, execute them first
                 if assistant_message.has_tool_use() {
-                    self.execute_tool_uses(&app_state, &assistant_message).await?;
+                    self.execute_tool_uses(&app_state, &assistant_message)
+                        .await?;
                 }
 
                 if max_tokens_recovery_count < MAX_TOKENS_RECOVERY_LIMIT {
@@ -223,7 +226,8 @@ where
                 return Ok(assistant_message);
             }
 
-            self.execute_tool_uses(&app_state, &assistant_message).await?;
+            self.execute_tool_uses(&app_state, &assistant_message)
+                .await?;
         }
 
         if let Some(runner) = &self.hook_runner {
@@ -258,7 +262,10 @@ where
                     model = message.model;
                     usage = Some(message.usage);
                 }
-                StreamEvent::ContentBlockStart { index, content_block } => {
+                StreamEvent::ContentBlockStart {
+                    index,
+                    content_block,
+                } => {
                     ensure_index(&mut content, index);
                     ensure_index(&mut accumulators, index);
                     // Forward tool_use block starts to the bridge for streaming display
@@ -275,9 +282,9 @@ where
                 }
                 StreamEvent::ContentBlockDelta { index, delta } => {
                     ensure_index(&mut accumulators, index);
-                    let accumulator = accumulators[index]
-                        .as_mut()
-                        .ok_or_else(|| QueryLoopError::Tool("missing content block accumulator".to_string()))?;
+                    let accumulator = accumulators[index].as_mut().ok_or_else(|| {
+                        QueryLoopError::Tool("missing content block accumulator".to_string())
+                    })?;
                     // Send streaming deltas to the TUI bridge
                     if let Some(bridge) = &self.bridge {
                         match &delta {
@@ -311,7 +318,9 @@ where
                     ensure_index(&mut accumulators, index);
                     if let Some(accumulator) = accumulators[index].take() {
                         ensure_index(&mut content, index);
-                        let block = accumulator.into_content_block().map_err(QueryLoopError::Api)?;
+                        let block = accumulator
+                            .into_content_block()
+                            .map_err(QueryLoopError::Api)?;
                         if let Some(bridge) = &self.bridge {
                             if let ContentBlock::Thinking { thinking, .. } = &block {
                                 bridge.send_thinking_complete(thinking).await;
@@ -320,7 +329,10 @@ where
                         content[index] = Some(block);
                     }
                 }
-                StreamEvent::MessageDelta { delta, usage: delta_usage } => {
+                StreamEvent::MessageDelta {
+                    delta,
+                    usage: delta_usage,
+                } => {
                     stop_reason = delta.stop_reason;
                     stop_sequence = delta.stop_sequence;
                     if delta_usage.is_some() {
@@ -340,7 +352,8 @@ where
             model,
             stop_reason,
             stop_sequence,
-            usage: usage.ok_or_else(|| QueryLoopError::Tool("missing streamed usage".to_string()))?,
+            usage: usage
+                .ok_or_else(|| QueryLoopError::Tool("missing streamed usage".to_string()))?,
         })
     }
 
@@ -378,11 +391,7 @@ where
             .unwrap_or_default();
 
         // Serialize messages as JSON values so we can inject cache_control
-        let messages: Vec<ApiMessage> = state
-            .messages
-            .iter()
-            .map(ApiMessage::from)
-            .collect();
+        let messages: Vec<ApiMessage> = state.messages.iter().map(ApiMessage::from).collect();
         let mut serialized_messages: Vec<serde_json::Value> = messages
             .iter()
             .filter_map(|m| {
@@ -404,9 +413,9 @@ where
                 }
                 full_prompt.push_str(&extra);
             }
-            SystemPrompt::StructuredBlocks(vec![
-                SystemBlock::text(full_prompt).with_cache_control()
-            ])
+            SystemPrompt::StructuredBlocks(
+                vec![SystemBlock::text(full_prompt).with_cache_control()],
+            )
         });
 
         let tools = self
@@ -423,19 +432,15 @@ where
             .collect::<Vec<_>>();
 
         // Determine thinking config based on model
-        let thinking_config = get_thinking_config_for_model(
-            &runtime_model,
-            state.session.thinking_enabled,
-        );
+        let thinking_config =
+            get_thinking_config_for_model(&runtime_model, state.session.thinking_enabled);
         let max_tokens = state.session.max_tokens;
 
-        let mut request = CreateMessageRequest::new(
-            normalize_model_string_for_api(&runtime_model),
-            messages,
-        )
-        .with_max_tokens(max_tokens)
-        .with_tools(tools)
-        .with_stream(state.session.stream);
+        let mut request =
+            CreateMessageRequest::new(normalize_model_string_for_api(&runtime_model), messages)
+                .with_max_tokens(max_tokens)
+                .with_tools(tools)
+                .with_stream(state.session.stream);
 
         if let Some(system) = system {
             request.system = Some(system);
@@ -452,7 +457,9 @@ where
             .filter_map(|v| {
                 let result: Result<ApiMessage, _> = serde_json::from_value(v);
                 if let Err(ref e) = result {
-                    eprintln!("Warning: failed to deserialize cache-injected message, skipping: {e}");
+                    eprintln!(
+                        "Warning: failed to deserialize cache-injected message, skipping: {e}"
+                    );
                 }
                 result.ok()
             })
@@ -561,9 +568,9 @@ where
             }
 
             // Check permission before scheduling execution.
-            if let Some((denial_msg, is_error)) =
-                self.check_tool_permission(app_state, name, input, is_read_only)
-                    .await
+            if let Some((denial_msg, is_error)) = self
+                .check_tool_permission(app_state, name, input, is_read_only)
+                .await
             {
                 if let Some(bridge) = &self.bridge {
                     bridge.send_tool_result(name, &denial_msg, is_error).await;
@@ -586,7 +593,12 @@ where
                 }
             }
 
-            let entry = (index, tool_use_id.to_string(), name.to_string(), input.clone());
+            let entry = (
+                index,
+                tool_use_id.to_string(),
+                name.to_string(),
+                input.clone(),
+            );
             if self.tools.is_concurrency_safe(name) {
                 concurrent.push(entry);
             } else {
@@ -594,21 +606,23 @@ where
             }
         }
 
-        let concurrent_results = join_all(concurrent.into_iter().map(|(index, tool_use_id, name, input)| async move {
-            let result = self
-                .tools
-                .execute(
-                    &name,
-                    input.clone(),
-                    ToolContext {
-                        tool_use_id,
-                        app_state: Some(app_state.clone()),
-                        agent_context: self.agent_context.clone(),
-                    },
-                )
-                .await;
-            (index, name, input, result)
-        }))
+        let concurrent_results = join_all(concurrent.into_iter().map(
+            |(index, tool_use_id, name, input)| async move {
+                let result = self
+                    .tools
+                    .execute(
+                        &name,
+                        input.clone(),
+                        ToolContext {
+                            tool_use_id,
+                            app_state: Some(app_state.clone()),
+                            agent_context: self.agent_context.clone(),
+                        },
+                    )
+                    .await;
+                (index, name, input, result)
+            },
+        ))
         .await;
 
         for (index, name, input, result) in concurrent_results {
@@ -624,12 +638,7 @@ where
                     .run_post_tool_use(&name, &input, &result.content, result.is_error, "")
                     .await;
             }
-            tool_results.push((
-                index,
-                result.tool_use_id,
-                result.content,
-                result.is_error,
-            ));
+            tool_results.push((index, result.tool_use_id, result.content, result.is_error));
         }
 
         for (index, tool_use_id, name, input) in serial {
@@ -658,12 +667,7 @@ where
                     .run_post_tool_use(&name, &input, &result.content, result.is_error, "")
                     .await;
             }
-            tool_results.push((
-                index,
-                result.tool_use_id,
-                result.content,
-                result.is_error,
-            ));
+            tool_results.push((index, result.tool_use_id, result.content, result.is_error));
         }
 
         tool_results.sort_by_key(|(index, _, _, _)| *index);
@@ -735,9 +739,9 @@ mod tests {
 
             for (index, block) in content.into_iter().enumerate() {
                 let delta = match &block {
-                    ContentBlock::Text { text } => Some(rust_claude_api::ContentBlockDelta::TextDelta {
-                        text: text.clone(),
-                    }),
+                    ContentBlock::Text { text } => {
+                        Some(rust_claude_api::ContentBlockDelta::TextDelta { text: text.clone() })
+                    }
                     ContentBlock::Thinking { thinking, .. } => {
                         Some(rust_claude_api::ContentBlockDelta::ThinkingDelta {
                             thinking: thinking.clone(),
@@ -826,7 +830,10 @@ mod tests {
         assert_eq!(final_message.content, vec![ContentBlock::text("done")]);
         let state = app_state.lock().await;
         assert_eq!(state.messages.len(), 4);
-        assert!(matches!(state.messages[2].content[0], ContentBlock::ToolResult { .. }));
+        assert!(matches!(
+            state.messages[2].content[0],
+            ContentBlock::ToolResult { .. }
+        ));
     }
 
     #[tokio::test]
@@ -1191,8 +1198,14 @@ mod tests {
         state.permission_mode = rust_claude_core::permission::PermissionMode::Plan;
         let app_state = Arc::new(Mutex::new(state));
 
-        let final_message = loop_runner.run(app_state.clone(), "run bash").await.unwrap();
-        assert_eq!(final_message.content, vec![ContentBlock::text("understood")]);
+        let final_message = loop_runner
+            .run(app_state.clone(), "run bash")
+            .await
+            .unwrap();
+        assert_eq!(
+            final_message.content,
+            vec![ContentBlock::text("understood")]
+        );
 
         // Verify the tool result message is an error containing the denial reason.
         let state = app_state.lock().await;

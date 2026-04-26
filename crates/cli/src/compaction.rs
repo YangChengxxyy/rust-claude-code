@@ -89,7 +89,9 @@ impl<C: ModelClient> CompactionService<C> {
                     }
                     ContentBlock::Image { source } => {
                         let description = match source {
-                            rust_claude_core::message::ImageSource::Base64 { media_type, .. } => {
+                            rust_claude_core::message::ImageSource::Base64 {
+                                media_type, ..
+                            } => {
                                 format!("embedded {media_type} image")
                             }
                             rust_claude_core::message::ImageSource::Url { url } => {
@@ -107,16 +109,15 @@ impl<C: ModelClient> CompactionService<C> {
             "Please summarize the following conversation:\n\n{transcript}"
         )));
 
-        let mut request = CreateMessageRequest::new(
-            normalize_model_string_for_api(model),
-            vec![user_message],
-        )
-        .with_max_tokens(self.config.summary_max_tokens);
+        let mut request =
+            CreateMessageRequest::new(normalize_model_string_for_api(model), vec![user_message])
+                .with_max_tokens(self.config.summary_max_tokens);
 
         // Use structured system prompt with cache_control for compaction requests
-        request.system = Some(SystemPrompt::StructuredBlocks(vec![
-            SystemBlock::text(COMPACTION_PROMPT).with_cache_control(),
-        ]));
+        request.system = Some(SystemPrompt::StructuredBlocks(vec![SystemBlock::text(
+            COMPACTION_PROMPT,
+        )
+        .with_cache_control()]));
 
         // Enable thinking for compaction summary generation on supported models
         let thinking_config = get_thinking_config_for_model(model, true);
@@ -151,7 +152,14 @@ impl<C: ModelClient> CompactionService<C> {
         &self,
         app_state: &Arc<Mutex<AppState>>,
     ) -> Result<CompactionResult, CompactionError> {
-        let (messages, system_prompt, permission_mode, model_setting, last_api_usage, last_api_message_index) = {
+        let (
+            messages,
+            system_prompt,
+            permission_mode,
+            model_setting,
+            last_api_usage,
+            last_api_message_index,
+        ) = {
             let state = app_state.lock().await;
             (
                 state.messages.clone(),

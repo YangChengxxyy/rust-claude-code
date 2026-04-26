@@ -45,16 +45,34 @@ mod tests {
 
     #[test]
     fn detects_languages() {
-        assert_eq!(detect_language_from_path(Path::new("main.rs")), Some(LspLanguage::Rust));
-        assert_eq!(detect_language_from_path(Path::new("index.ts")), Some(LspLanguage::TypeScript));
-        assert_eq!(detect_language_from_path(Path::new("app.py")), Some(LspLanguage::Python));
+        assert_eq!(
+            detect_language_from_path(Path::new("main.rs")),
+            Some(LspLanguage::Rust)
+        );
+        assert_eq!(
+            detect_language_from_path(Path::new("index.ts")),
+            Some(LspLanguage::TypeScript)
+        );
+        assert_eq!(
+            detect_language_from_path(Path::new("app.py")),
+            Some(LspLanguage::Python)
+        );
         assert_eq!(detect_language_from_path(Path::new("README.md")), None);
     }
 
     #[test]
     fn discovers_server_commands() {
-        assert_eq!(discover_server_command(LspLanguage::Rust).command, "rust-analyzer");
-        assert_eq!(discover_server_command(LspLanguage::TypeScript).args, vec!["--stdio"]);
-        assert_eq!(discover_server_command(LspLanguage::Python).args, vec!["--stdio"]);
+        assert_eq!(
+            discover_server_command(LspLanguage::Rust).command,
+            "rust-analyzer"
+        );
+        assert_eq!(
+            discover_server_command(LspLanguage::TypeScript).args,
+            vec!["--stdio"]
+        );
+        assert_eq!(
+            discover_server_command(LspLanguage::Python).args,
+            vec!["--stdio"]
+        );
     }
 }

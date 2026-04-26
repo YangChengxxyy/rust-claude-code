@@ -148,9 +148,9 @@ impl AppState {
 
     /// Update the task list. If all tasks are completed or cancelled, clear the list.
     pub fn update_tasks(&mut self, tasks: Vec<Task>) {
-        let all_done = tasks.iter().all(|t| {
-            matches!(t.status, TaskStatus::Completed | TaskStatus::Cancelled)
-        });
+        let all_done = tasks
+            .iter()
+            .all(|t| matches!(t.status, TaskStatus::Completed | TaskStatus::Cancelled));
         if all_done && !tasks.is_empty() {
             self.tasks.clear();
         } else {

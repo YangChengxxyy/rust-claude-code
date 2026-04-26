@@ -115,7 +115,10 @@ pub fn parse_user_specified_model(model_input: &str) -> String {
     };
 
     if has_1m_tag {
-        format!("{}[1m]", trim_suffix_ignore_ascii_case(resolved.as_ref(), "[1m]"))
+        format!(
+            "{}[1m]",
+            trim_suffix_ignore_ascii_case(resolved.as_ref(), "[1m]")
+        )
     } else {
         resolved.into_owned()
     }
@@ -174,7 +177,10 @@ mod tests {
 
     #[test]
     fn resolves_opus_alias_with_1m_suffix() {
-        assert_eq!(parse_user_specified_model("opus[1m]"), "claude-opus-4-6[1m]");
+        assert_eq!(
+            parse_user_specified_model("opus[1m]"),
+            "claude-opus-4-6[1m]"
+        );
     }
 
     #[test]
@@ -184,7 +190,10 @@ mod tests {
 
     #[test]
     fn resolves_haiku_alias() {
-        assert_eq!(parse_user_specified_model("haiku"), "claude-haiku-4-5-20251001");
+        assert_eq!(
+            parse_user_specified_model("haiku"),
+            "claude-haiku-4-5-20251001"
+        );
     }
 
     #[test]
@@ -284,18 +293,22 @@ mod tests {
 
     #[test]
     fn thinking_config_enabled_serializes_correctly() {
-        let val = ThinkingConfig::Enabled { budget_tokens: 10000 }
-            .to_api_value(16384)
-            .unwrap();
+        let val = ThinkingConfig::Enabled {
+            budget_tokens: 10000,
+        }
+        .to_api_value(16384)
+        .unwrap();
         assert_eq!(val["type"], "enabled");
         assert_eq!(val["budget_tokens"], 10000);
     }
 
     #[test]
     fn thinking_config_enabled_caps_budget_to_max_tokens_minus_1() {
-        let val = ThinkingConfig::Enabled { budget_tokens: 20000 }
-            .to_api_value(16384)
-            .unwrap();
+        let val = ThinkingConfig::Enabled {
+            budget_tokens: 20000,
+        }
+        .to_api_value(16384)
+        .unwrap();
         assert_eq!(val["budget_tokens"], 16383);
     }
 
@@ -319,13 +332,17 @@ mod tests {
     #[test]
     fn sonnet_4_6_supports_adaptive_thinking() {
         assert!(model_supports_thinking("claude-sonnet-4-6"));
-        assert!(model_supports_adaptive_thinking("claude-sonnet-4-6-20250514"));
+        assert!(model_supports_adaptive_thinking(
+            "claude-sonnet-4-6-20250514"
+        ));
     }
 
     #[test]
     fn claude_3_5_does_not_support_thinking() {
         assert!(!model_supports_thinking("claude-3-5-sonnet-20241022"));
-        assert!(!model_supports_adaptive_thinking("claude-3-5-sonnet-20241022"));
+        assert!(!model_supports_adaptive_thinking(
+            "claude-3-5-sonnet-20241022"
+        ));
     }
 
     #[test]

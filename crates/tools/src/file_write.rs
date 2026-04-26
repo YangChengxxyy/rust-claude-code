@@ -85,7 +85,9 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        let content = fs::read_to_string(base.join("nested/out.txt")).await.unwrap();
+        let content = fs::read_to_string(base.join("nested/out.txt"))
+            .await
+            .unwrap();
         assert_eq!(content, "hello");
     }
 }

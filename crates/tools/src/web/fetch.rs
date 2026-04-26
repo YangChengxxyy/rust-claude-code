@@ -7,12 +7,9 @@ use regex::Regex;
 // Pre-compiled regexes for html_to_text — compiled once, reused on every call.
 static RE_SCRIPT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)<script.*?</script>").unwrap());
-static RE_STYLE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<style.*?</style>").unwrap());
-static RE_TAG: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<[^>]+>").unwrap());
-static RE_WHITESPACE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"[ \t\x0B\f\r]+").unwrap());
+static RE_STYLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<style.*?</style>").unwrap());
+static RE_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<[^>]+>").unwrap());
+static RE_WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[ \t\x0B\f\r]+").unwrap());
 
 // Shared HTTP client — reuses connection pool across fetches.
 static HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
@@ -52,11 +49,7 @@ impl WebCache {
 }
 
 pub async fn fetch_url(url: &str) -> Result<String, reqwest::Error> {
-    let response = HTTP_CLIENT
-        .get(url)
-        .send()
-        .await?
-        .error_for_status()?;
+    let response = HTTP_CLIENT.get(url).send().await?.error_for_status()?;
     response.text().await
 }
 

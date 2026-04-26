@@ -59,8 +59,8 @@ impl Tool for GlobTool {
         input: serde_json::Value,
         context: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let input: GlobInput = serde_json::from_value(input)
-            .map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+        let input: GlobInput =
+            serde_json::from_value(input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
 
         let search_root = match &input.path {
             Some(p) => PathBuf::from(p),
@@ -118,7 +118,7 @@ mod tests {
         ToolContext {
             tool_use_id: "tool_1".to_string(),
             app_state: None,
-                    agent_context: None,
+            agent_context: None,
         }
     }
 

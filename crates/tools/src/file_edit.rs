@@ -165,7 +165,9 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, ToolError::Execution(message) if message.contains("multiple times")));
+        assert!(
+            matches!(error, ToolError::Execution(message) if message.contains("multiple times"))
+        );
     }
 
     #[tokio::test]
@@ -185,7 +187,9 @@ mod tests {
             .await
             .unwrap();
 
-        let content = fs::read_to_string(base.join("nested/new.txt")).await.unwrap();
+        let content = fs::read_to_string(base.join("nested/new.txt"))
+            .await
+            .unwrap();
         assert_eq!(content, "hello");
     }
 }

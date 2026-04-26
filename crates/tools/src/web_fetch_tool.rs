@@ -51,8 +51,9 @@ impl Tool for WebFetchTool {
     fn info(&self) -> ToolInfo {
         ToolInfo {
             name: "WebFetch".to_string(),
-            description: "Fetch a web page, extract readable content, and return a truncated text result"
-                .to_string(),
+            description:
+                "Fetch a web page, extract readable content, and return a truncated text result"
+                    .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

@@ -111,10 +111,25 @@ mod tests {
 
     #[test]
     fn builds_requests() {
-        assert_eq!(LspRequest::go_to_definition("file:///a.rs", 1, 2).method, "textDocument/definition");
-        assert_eq!(LspRequest::find_references("file:///a.rs", 1, 2).method, "textDocument/references");
-        assert_eq!(LspRequest::hover("file:///a.rs", 1, 2).method, "textDocument/hover");
-        assert_eq!(LspRequest::document_symbol("file:///a.rs").method, "textDocument/documentSymbol");
-        assert_eq!(LspRequest::workspace_symbol("foo").method, "workspace/symbol");
+        assert_eq!(
+            LspRequest::go_to_definition("file:///a.rs", 1, 2).method,
+            "textDocument/definition"
+        );
+        assert_eq!(
+            LspRequest::find_references("file:///a.rs", 1, 2).method,
+            "textDocument/references"
+        );
+        assert_eq!(
+            LspRequest::hover("file:///a.rs", 1, 2).method,
+            "textDocument/hover"
+        );
+        assert_eq!(
+            LspRequest::document_symbol("file:///a.rs").method,
+            "textDocument/documentSymbol"
+        );
+        assert_eq!(
+            LspRequest::workspace_symbol("foo").method,
+            "workspace/symbol"
+        );
     }
 }

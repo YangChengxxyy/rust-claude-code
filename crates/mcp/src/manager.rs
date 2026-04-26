@@ -4,8 +4,8 @@
 //! and exposes a unified interface for tool lookup and invocation.
 
 use rust_claude_core::mcp_config::{
-    McpServerConfig, McpServerState, McpServerStatus, McpServersConfig, McpToolInfo,
-    McpTransportType, filter_supported_servers,
+    filter_supported_servers, McpServerConfig, McpServerState, McpServerStatus, McpServersConfig,
+    McpToolInfo, McpTransportType,
 };
 use std::collections::HashMap;
 use tokio::sync::Mutex;
@@ -53,10 +53,7 @@ impl McpManager {
     ///
     /// Servers with unsupported transport types are skipped with a warning.
     /// Individual server failures do not block the overall startup.
-    pub async fn start(
-        servers_config: &McpServersConfig,
-        config: &McpManagerConfig,
-    ) -> Self {
+    pub async fn start(servers_config: &McpServersConfig, config: &McpManagerConfig) -> Self {
         let (supported, skipped) = filter_supported_servers(servers_config);
 
         let mut connected_servers = HashMap::new();
@@ -87,12 +84,9 @@ impl McpManager {
                 Ok((client, tools)) => {
                     // Build tool index
                     for tool in &tools {
-                        let qualified_name =
-                            format!("mcp__{}__{}", name, tool.name);
-                        tool_index.insert(
-                            qualified_name.clone(),
-                            (name.clone(), tool.name.clone()),
-                        );
+                        let qualified_name = format!("mcp__{}__{}", name, tool.name);
+                        tool_index
+                            .insert(qualified_name.clone(), (name.clone(), tool.name.clone()));
                         tool_infos.insert(qualified_name, tool.clone());
                     }
 
@@ -103,10 +97,8 @@ impl McpManager {
                         tools: tools.clone(),
                     });
 
-                    connected_servers.insert(
-                        name.clone(),
-                        Mutex::new(ConnectedServer { client, tools }),
-                    );
+                    connected_servers
+                        .insert(name.clone(), Mutex::new(ConnectedServer { client, tools }));
                 }
                 Err(e) => {
                     eprintln!("MCP: server '{}' failed to start: {}", name, e);
@@ -135,8 +127,7 @@ impl McpManager {
         manager_config: &McpManagerConfig,
     ) -> Result<(McpClient, Vec<McpToolInfo>), McpError> {
         let client =
-            McpClient::connect_with_timeout(name, config, manager_config.init_timeout_ms)
-                .await?;
+            McpClient::connect_with_timeout(name, config, manager_config.init_timeout_ms).await?;
 
         let tools = client.list_tools().await?;
         Ok((client, tools))

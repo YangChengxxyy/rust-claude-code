@@ -83,9 +83,7 @@ pub async fn write_message<W: AsyncWriteExt + Unpin>(
 
 /// Read a single JSON-RPC message with `Content-Length` framing from the given reader.
 /// Returns the raw JSON bytes of the body.
-pub async fn read_message<R: AsyncBufReadExt + Unpin>(
-    reader: &mut R,
-) -> Result<Vec<u8>, McpError> {
+pub async fn read_message<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<Vec<u8>, McpError> {
     let mut content_length: Option<usize> = None;
 
     // Read headers until empty line
@@ -275,7 +273,10 @@ mod tests {
             }),
         };
         let result = check_response(response);
-        assert!(matches!(result, Err(McpError::JsonRpcError { code: -32600, .. })));
+        assert!(matches!(
+            result,
+            Err(McpError::JsonRpcError { code: -32600, .. })
+        ));
     }
 
     #[test]

@@ -27,8 +27,9 @@ impl Tool for AgentTool {
     fn info(&self) -> ToolInfo {
         ToolInfo {
             name: "Agent".to_string(),
-            description: "Spawn a sub-agent to handle a complex sub-task and return its final result"
-                .to_string(),
+            description:
+                "Spawn a sub-agent to handle a complex sub-task and return its final result"
+                    .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -164,7 +165,9 @@ mod tests {
             .unwrap();
 
         assert!(result.is_error);
-        assert!(result.content.contains("Maximum agent nesting depth reached"));
+        assert!(result
+            .content
+            .contains("Maximum agent nesting depth reached"));
     }
 
     #[tokio::test]
@@ -179,19 +182,21 @@ mod tests {
                     tool_use_id: "tool_1".into(),
                     app_state: Some(app_state()),
                     agent_context: Some(AgentContext {
-                        run_subagent: Arc::new(|prompt, allowed_tools, _state, depth, max_depth| {
-                            Box::pin(async move {
-                                assert_eq!(prompt, "summarize file");
-                                assert_eq!(allowed_tools, vec!["FileRead"]);
-                                assert_eq!(depth, 1);
-                                assert_eq!(max_depth, 3);
-                                Ok(crate::tool::AgentRunOutput {
-                                    text: "done".into(),
-                                    input_tokens: 10,
-                                    output_tokens: 5,
+                        run_subagent: Arc::new(
+                            |prompt, allowed_tools, _state, depth, max_depth| {
+                                Box::pin(async move {
+                                    assert_eq!(prompt, "summarize file");
+                                    assert_eq!(allowed_tools, vec!["FileRead"]);
+                                    assert_eq!(depth, 1);
+                                    assert_eq!(max_depth, 3);
+                                    Ok(crate::tool::AgentRunOutput {
+                                        text: "done".into(),
+                                        input_tokens: 10,
+                                        output_tokens: 5,
+                                    })
                                 })
-                            })
-                        }),
+                            },
+                        ),
                         ..Default::default()
                     }),
                 },

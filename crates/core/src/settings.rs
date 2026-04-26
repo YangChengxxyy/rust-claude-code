@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::hooks::HooksConfig;
-use crate::mcp_config::{McpServersConfig, merge_mcp_servers};
+use crate::mcp_config::{merge_mcp_servers, McpServersConfig};
 
 #[cfg(test)]
 use crate::hooks::HookEventGroup;
@@ -492,7 +492,10 @@ mod tests {
         assert_eq!(settings.mcp_servers.len(), 1);
         let fs_server = &settings.mcp_servers["filesystem"];
         assert_eq!(fs_server.command, "npx");
-        assert_eq!(fs_server.args, vec!["-y", "@anthropic/mcp-server-filesystem"]);
+        assert_eq!(
+            fs_server.args,
+            vec!["-y", "@anthropic/mcp-server-filesystem"]
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -537,13 +540,16 @@ mod tests {
         let user = ClaudeSettings {
             mcp_servers: {
                 let mut m = HashMap::new();
-                m.insert("github".into(), McpServerConfig {
-                    transport_type: McpTransportType::Stdio,
-                    command: "gh-mcp".into(),
-                    args: vec![],
-                    env: HashMap::new(),
-                    cwd: None,
-                });
+                m.insert(
+                    "github".into(),
+                    McpServerConfig {
+                        transport_type: McpTransportType::Stdio,
+                        command: "gh-mcp".into(),
+                        args: vec![],
+                        env: HashMap::new(),
+                        cwd: None,
+                    },
+                );
                 m
             },
             ..Default::default()
@@ -551,13 +557,16 @@ mod tests {
         let project = ClaudeSettings {
             mcp_servers: {
                 let mut m = HashMap::new();
-                m.insert("filesystem".into(), McpServerConfig {
-                    transport_type: McpTransportType::Stdio,
-                    command: "fs-mcp".into(),
-                    args: vec![],
-                    env: HashMap::new(),
-                    cwd: None,
-                });
+                m.insert(
+                    "filesystem".into(),
+                    McpServerConfig {
+                        transport_type: McpTransportType::Stdio,
+                        command: "fs-mcp".into(),
+                        args: vec![],
+                        env: HashMap::new(),
+                        cwd: None,
+                    },
+                );
                 m
             },
             ..Default::default()
@@ -576,13 +585,16 @@ mod tests {
         let user = ClaudeSettings {
             mcp_servers: {
                 let mut m = HashMap::new();
-                m.insert("filesystem".into(), McpServerConfig {
-                    transport_type: McpTransportType::Stdio,
-                    command: "a".into(),
-                    args: vec![],
-                    env: HashMap::new(),
-                    cwd: None,
-                });
+                m.insert(
+                    "filesystem".into(),
+                    McpServerConfig {
+                        transport_type: McpTransportType::Stdio,
+                        command: "a".into(),
+                        args: vec![],
+                        env: HashMap::new(),
+                        cwd: None,
+                    },
+                );
                 m
             },
             ..Default::default()
@@ -590,13 +602,16 @@ mod tests {
         let project = ClaudeSettings {
             mcp_servers: {
                 let mut m = HashMap::new();
-                m.insert("filesystem".into(), McpServerConfig {
-                    transport_type: McpTransportType::Stdio,
-                    command: "b".into(),
-                    args: vec![],
-                    env: HashMap::new(),
-                    cwd: None,
-                });
+                m.insert(
+                    "filesystem".into(),
+                    McpServerConfig {
+                        transport_type: McpTransportType::Stdio,
+                        command: "b".into(),
+                        args: vec![],
+                        env: HashMap::new(),
+                        cwd: None,
+                    },
+                );
                 m
             },
             ..Default::default()
@@ -614,13 +629,16 @@ mod tests {
         let user = ClaudeSettings {
             mcp_servers: {
                 let mut m = HashMap::new();
-                m.insert("github".into(), McpServerConfig {
-                    transport_type: McpTransportType::Stdio,
-                    command: "gh".into(),
-                    args: vec![],
-                    env: HashMap::new(),
-                    cwd: None,
-                });
+                m.insert(
+                    "github".into(),
+                    McpServerConfig {
+                        transport_type: McpTransportType::Stdio,
+                        command: "gh".into(),
+                        args: vec![],
+                        env: HashMap::new(),
+                        cwd: None,
+                    },
+                );
                 m
             },
             ..Default::default()

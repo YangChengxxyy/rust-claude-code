@@ -53,15 +53,20 @@ impl Tool for NotebookEditTool {
         let raw = tokio::fs::read_to_string(&path)
             .await
             .map_err(|e| ToolError::Execution(format!("failed to read notebook: {e}")))?;
-        let mut notebook: Value = serde_json::from_str(&raw)
-            .map_err(|e| ToolError::Execution(format!("file is not a valid notebook JSON document: {e}")))?;
+        let mut notebook: Value = serde_json::from_str(&raw).map_err(|e| {
+            ToolError::Execution(format!("file is not a valid notebook JSON document: {e}"))
+        })?;
 
         let cells = notebook
             .get_mut("cells")
             .and_then(Value::as_array_mut)
-            .ok_or_else(|| ToolError::Execution("notebook is missing top-level 'cells' array".to_string()))?;
+            .ok_or_else(|| {
+                ToolError::Execution("notebook is missing top-level 'cells' array".to_string())
+            })?;
 
-        let index = input.index.ok_or_else(|| ToolError::InvalidInput("index is required".to_string()))?;
+        let index = input
+            .index
+            .ok_or_else(|| ToolError::InvalidInput("index is required".to_string()))?;
         let source_lines = input
             .source
             .unwrap_or_default()
@@ -80,7 +85,11 @@ impl Tool for NotebookEditTool {
                 let existing = cells
                     .get_mut(index)
                     .and_then(Value::as_object_mut)
-                    .ok_or_else(|| ToolError::Execution("target cell is not a valid notebook cell object".to_string()))?;
+                    .ok_or_else(|| {
+                        ToolError::Execution(
+                            "target cell is not a valid notebook cell object".to_string(),
+                        )
+                    })?;
                 if let Some(cell_type) = input.cell_type {
                     existing.insert("cell_type".to_string(), Value::String(cell_type));
                 }
@@ -186,7 +195,9 @@ mod tests {
             .unwrap();
 
         assert!(!result.is_error);
-        let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("test.ipynb")).unwrap()).unwrap();
+        let saved: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("test.ipynb")).unwrap())
+                .unwrap();
         assert_eq!(saved["cells"][0]["cell_type"], "markdown");
         let _ = std::fs::remove_dir_all(&dir);
     }

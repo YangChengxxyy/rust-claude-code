@@ -3,6 +3,8 @@ use rust_claude_core::compaction::CompactionResult;
 use rust_claude_core::config::{ConfigProvenance, Theme};
 use rust_claude_core::state::TodoItem;
 
+use crate::diff::DiffLine;
+
 /// Commands emitted by the TUI input layer toward the background worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserCommand {
@@ -146,6 +148,8 @@ pub enum ChatMessage {
     ToolUse {
         name: String,
         input_summary: String,
+        /// Computed diff lines for FileEdit/FileWrite (None for other tools).
+        diff_lines: Option<Vec<DiffLine>>,
     },
     ToolResult {
         name: String,
@@ -176,7 +180,7 @@ impl ChatMessage {
             | ChatMessage::Assistant(s)
             | ChatMessage::System(s) => s,
             ChatMessage::Thinking { content, .. } => content,
-            ChatMessage::ToolUse { name, input_summary } => {
+            ChatMessage::ToolUse { name, input_summary, .. } => {
                 if input_summary.is_empty() {
                     name
                 } else {
@@ -232,7 +236,8 @@ mod tests {
         assert_eq!(
             ChatMessage::ToolUse {
                 name: "Bash".into(),
-                input_summary: "ls".into()
+                input_summary: "ls".into(),
+                diff_lines: None,
             }
             .prefix(),
             "Tool: "

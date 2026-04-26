@@ -307,7 +307,7 @@ fn render_message(
                 }
             }
         }
-        ChatMessage::ToolUse { name, input_summary } => {
+        ChatMessage::ToolUse { name, input_summary, diff_lines } => {
             let display_name = ChatMessage::user_facing_tool_name(name);
 
             if name == "Bash" {
@@ -340,6 +340,30 @@ fn render_message(
                     ));
                 }
                 lines.push(Line::from(spans));
+            }
+
+            // Render compact diff view for FileEdit/FileWrite tool uses
+            if let Some(diff) = diff_lines {
+                let max_diff_lines = 20usize;
+                let rendered = crate::diff::render_diff_lines(diff, &palette, 80);
+                let total = rendered.len();
+                if total <= max_diff_lines {
+                    for line in rendered {
+                        lines.push(line);
+                    }
+                } else {
+                    // Show first 10 + indicator + last 5
+                    for line in rendered.iter().take(10) {
+                        lines.push(line.clone());
+                    }
+                    lines.push(Line::from(Span::styled(
+                        format!("    ... {} more lines ...", total - 15),
+                        Style::default().fg(palette.inactive),
+                    )));
+                    for line in rendered.iter().skip(total - 5) {
+                        lines.push(line.clone());
+                    }
+                }
             }
         }
         ChatMessage::ToolResult {
@@ -429,7 +453,7 @@ fn render_markdown_message(text: &str, lines: &mut Vec<Line<'static>>, palette: 
                 if !first_block {
                     lines.push(Line::from(""));
                 }
-                let title = language.unwrap_or_else(|| "code".to_string());
+                let title = language.as_deref().unwrap_or("code").to_string();
                 let code_prefix = if !used_message_prefix {
                     used_message_prefix = true;
                     format!("{} ", theme::ASSISTANT_BULLET)
@@ -440,12 +464,23 @@ fn render_markdown_message(text: &str, lines: &mut Vec<Line<'static>>, palette: 
                     Span::raw(code_prefix),
                     Span::styled(format!("┌─ {title}"), Style::default().fg(palette.bash_border)),
                 ]));
-                for line in code.lines() {
-                    lines.push(Line::from(vec![
+                let highlighted = crate::highlight::highlight_code_block(
+                    &code,
+                    language.as_deref(),
+                    &palette,
+                );
+                for highlighted_line in highlighted {
+                    let mut spans = vec![
                         Span::raw("  "),
                         Span::styled("│ ", Style::default().fg(palette.bash_border)),
-                        Span::styled(line.to_string(), Style::default().fg(palette.text)),
-                    ]));
+                    ];
+                    for (style, text) in highlighted_line {
+                        let text = text.trim_end_matches('\n').to_string();
+                        if !text.is_empty() {
+                            spans.push(Span::styled(text, style));
+                        }
+                    }
+                    lines.push(Line::from(spans));
                 }
                 lines.push(Line::from(vec![
                     Span::raw("  "),
@@ -850,6 +885,24 @@ fn draw_permission_dialog(f: &mut Frame, app: &App, area: Rect) {
         None => return,
     };
 
+    let display_name = ChatMessage::user_facing_tool_name(&dialog.tool_name);
+
+    // Use expanded dialog for file tools with diff, compact for others
+    if dialog.is_file_tool && dialog.diff_lines.is_some() {
+        draw_permission_dialog_with_diff(f, dialog, display_name, &palette, area);
+    } else {
+        draw_permission_dialog_compact(f, dialog, display_name, &palette, area);
+    }
+}
+
+/// Compact permission dialog (original layout) for non-file tools.
+fn draw_permission_dialog_compact(
+    f: &mut Frame,
+    dialog: &crate::app::PermissionDialog,
+    display_name: &str,
+    palette: &Palette,
+    area: Rect,
+) {
     let dialog_width = 50u16.min(area.width.saturating_sub(4));
     let dialog_height = 12u16.min(area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
@@ -865,23 +918,14 @@ fn draw_permission_dialog(f: &mut Frame, app: &App, area: Rect) {
         .border_set(border::ROUNDED)
         .border_style(Style::default().fg(palette.warning));
 
-    let display_name = ChatMessage::user_facing_tool_name(&dialog.tool_name);
-
-    let options = [
-        ("y", "Allow", "Allow this operation"),
-        ("a", "Always Allow", "Add to always-allow rules"),
-        ("n", "Deny", "Deny this operation"),
-        ("d", "Always Deny", "Add to always-deny rules"),
-    ];
-
     let mut lines = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Tool: ", Style::default().fg(palette.inactive)),
-            Span::styled(display_name, palette.tool_name_style()),
+            Span::styled("  Tool: ".to_string(), Style::default().fg(palette.inactive)),
+            Span::styled(display_name.to_string(), palette.tool_name_style()),
         ]),
         Line::from(vec![
-            Span::styled("  Args: ", Style::default().fg(palette.inactive)),
+            Span::styled("  Args: ".to_string(), Style::default().fg(palette.inactive)),
             Span::styled(
                 truncate_display(&dialog.input_summary, (dialog_width as usize).saturating_sub(10)),
                 Style::default().fg(palette.text),
@@ -890,8 +934,136 @@ fn draw_permission_dialog(f: &mut Frame, app: &App, area: Rect) {
         Line::from(""),
     ];
 
-    for (i, (key, label, _desc)) in options.iter().enumerate() {
-        let is_selected = i == dialog.selected;
+    render_permission_options(&mut lines, dialog.selected, palette);
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(block)
+        .wrap(Wrap { trim: false });
+
+    f.render_widget(paragraph, dialog_area);
+}
+
+/// Expanded permission dialog with diff preview for FileEdit/FileWrite.
+fn draw_permission_dialog_with_diff(
+    f: &mut Frame,
+    dialog: &crate::app::PermissionDialog,
+    display_name: &str,
+    palette: &Palette,
+    area: Rect,
+) {
+    // Dynamic sizing: 80% of terminal, capped
+    let dialog_width = ((area.width as u32 * 80 / 100) as u16)
+        .min(120)
+        .max(50)
+        .min(area.width.saturating_sub(4));
+    let dialog_height = ((area.height as u32 * 80 / 100) as u16)
+        .max(16)
+        .min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+    let dialog_area = Rect::new(x, y, dialog_width, dialog_height);
+
+    f.render_widget(Clear, dialog_area);
+
+    let block = Block::default()
+        .title(" Permission Required ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_set(border::ROUNDED)
+        .border_style(Style::default().fg(palette.warning));
+
+    let inner = block.inner(dialog_area);
+    f.render_widget(block, dialog_area);
+
+    // Split inner area: header (tool info + options) and diff preview
+    let header_height = 8u16.min(inner.height);
+    let diff_height = inner.height.saturating_sub(header_height);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Length(diff_height),
+        ])
+        .split(inner);
+
+    // ── Header section ─────────────────────────────────────────
+    let mut header_lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Tool: ".to_string(), Style::default().fg(palette.inactive)),
+            Span::styled(display_name.to_string(), palette.tool_name_style()),
+        ]),
+    ];
+
+    // File path with optional replace_all indicator
+    if let Some(ref path) = dialog.file_path {
+        let mut path_spans = vec![
+            Span::styled("  File: ".to_string(), Style::default().fg(palette.inactive)),
+            Span::styled(path.clone(), Style::default().fg(palette.text)),
+        ];
+        if dialog.replace_all {
+            path_spans.push(Span::styled(
+                " (replace all)".to_string(),
+                Style::default().fg(palette.warning),
+            ));
+        }
+        header_lines.push(Line::from(path_spans));
+    }
+
+    header_lines.push(Line::from(""));
+    render_permission_options(&mut header_lines, dialog.selected, palette);
+
+    let header_paragraph = Paragraph::new(Text::from(header_lines));
+    f.render_widget(header_paragraph, chunks[0]);
+
+    // ── Diff preview section ───────────────────────────────────
+    if diff_height > 0 {
+        if let Some(ref diff_lines) = dialog.diff_lines {
+            let rendered = crate::diff::render_diff_lines(diff_lines, palette, chunks[1].width);
+            let total_lines = rendered.len();
+            let visible_lines = diff_height as usize;
+            let scroll = dialog.diff_scroll.min(total_lines.saturating_sub(visible_lines));
+
+            // Scroll indicator
+            let mut diff_display_lines: Vec<Line<'static>> = Vec::new();
+
+            // Separator line
+            diff_display_lines.push(Line::from(Span::styled(
+                "─".repeat(chunks[1].width as usize),
+                Style::default().fg(palette.subtle),
+            )));
+
+            // Diff content with scrolling
+            let end = (scroll + visible_lines.saturating_sub(2)).min(total_lines);
+            for line in rendered.into_iter().skip(scroll).take(end - scroll) {
+                diff_display_lines.push(line);
+            }
+
+            // Scroll indicator at bottom if more content
+            if end < total_lines {
+                diff_display_lines.push(Line::from(Span::styled(
+                    format!("  ... {} more lines (↑↓ to scroll)", total_lines - end),
+                    Style::default().fg(palette.inactive),
+                )));
+            }
+
+            let diff_paragraph = Paragraph::new(Text::from(diff_display_lines));
+            f.render_widget(diff_paragraph, chunks[1]);
+        }
+    }
+}
+
+/// Render the 4 permission options (shared between compact and expanded dialogs).
+fn render_permission_options(lines: &mut Vec<Line<'static>>, selected: usize, palette: &Palette) {
+    let options = [
+        ("y", "Allow"),
+        ("a", "Always Allow"),
+        ("n", "Deny"),
+        ("d", "Always Deny"),
+    ];
+    for (i, (key, label)) in options.iter().enumerate() {
+        let is_selected = i == selected;
         let prefix = if is_selected { "  > " } else { "    " };
         let style = if is_selected {
             Style::default()
@@ -906,12 +1078,6 @@ fn draw_permission_dialog(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(*label, style),
         ]));
     }
-
-    let paragraph = Paragraph::new(Text::from(lines))
-        .block(block)
-        .wrap(Wrap { trim: false });
-
-    f.render_widget(paragraph, dialog_area);
 }
 
 fn draw_todo_panel(f: &mut Frame, app: &App, area: Rect) {
@@ -1131,6 +1297,85 @@ mod tests {
             .filter(|content| *content == "• ")
             .collect();
         assert_eq!(prefixes.len(), 1);
+    }
+
+    #[test]
+    fn test_code_block_has_syntax_highlighting() {
+        let palette = Palette::dark();
+        let text = "```rust\nfn main() {\n    println!(\"hello\");\n}\n```";
+        let mut lines = Vec::new();
+        render_markdown_message(text, &mut lines, palette);
+        // Find code lines (those with │ prefix) and check they have multiple styled spans
+        let code_lines: Vec<_> = lines.iter().filter(|l| {
+            l.spans.iter().any(|s| s.content.as_ref() == "│ ")
+        }).collect();
+        assert!(!code_lines.is_empty(), "Should have code lines with │ prefix");
+        // At least one code line should have more than 3 spans (prefix + border + highlighted tokens)
+        let has_highlighting = code_lines.iter().any(|l| l.spans.len() > 3);
+        assert!(has_highlighting, "Code lines should have syntax highlighting (>3 spans)");
+    }
+
+    #[test]
+    fn test_tool_use_diff_render_small() {
+        use crate::diff;
+        let palette = Palette::dark();
+        let diff_lines = diff::compute_diff("hello", "world");
+        // render_diff_lines produces output for the diff
+        let rendered = diff::render_diff_lines(&diff_lines, &palette, 80);
+        assert!(!rendered.is_empty(), "Small diff should produce rendered lines");
+        // Should have both removed and added lines
+        assert!(
+            diff_lines.iter().any(|d| d.kind == diff::DiffKind::Removed),
+            "Should have removed lines"
+        );
+        assert!(
+            diff_lines.iter().any(|d| d.kind == diff::DiffKind::Added),
+            "Should have added lines"
+        );
+    }
+
+    #[test]
+    fn test_tool_use_diff_large_would_truncate() {
+        use crate::diff;
+        // Create a large diff with >20 changed lines
+        let old: String = (0..30).map(|i| format!("old line {i}\n")).collect();
+        let new: String = (0..30).map(|i| format!("new line {i}\n")).collect();
+        let diff_lines = diff::compute_diff(&old, &new);
+        let palette = Palette::dark();
+        let rendered = diff::render_diff_lines(&diff_lines, &palette, 80);
+        // Large diff should have >20 lines, triggering truncation in render
+        assert!(
+            rendered.len() > 20,
+            "Large diff should produce >20 rendered lines (got {})",
+            rendered.len()
+        );
+    }
+
+    #[test]
+    fn test_tool_use_message_has_diff_field() {
+        use crate::diff;
+        let diff_lines = diff::compute_diff("a", "b");
+        let msg = ChatMessage::ToolUse {
+            name: "FileEdit".into(),
+            input_summary: "test.rs (edit)".into(),
+            diff_lines: Some(diff_lines.clone()),
+        };
+        match &msg {
+            ChatMessage::ToolUse { diff_lines: Some(dl), .. } => {
+                assert!(!dl.is_empty());
+            }
+            _ => panic!("Expected ToolUse with diff_lines"),
+        }
+        // Bash tool should have None
+        let bash_msg = ChatMessage::ToolUse {
+            name: "Bash".into(),
+            input_summary: "ls".into(),
+            diff_lines: None,
+        };
+        match &bash_msg {
+            ChatMessage::ToolUse { diff_lines: None, .. } => {}
+            _ => panic!("Bash ToolUse should have diff_lines: None"),
+        }
     }
 }
 

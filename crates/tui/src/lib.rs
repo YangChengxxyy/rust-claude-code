@@ -10,7 +10,9 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 pub mod app;
 pub mod bridge;
+pub mod diff;
 pub mod events;
+pub mod highlight;
 pub mod streaming_markdown;
 pub mod theme;
 pub mod ui;

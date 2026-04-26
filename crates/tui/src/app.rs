@@ -13,6 +13,7 @@ use rust_claude_core::config::Theme;
 use rust_claude_core::state::TodoItem;
 use tokio::sync::mpsc;
 
+use crate::diff::{self, DiffLine};
 use crate::events::{AppEvent, ChatMessage, PermissionResponse, UserCommand};
 use crate::ui;
 
@@ -124,6 +125,16 @@ pub struct PermissionDialog {
     pub selected: usize,
     /// Channel to send the user's decision back to the query loop.
     pub response_tx: Option<tokio::sync::oneshot::Sender<PermissionResponse>>,
+    /// Computed diff lines for FileEdit/FileWrite (None for other tools).
+    pub diff_lines: Option<Vec<DiffLine>>,
+    /// Current scroll offset in the diff preview area.
+    pub diff_scroll: usize,
+    /// Whether this is a file-modifying tool (FileEdit or FileWrite).
+    pub is_file_tool: bool,
+    /// File path being edited/written (for display in dialog header).
+    pub file_path: Option<String>,
+    /// Whether replace_all mode is active (FileEdit only).
+    pub replace_all: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -969,14 +980,54 @@ impl App {
             None => return,
         };
 
-        let options_len = 4usize;
         match key.code {
-            KeyCode::Up => dialog.selected = dialog.selected.saturating_sub(1),
-            KeyCode::Down => dialog.selected = (dialog.selected + 1).min(options_len - 1),
+            // Direct hotkeys always work
             KeyCode::Esc | KeyCode::Char('n') => self.finish_permission_dialog(PermissionResponse::Deny),
             KeyCode::Char('y') => self.finish_permission_dialog(PermissionResponse::Allow),
             KeyCode::Char('a') => self.finish_permission_dialog(PermissionResponse::AlwaysAllow),
             KeyCode::Char('d') => self.finish_permission_dialog(PermissionResponse::AlwaysDeny),
+            // Up/Down: scroll diff if file tool, otherwise navigate options
+            KeyCode::Up => {
+                if dialog.is_file_tool && dialog.diff_lines.is_some() {
+                    dialog.diff_scroll = dialog.diff_scroll.saturating_sub(1);
+                } else {
+                    dialog.selected = dialog.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if dialog.is_file_tool && dialog.diff_lines.is_some() {
+                    // Clamp scroll conservatively to avoid overshooting the
+                    // renderer's own viewport-aware cap in ui.rs.
+                    let total_lines = dialog
+                        .diff_lines
+                        .as_ref()
+                        .map(|d| d.len().saturating_add(1))
+                        .unwrap_or(0);
+                    let conservative_visible_lines = 8usize;
+                    let max_scroll = total_lines.saturating_sub(conservative_visible_lines);
+                    dialog.diff_scroll = (dialog.diff_scroll + 1).min(max_scroll);
+                } else {
+                    dialog.selected = (dialog.selected + 1).min(3);
+                }
+            }
+            // PageUp/PageDown for faster diff scrolling
+            KeyCode::PageUp => {
+                if dialog.is_file_tool {
+                    dialog.diff_scroll = dialog.diff_scroll.saturating_sub(10);
+                }
+            }
+            KeyCode::PageDown => {
+                if dialog.is_file_tool {
+                    let total_lines = dialog
+                        .diff_lines
+                        .as_ref()
+                        .map(|d| d.len().saturating_add(1))
+                        .unwrap_or(0);
+                    let conservative_visible_lines = 8usize;
+                    let max_scroll = total_lines.saturating_sub(conservative_visible_lines);
+                    dialog.diff_scroll = (dialog.diff_scroll + 10).min(max_scroll);
+                }
+            }
             KeyCode::Enter => {
                 let response = match dialog.selected {
                     0 => PermissionResponse::Allow,
@@ -1326,9 +1377,11 @@ impl App {
                 // Clear streaming tool state since the tool is now fully constructed
                 self.streaming_tool = None;
                 let summary = summarize_tool_input(&name, &input);
+                let (tool_diff_lines, _, _, _) = extract_diff_info(&name, &input);
                 self.messages.push(ChatMessage::ToolUse {
                     name,
                     input_summary: summary,
+                    diff_lines: tool_diff_lines,
                 });
                 self.sync_chat_viewport();
             }
@@ -1401,11 +1454,18 @@ impl App {
                 response_tx,
             } => {
                 let input_summary = summarize_tool_input(&tool_name, &input);
+                let (diff_lines, is_file_tool, file_path, replace_all) =
+                    extract_diff_info(&tool_name, &input);
                 self.permission_dialog = Some(PermissionDialog {
                     tool_name,
                     input_summary,
                     selected: 0,
                     response_tx: Some(response_tx),
+                    diff_lines,
+                    diff_scroll: 0,
+                    is_file_tool,
+                    file_path,
+                    replace_all,
                 });
             }
             AppEvent::TodoUpdate(todos) => self.tasks = todos,
@@ -1494,6 +1554,50 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
             .map(|s| truncate(s, 100))
             .unwrap_or_default(),
         _ => truncate(&input.to_string(), 80),
+    }
+}
+
+/// Extract diff information from a tool's input for the permission dialog.
+/// Returns (diff_lines, is_file_tool, file_path, replace_all).
+fn extract_diff_info(
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> (Option<Vec<DiffLine>>, bool, Option<String>, bool) {
+    match tool_name {
+        "FileEdit" => {
+            let file_path = input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let old_string = input
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new_string = input
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let replace_all = input
+                .get("replace_all")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let diff_lines = diff::compute_diff(old_string, new_string);
+            (Some(diff_lines), true, file_path, replace_all)
+        }
+        "FileWrite" => {
+            let file_path = input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let content = input
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            // For FileWrite, show all content as additions (new file)
+            let diff_lines = diff::compute_diff("", content);
+            (Some(diff_lines), true, file_path, false)
+        }
+        _ => (None, false, None, false),
     }
 }
 
@@ -2115,6 +2219,92 @@ mod tests {
         let input = "a".repeat(198) + "用例";
         let truncated = truncate(&input, 199);
         assert_eq!(truncated, format!("{}...", "a".repeat(198)));
+    }
+
+    #[test]
+    fn test_extract_diff_info_file_edit() {
+        let input = serde_json::json!({
+            "file_path": "src/main.rs",
+            "old_string": "hello",
+            "new_string": "world",
+            "replace_all": false
+        });
+        let (diff_lines, is_file_tool, file_path, replace_all) =
+            extract_diff_info("FileEdit", &input);
+        assert!(is_file_tool);
+        assert!(diff_lines.is_some());
+        assert_eq!(file_path.as_deref(), Some("src/main.rs"));
+        assert!(!replace_all);
+        let diff = diff_lines.unwrap();
+        assert!(!diff.is_empty());
+    }
+
+    #[test]
+    fn test_extract_diff_info_file_edit_replace_all() {
+        let input = serde_json::json!({
+            "file_path": "src/lib.rs",
+            "old_string": "foo",
+            "new_string": "bar",
+            "replace_all": true
+        });
+        let (_, _, _, replace_all) = extract_diff_info("FileEdit", &input);
+        assert!(replace_all);
+    }
+
+    #[test]
+    fn test_extract_diff_info_file_write() {
+        let input = serde_json::json!({
+            "file_path": "new_file.txt",
+            "content": "line 1\nline 2\nline 3"
+        });
+        let (diff_lines, is_file_tool, file_path, replace_all) =
+            extract_diff_info("FileWrite", &input);
+        assert!(is_file_tool);
+        assert!(diff_lines.is_some());
+        assert_eq!(file_path.as_deref(), Some("new_file.txt"));
+        assert!(!replace_all);
+        // All lines should be additions for a new file
+        let diff = diff_lines.unwrap();
+        assert!(diff.iter().all(|d| d.kind == crate::diff::DiffKind::Added));
+    }
+
+    #[test]
+    fn test_extract_diff_info_non_file_tool() {
+        let input = serde_json::json!({
+            "command": "ls -la"
+        });
+        let (diff_lines, is_file_tool, file_path, _) =
+            extract_diff_info("Bash", &input);
+        assert!(!is_file_tool);
+        assert!(diff_lines.is_none());
+        assert!(file_path.is_none());
+    }
+
+    #[test]
+    fn test_permission_dialog_diff_scroll_bounds() {
+        let input = serde_json::json!({
+            "file_path": "test.rs",
+            "old_string": "a\nb\nc",
+            "new_string": "x\ny\nz"
+        });
+        let (diff_lines, is_file_tool, file_path, replace_all) =
+            extract_diff_info("FileEdit", &input);
+        let mut dialog = PermissionDialog {
+            tool_name: "FileEdit".into(),
+            input_summary: "test.rs (edit)".into(),
+            selected: 0,
+            response_tx: None,
+            diff_lines,
+            diff_scroll: 0,
+            is_file_tool,
+            file_path,
+            replace_all,
+        };
+        let max = dialog.diff_lines.as_ref().map(|d| d.len()).unwrap_or(0);
+        // Scroll down beyond max should clamp
+        dialog.diff_scroll = max + 10;
+        dialog.diff_scroll = dialog.diff_scroll.min(max.saturating_sub(1));
+        assert!(dialog.diff_scroll < max);
     }
 }
 

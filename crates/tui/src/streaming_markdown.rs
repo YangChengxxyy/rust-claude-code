@@ -7,6 +7,7 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use syntect::parsing::ParseState as SyntectParseState;
 
 use crate::theme::{self, Palette};
 
@@ -46,6 +47,14 @@ pub struct StreamingMarkdownState {
     /// Tracks whether the most recent cached item was a blank line,
     /// to avoid duplicate blank lines.
     last_was_blank: bool,
+    /// Syntect parse state for incremental code block highlighting.
+    highlight_state: Option<SyntectParseState>,
+    /// Syntect highlight state for correct multi-line construct coloring.
+    highlight_hl_state: Option<syntect::highlighting::HighlightState>,
+    /// Cached theme for the current code block (avoids rebuilding per line).
+    highlight_theme: Option<syntect::highlighting::Theme>,
+    /// The syntax reference for the current code block (cached for the block duration).
+    highlight_syntax_name: Option<String>,
 }
 
 impl Default for StreamingMarkdownState {
@@ -64,6 +73,10 @@ impl StreamingMarkdownState {
             first_block: true,
             emitted_message_prefix: false,
             last_was_blank: false,
+            highlight_state: None,
+            highlight_hl_state: None,
+            highlight_theme: None,
+            highlight_syntax_name: None,
         }
     }
 
@@ -140,14 +153,49 @@ impl StreamingMarkdownState {
                     ]));
                     self.block_state = BlockState::Paragraph;
                     self.last_was_blank = false;
+                    self.highlight_state = None;
+                    self.highlight_hl_state = None;
+                    self.highlight_theme = None;
+                    self.highlight_syntax_name = None;
                 } else {
-                    // Code line inside block
-                    self.lines_cache.push(Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled("│ ", Style::default().fg(self.palette.bash_border)),
-                        Span::styled(line.to_string(), Style::default().fg(self.palette.text)),
-                    ]));
-                    self.last_was_blank = false;
+                    // Code line inside block — use incremental highlighting
+                    let did_highlight = if let (Some(parse_state), Some(hl_state), Some(theme)) = (
+                        self.highlight_state.as_mut(),
+                        self.highlight_hl_state.as_mut(),
+                        self.highlight_theme.as_ref(),
+                    ) {
+                        let highlighter = syntect::highlighting::Highlighter::new(theme);
+                        let spans_data = crate::highlight::highlight_line(
+                            &format!("{}\n", line),
+                            parse_state,
+                            hl_state,
+                            &highlighter,
+                        );
+                        let mut spans = vec![
+                            Span::raw("  "),
+                            Span::styled("│ ", Style::default().fg(self.palette.bash_border)),
+                        ];
+                        for (style, text) in spans_data {
+                            let text = text.trim_end_matches('\n').to_string();
+                            if !text.is_empty() {
+                                spans.push(Span::styled(text, style));
+                            }
+                        }
+                        self.lines_cache.push(Line::from(spans));
+                        self.last_was_blank = false;
+                        true
+                    } else {
+                        false
+                    };
+                    if !did_highlight {
+                        // Fallback to monochrome (no highlight state available)
+                        self.lines_cache.push(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled("│ ", Style::default().fg(self.palette.bash_border)),
+                            Span::styled(line.to_string(), Style::default().fg(self.palette.text)),
+                        ]));
+                        self.last_was_blank = false;
+                    }
                 }
             }
             BlockState::Paragraph | BlockState::List => {
@@ -181,6 +229,19 @@ impl StreamingMarkdownState {
                             Style::default().fg(self.palette.bash_border),
                         ),
                     ]));
+                    // Initialize syntect parse + highlight state for incremental highlighting
+                    if let Some(ref l) = lang {
+                        let ss = crate::highlight::syntax_set();
+                        if let Some(syntax) = crate::highlight::resolve_syntax(l, ss) {
+                            self.highlight_state = Some(SyntectParseState::new(syntax));
+                            self.highlight_syntax_name = Some(syntax.name.clone());
+                            // Cache theme and create initial highlight state
+                            let theme = crate::highlight::build_custom_theme(&self.palette);
+                            let highlighter = syntect::highlighting::Highlighter::new(&theme);
+                            self.highlight_hl_state = Some(crate::highlight::new_highlight_state(&highlighter));
+                            self.highlight_theme = Some(theme);
+                        }
+                    }
                     self.block_state = BlockState::CodeBlock { lang };
                     self.first_block = false;
                     self.last_was_blank = false;
@@ -366,6 +427,10 @@ impl StreamingMarkdownState {
         self.first_block = true;
         self.emitted_message_prefix = false;
         self.last_was_blank = false;
+        self.highlight_state = None;
+        self.highlight_hl_state = None;
+        self.highlight_theme = None;
+        self.highlight_syntax_name = None;
     }
 }
 

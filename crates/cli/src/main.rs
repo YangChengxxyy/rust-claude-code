@@ -8,8 +8,8 @@ use rust_claude_core::{
     config::{Config, ConfigError, ConfigOverrides, ConfigSource, Theme},
     git::collect_git_context,
     hooks::HooksConfig,
-    memory,
     mcp_config::McpServersConfig,
+    memory,
     message::ContentBlock,
     model::get_runtime_main_loop_model,
     permission::PermissionMode,
@@ -18,9 +18,9 @@ use rust_claude_core::{
 };
 use rust_claude_mcp::{McpManager, McpManagerConfig};
 use rust_claude_tools::{
-    AgentContext, AgentTool, BashTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
-    GrepTool, LspTool, NotebookEditTool, TaskTool, ToolRegistry, WebFetchTool, WebSearchTool,
-    register_mcp_tools,
+    register_mcp_tools, AgentContext, AgentTool, BashTool, FileEditTool, FileReadTool,
+    FileWriteTool, GlobTool, GrepTool, LspTool, NotebookEditTool, TaskTool, ToolRegistry,
+    WebFetchTool, WebSearchTool,
 };
 use rust_claude_tui::{App, AppEvent, TerminalGuard, TuiBridge, UserCommand};
 use tokio::sync::{mpsc, Mutex};
@@ -174,7 +174,9 @@ fn resolve_config(
     project_settings: Option<SettingsLayer>,
 ) -> Result<ResolvedConfig> {
     if cli.system_prompt.is_some() && cli.system_prompt_file.is_some() {
-        return Err(anyhow!("--system-prompt and --system-prompt-file are mutually exclusive"));
+        return Err(anyhow!(
+            "--system-prompt and --system-prompt-file are mutually exclusive"
+        ));
     }
 
     let merged_settings = merge_settings_layers(user_settings.clone(), project_settings.as_ref());
@@ -187,7 +189,11 @@ fn resolve_config(
     let mut overrides = ConfigOverrides::default();
 
     if let Some(model) = merged_settings.model.clone() {
-        let source = if project_settings.as_ref().and_then(|layer| layer.settings.model.as_ref()).is_some() {
+        let source = if project_settings
+            .as_ref()
+            .and_then(|layer| layer.settings.model.as_ref())
+            .is_some()
+        {
             ConfigSource::ProjectSettings
         } else {
             ConfigSource::UserConfig
@@ -232,7 +238,10 @@ fn resolve_config(
 
     if let Some(path) = &cli.system_prompt_file {
         overrides.system_prompt.set(
-            Some(std::fs::read_to_string(path).map_err(|e| anyhow!("failed to read --system-prompt-file '{}': {e}", path))?),
+            Some(
+                std::fs::read_to_string(path)
+                    .map_err(|e| anyhow!("failed to read --system-prompt-file '{}': {e}", path))?,
+            ),
             ConfigSource::Cli,
         );
     } else if let Some(prompt) = cli.system_prompt.clone() {
@@ -290,13 +299,43 @@ fn resolve_config(
     }
 
     if let Some(append_path) = &cli.append_system_prompt_file {
-        let append = std::fs::read_to_string(append_path)
-            .map_err(|e| anyhow!("failed to read --append-system-prompt-file '{}': {e}", append_path))?;
-        let base = overrides.system_prompt.value.clone().flatten().or_else(|| config.system_prompt.clone()).unwrap_or_default();
-        overrides.system_prompt.set(Some(if base.is_empty() { append } else { format!("{base}\n\n{append}") }), ConfigSource::Cli);
+        let append = std::fs::read_to_string(append_path).map_err(|e| {
+            anyhow!(
+                "failed to read --append-system-prompt-file '{}': {e}",
+                append_path
+            )
+        })?;
+        let base = overrides
+            .system_prompt
+            .value
+            .clone()
+            .flatten()
+            .or_else(|| config.system_prompt.clone())
+            .unwrap_or_default();
+        overrides.system_prompt.set(
+            Some(if base.is_empty() {
+                append
+            } else {
+                format!("{base}\n\n{append}")
+            }),
+            ConfigSource::Cli,
+        );
     } else if let Some(append) = &cli.append_system_prompt {
-        let base = overrides.system_prompt.value.clone().flatten().or_else(|| config.system_prompt.clone()).unwrap_or_default();
-        overrides.system_prompt.set(Some(if base.is_empty() { append.clone() } else { format!("{base}\n\n{append}") }), ConfigSource::Cli);
+        let base = overrides
+            .system_prompt
+            .value
+            .clone()
+            .flatten()
+            .or_else(|| config.system_prompt.clone())
+            .unwrap_or_default();
+        overrides.system_prompt.set(
+            Some(if base.is_empty() {
+                append.clone()
+            } else {
+                format!("{base}\n\n{append}")
+            }),
+            ConfigSource::Cli,
+        );
     }
 
     config = config.apply_overrides(overrides);
@@ -356,7 +395,8 @@ async fn main() -> Result<()> {
     let config = match Config::load() {
         Ok(config) => config,
         Err(ConfigError::MissingApiKey) => {
-            let merged_settings = merge_settings_layers(user_settings.clone(), project_settings.as_ref());
+            let merged_settings =
+                merge_settings_layers(user_settings.clone(), project_settings.as_ref());
             if let Some(ref helper) = merged_settings.api_key_helper {
                 match run_api_key_helper(helper) {
                     Ok(credential) => Config::with_credential(credential, true),
@@ -387,7 +427,10 @@ async fn main() -> Result<()> {
         println!("permission_mode: {:?}", resolved.permission_mode);
         println!("max_turns: {:?}", resolved.max_turns);
         println!("model_source: {}", resolved.config.provenance.model);
-        println!("permissions_source: {} / {}", resolved.config.provenance.always_allow, resolved.config.provenance.always_deny);
+        println!(
+            "permissions_source: {} / {}",
+            resolved.config.provenance.always_allow, resolved.config.provenance.always_deny
+        );
         if let Some(layer) = &resolved.project_settings {
             println!("project_settings: {}", layer.path.display());
         }
@@ -420,7 +463,8 @@ async fn main() -> Result<()> {
     state.always_deny_rules = resolved.always_deny.clone();
 
     // Helper: restore full session state from a loaded SessionFile.
-    let restore_session = |state: &mut rust_claude_core::state::AppState, prev: &session::SessionFile| {
+    let restore_session = |state: &mut rust_claude_core::state::AppState,
+                           prev: &session::SessionFile| {
         state.messages = prev.messages.clone();
         if !prev.model_setting.is_empty() {
             state.session.model_setting = prev.model_setting.clone();
@@ -435,11 +479,8 @@ async fn main() -> Result<()> {
         if !prev.always_deny_rules.is_empty() {
             state.always_deny_rules = prev.always_deny_rules.clone();
         }
-        state.session.model = get_runtime_main_loop_model(
-            &state.session.model_setting,
-            state.permission_mode,
-            false,
-        );
+        state.session.model =
+            get_runtime_main_loop_model(&state.session.model_setting, state.permission_mode, false);
     };
 
     if let Some(session_id) = &cli.resume_session {
@@ -486,7 +527,10 @@ async fn main() -> Result<()> {
     let hook_runner = if resolved.hooks_config.is_empty() {
         None
     } else {
-        Some(Arc::new(HookRunner::new(resolved.hooks_config.clone(), cwd.clone())))
+        Some(Arc::new(HookRunner::new(
+            resolved.hooks_config.clone(),
+            cwd.clone(),
+        )))
     };
 
     // Initialize MCP servers (if any configured)
@@ -494,7 +538,10 @@ async fn main() -> Result<()> {
         Arc::new(McpManager::empty())
     } else {
         if resolved.verbose {
-            println!("MCP: starting {} configured server(s)...", resolved.mcp_servers.len());
+            println!(
+                "MCP: starting {} configured server(s)...",
+                resolved.mcp_servers.len()
+            );
         }
         let manager = McpManager::start(&resolved.mcp_servers, &McpManagerConfig::default()).await;
         if resolved.verbose {
@@ -506,7 +553,11 @@ async fn main() -> Result<()> {
             for status in manager.server_statuses() {
                 match &status.state {
                     rust_claude_core::mcp_config::McpServerState::Connected => {
-                        println!("  {} (connected, {} tools)", status.name, status.tools.len());
+                        println!(
+                            "  {} (connected, {} tools)",
+                            status.name,
+                            status.tools.len()
+                        );
                     }
                     rust_claude_core::mcp_config::McpServerState::Failed(msg) => {
                         println!("  {} (failed: {})", status.name, msg);
@@ -544,7 +595,11 @@ async fn main() -> Result<()> {
 
     if resolved.print_mode {
         let prompt = cli.prompt.join(" ");
-        let client = build_client(&resolved.api_key, resolved.base_url.clone(), resolved.bearer_auth)?;
+        let client = build_client(
+            &resolved.api_key,
+            resolved.base_url.clone(),
+            resolved.bearer_auth,
+        )?;
         let mut tools = build_tools();
         register_mcp_tools(&mut tools, &mcp_manager);
         tools.apply_tool_filters(&resolved.allowed_tools, &resolved.disallowed_tools);
@@ -587,11 +642,24 @@ async fn main() -> Result<()> {
                             let _ = out.flush();
                         }
                         AppEvent::ToolUseStart { name, input } => {
-                            let display_name = rust_claude_tui::ChatMessage::user_facing_tool_name(&name);
+                            let display_name =
+                                rust_claude_tui::ChatMessage::user_facing_tool_name(&name);
                             let summary = match name.as_str() {
-                                "Bash" => input.get("command").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                "FileRead" => input.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                                "FileEdit" | "FileWrite" => input.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                                "Bash" => input
+                                    .get("command")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                "FileRead" => input
+                                    .get("file_path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                "FileEdit" | "FileWrite" => input
+                                    .get("file_path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
                                 _ => String::new(),
                             };
                             let mut err = stderr.lock();
@@ -601,8 +669,13 @@ async fn main() -> Result<()> {
                                 let _ = writeln!(err, "[{display_name}] {summary}");
                             }
                         }
-                        AppEvent::ToolResult { name, output, is_error } => {
-                            let display_name = rust_claude_tui::ChatMessage::user_facing_tool_name(&name);
+                        AppEvent::ToolResult {
+                            name,
+                            output,
+                            is_error,
+                        } => {
+                            let display_name =
+                                rust_claude_tui::ChatMessage::user_facing_tool_name(&name);
                             let status = if is_error { "error" } else { "ok" };
                             let truncated = if output.len() > 100 {
                                 format!("{}...", &output[..100])
@@ -644,7 +717,15 @@ async fn main() -> Result<()> {
     } else {
         let allowed_tools = resolved.allowed_tools.clone();
         let disallowed_tools = resolved.disallowed_tools.clone();
-        run_tui(app_state, resolved.config.clone(), allowed_tools, disallowed_tools, hook_runner, mcp_manager).await
+        run_tui(
+            app_state,
+            resolved.config.clone(),
+            allowed_tools,
+            disallowed_tools,
+            hook_runner,
+            mcp_manager,
+        )
+        .await
     }
 }
 
@@ -657,7 +738,10 @@ fn run_api_key_helper(command: &str) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("apiKeyHelper exited with {}: {stderr}", output.status));
+        return Err(anyhow!(
+            "apiKeyHelper exited with {}: {stderr}",
+            output.status
+        ));
     }
 
     let credential = String::from_utf8(output.stdout)
@@ -687,54 +771,56 @@ fn build_client(
     Ok(client)
 }
 
-fn build_agent_context(
-    client: Arc<dyn rust_claude_api::ModelClient>,
-) -> AgentContext {
+fn build_agent_context(client: Arc<dyn rust_claude_api::ModelClient>) -> AgentContext {
     AgentContext {
         tool_registry_factory: Arc::new(build_tools),
-        run_subagent: Arc::new(move |prompt, allowed_tools, app_state, current_depth, max_depth| {
-            let client = client.clone();
-            Box::pin(async move {
-                let mut tools = build_tools();
-                if !allowed_tools.is_empty() {
-                    tools.apply_tool_filters(&allowed_tools, &[]);
-                }
-                let query_loop = QueryLoop::new(client.clone(), tools).with_max_rounds(5).with_agent_context(AgentContext {
-                    tool_registry_factory: Arc::new(build_tools),
-                    run_subagent: Arc::new(|_, _, _, _, _| {
-                        Box::pin(async {
-                            Err(rust_claude_tools::ToolError::Execution(
-                                "nested agent runner unavailable".to_string(),
-                            ))
+        run_subagent: Arc::new(
+            move |prompt, allowed_tools, app_state, current_depth, max_depth| {
+                let client = client.clone();
+                Box::pin(async move {
+                    let mut tools = build_tools();
+                    if !allowed_tools.is_empty() {
+                        tools.apply_tool_filters(&allowed_tools, &[]);
+                    }
+                    let query_loop = QueryLoop::new(client.clone(), tools)
+                        .with_max_rounds(5)
+                        .with_agent_context(AgentContext {
+                            tool_registry_factory: Arc::new(build_tools),
+                            run_subagent: Arc::new(|_, _, _, _, _| {
+                                Box::pin(async {
+                                    Err(rust_claude_tools::ToolError::Execution(
+                                        "nested agent runner unavailable".to_string(),
+                                    ))
+                                })
+                            }),
+                            current_depth,
+                            max_depth,
+                        });
+
+                    let message = query_loop
+                        .run(app_state.clone(), prompt)
+                        .await
+                        .map_err(|e| rust_claude_tools::ToolError::Execution(e.to_string()))?;
+
+                    let text = message
+                        .content
+                        .into_iter()
+                        .filter_map(|block| match block {
+                            ContentBlock::Text { text } => Some(text),
+                            _ => None,
                         })
-                    }),
-                    current_depth,
-                    max_depth,
-                });
+                        .collect::<Vec<_>>()
+                        .join("\n");
 
-                let message = query_loop
-                    .run(app_state.clone(), prompt)
-                    .await
-                    .map_err(|e| rust_claude_tools::ToolError::Execution(e.to_string()))?;
-
-                let text = message
-                    .content
-                    .into_iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text),
-                        _ => None,
+                    let usage = app_state.lock().await.total_usage.clone();
+                    Ok(rust_claude_tools::tool::AgentRunOutput {
+                        text,
+                        input_tokens: usage.input_tokens as u64,
+                        output_tokens: usage.output_tokens as u64,
                     })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                let usage = app_state.lock().await.total_usage.clone();
-                Ok(rust_claude_tools::tool::AgentRunOutput {
-                    text,
-                    input_tokens: usage.input_tokens as u64,
-                    output_tokens: usage.output_tokens as u64,
                 })
-            })
-        }),
+            },
+        ),
         current_depth: 0,
         max_depth: 3,
     }
@@ -852,7 +938,10 @@ fn remember_memory(
     };
 
     let Some(parsed_type) = memory::MemoryType::parse(memory_type) else {
-        return format!("Unknown memory type '{}'. Valid types: user, feedback, project, reference", memory_type);
+        return format!(
+            "Unknown memory type '{}'. Valid types: user, feedback, project, reference",
+            memory_type
+        );
     };
 
     let request = memory::MemoryWriteRequest {
@@ -870,8 +959,9 @@ fn remember_memory(
     // name (not path), use the existing entry's path so `correct_memory_entry`
     // targets the right file.
     let existing_path = match memory::scan_memory_store(&store) {
-        Ok(scanned) => memory::find_duplicate_memory(&scanned, &request)
-            .map(|dup| dup.relative_path.clone()),
+        Ok(scanned) => {
+            memory::find_duplicate_memory(&scanned, &request).map(|dup| dup.relative_path.clone())
+        }
         Err(_) => None,
     };
 
@@ -908,7 +998,11 @@ fn forget_memory(cwd: &std::path::Path, path: &str) -> String {
     };
 
     match memory::remove_memory_entry(&store, path) {
-        Ok(true) => format!("Removed memory {} and updated {}", path, store.entrypoint.display()),
+        Ok(true) => format!(
+            "Removed memory {} and updated {}",
+            path,
+            store.entrypoint.display()
+        ),
         Ok(false) => format!("Memory {} was not found", path),
         Err(e) => format!("Failed to forget memory: {e}"),
     }
@@ -960,7 +1054,12 @@ async fn run_tui(
     let worker_state = app_state.clone();
 
     worker_bridge
-        .send_status_update(&model, &model_setting, &permission_mode, git_branch.as_deref())
+        .send_status_update(
+            &model,
+            &model_setting,
+            &permission_mode,
+            git_branch.as_deref(),
+        )
         .await;
 
     let worker_hook_runner = hook_runner;
@@ -972,7 +1071,8 @@ async fn run_tui(
         while let Some(command) = user_rx.recv().await {
             match command {
                 UserCommand::Compact => {
-                    let client = match build_client(&config.api_key, base_url.clone(), bearer_auth) {
+                    let client = match build_client(&config.api_key, base_url.clone(), bearer_auth)
+                    {
                         Ok(client) => client,
                         Err(error) => {
                             worker_bridge.send_error(&error.to_string()).await;
@@ -984,7 +1084,11 @@ async fn run_tui(
                     let service = CompactionService::new(client, compaction_config.clone());
                     match service.force_compact(&worker_state).await {
                         Ok(result) => worker_bridge.send_compaction_complete(result).await,
-                        Err(e) => worker_bridge.send_error(&format!("Compaction failed: {e}")).await,
+                        Err(e) => {
+                            worker_bridge
+                                .send_error(&format!("Compaction failed: {e}"))
+                                .await
+                        }
                     }
 
                     let state_snapshot = worker_state.lock().await;
@@ -1196,7 +1300,8 @@ async fn run_tui(
                                 .output();
                             match output {
                                 Ok(output) if output.status.success() => {
-                                    let diff = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                                    let diff =
+                                        String::from_utf8_lossy(&output.stdout).trim().to_string();
                                     if diff.is_empty() {
                                         "No working tree changes to display.".to_string()
                                     } else {
@@ -1239,7 +1344,8 @@ async fn run_tui(
                     if let Some(handle) = active_query_task.take() {
                         handle.abort();
                     }
-                    let client = match build_client(&config.api_key, base_url.clone(), bearer_auth) {
+                    let client = match build_client(&config.api_key, base_url.clone(), bearer_auth)
+                    {
                         Ok(client) => client,
                         Err(error) => {
                             worker_bridge.send_error(&error.to_string()).await;
@@ -1279,9 +1385,7 @@ async fn run_tui(
                                 // stall the executor. We only hold the lock to read
                                 // cwd, release it, then reacquire once to write the
                                 // fresh context and collect the other fields.
-                                let cwd_snapshot = {
-                                    worker_state_clone.lock().await.cwd.clone()
-                                };
+                                let cwd_snapshot = { worker_state_clone.lock().await.cwd.clone() };
                                 let new_git_context = tokio::task::spawn_blocking(move || {
                                     collect_git_context(&cwd_snapshot)
                                 })
@@ -1303,9 +1407,9 @@ async fn run_tui(
                                         get_runtime_main_loop_model(
                                             &state.session.model_setting,
                                             state.permission_mode,
-                                            state
-                                                .most_recent_assistant_usage()
-                                                .is_some_and(rust_claude_core::model::usage_exceeds_200k_tokens),
+                                            state.most_recent_assistant_usage().is_some_and(
+                                                rust_claude_core::model::usage_exceeds_200k_tokens,
+                                            ),
                                         ),
                                         state.session.model_setting.clone(),
                                         format!("{:?}", state.permission_mode),
@@ -1372,8 +1476,15 @@ async fn run_tui(
     });
 
     let mut terminal_guard = TerminalGuard::new()?;
-    let mut app = App::new(model, model_setting, permission_mode, git_branch, config.theme);
-    app.run(terminal_guard.terminal_mut(), event_rx, user_tx).await?;
+    let mut app = App::new(
+        model,
+        model_setting,
+        permission_mode,
+        git_branch,
+        config.theme,
+    );
+    app.run(terminal_guard.terminal_mut(), event_rx, user_tx)
+        .await?;
     Ok(())
 }
 
@@ -1406,7 +1517,10 @@ mod tests {
                 std::env::remove_var("ANTHROPIC_MODEL");
                 std::env::remove_var("RUST_CLAUDE_MODEL_OVERRIDE");
             }
-            Self { anthropic_model, override_model }
+            Self {
+                anthropic_model,
+                override_model,
+            }
         }
     }
 
@@ -1510,9 +1624,13 @@ mod tests {
             },
         });
 
-        let resolved = resolve_config(&cli, config, ClaudeSettings::default(), project_settings).unwrap();
+        let resolved =
+            resolve_config(&cli, config, ClaudeSettings::default(), project_settings).unwrap();
         assert_eq!(resolved.always_allow.len(), 1);
-        assert_eq!(resolved.config.provenance.always_allow, ConfigSource::ProjectSettings);
+        assert_eq!(
+            resolved.config.provenance.always_allow,
+            ConfigSource::ProjectSettings
+        );
     }
 
     fn default_cli() -> Cli {
@@ -1573,8 +1691,14 @@ mod tests {
         assert_eq!(resolved.always_deny.len(), 1, "user deny preserved");
         // Allow provenance points at the project (it's the sole contributor),
         // deny provenance points at the user (it's the sole contributor).
-        assert_eq!(resolved.config.provenance.always_allow, ConfigSource::ProjectSettings);
-        assert_eq!(resolved.config.provenance.always_deny, ConfigSource::UserConfig);
+        assert_eq!(
+            resolved.config.provenance.always_allow,
+            ConfigSource::ProjectSettings
+        );
+        assert_eq!(
+            resolved.config.provenance.always_deny,
+            ConfigSource::UserConfig
+        );
     }
 
     /// Regression for the priority chain: `--model` must beat `ANTHROPIC_MODEL`
@@ -1590,8 +1714,7 @@ mod tests {
         cli.model = Some("opus[1m]".to_string());
 
         let config = Config::with_credential("test-key".to_string(), false);
-        let resolved =
-            resolve_config(&cli, config, ClaudeSettings::default(), None).unwrap();
+        let resolved = resolve_config(&cli, config, ClaudeSettings::default(), None).unwrap();
 
         assert_eq!(resolved.model_setting, "opus[1m]");
         assert_eq!(resolved.config.provenance.model, ConfigSource::Cli);
@@ -1605,10 +1728,7 @@ mod tests {
         use rust_claude_core::memory;
         use std::fs;
 
-        let dir = std::env::temp_dir().join(format!(
-            "remember-dedup-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("remember-dedup-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
@@ -1646,7 +1766,10 @@ mod tests {
         // Duplicate detection should find the existing entry
         let scanned = memory::scan_memory_store(&store).unwrap();
         let dup = memory::find_duplicate_memory(&scanned, &update);
-        assert!(dup.is_some(), "existing entry should be detected as duplicate");
+        assert!(
+            dup.is_some(),
+            "existing entry should be detected as duplicate"
+        );
 
         // Correct instead of create
         let path = memory::correct_memory_entry(&store, &update).unwrap();
@@ -1669,10 +1792,7 @@ mod tests {
         use rust_claude_core::memory;
         use std::fs;
 
-        let dir = std::env::temp_dir().join(format!(
-            "remember-name-dedup-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("remember-name-dedup-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
@@ -1740,10 +1860,7 @@ mod tests {
         use rust_claude_core::memory;
         use std::fs;
 
-        let dir = std::env::temp_dir().join(format!(
-            "memory-status-empty-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("memory-status-empty-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
@@ -1755,7 +1872,10 @@ mod tests {
 
         let status = format_memory_store_status(&store);
         assert!(status.contains("entries: 0"), "should show zero entries");
-        assert!(status.contains("No memory entries found"), "should indicate empty");
+        assert!(
+            status.contains("No memory entries found"),
+            "should indicate empty"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1765,10 +1885,8 @@ mod tests {
         use rust_claude_core::memory;
         use std::fs;
 
-        let dir = std::env::temp_dir().join(format!(
-            "memory-status-populated-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("memory-status-populated-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
@@ -1813,8 +1931,14 @@ mod tests {
         assert!(status.contains("Visible memories:"), "should list memories");
         assert!(status.contains("[feedback]"), "should show memory type");
         assert!(status.contains("[project]"), "should show second type");
-        assert!(status.contains("DB test guidance"), "should show description");
-        assert!(status.contains("Entrypoint loaded:"), "should show entrypoint info");
+        assert!(
+            status.contains("DB test guidance"),
+            "should show description"
+        );
+        assert!(
+            status.contains("Entrypoint loaded:"),
+            "should show entrypoint info"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1823,10 +1947,7 @@ mod tests {
     fn format_memory_store_status_no_store_dir() {
         use rust_claude_core::memory;
 
-        let dir = std::env::temp_dir().join(format!(
-            "memory-status-nodir-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("memory-status-nodir-{}", std::process::id()));
         // Ensure dir does NOT exist
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1837,8 +1958,14 @@ mod tests {
         };
 
         let status = format_memory_store_status(&store);
-        assert!(status.contains("entries: 0"), "non-existent dir should show 0 entries");
-        assert!(status.contains("No memory entries found"), "should indicate empty");
+        assert!(
+            status.contains("entries: 0"),
+            "non-existent dir should show 0 entries"
+        );
+        assert!(
+            status.contains("No memory entries found"),
+            "should indicate empty"
+        );
     }
 
     /// `RUST_CLAUDE_MODEL_OVERRIDE` must still beat both CLI `--model` and
@@ -1853,8 +1980,7 @@ mod tests {
         cli.model = Some("opus[1m]".to_string());
 
         let config = Config::with_credential("test-key".to_string(), false);
-        let resolved =
-            resolve_config(&cli, config, ClaudeSettings::default(), None).unwrap();
+        let resolved = resolve_config(&cli, config, ClaudeSettings::default(), None).unwrap();
 
         assert_eq!(resolved.model_setting, "override-model");
         assert_eq!(resolved.config.provenance.model, ConfigSource::Env);

@@ -27,6 +27,72 @@ struct SlashCommandSpec {
     description: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuggestionKind {
+    Command,
+    Skill,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuggestionItem {
+    pub kind: SuggestionKind,
+    pub label: String,
+    pub description: String,
+    pub insert_text: String,
+    match_text: String,
+}
+
+impl SuggestionItem {
+    pub fn new(
+        kind: SuggestionKind,
+        label: impl Into<String>,
+        description: impl Into<String>,
+        insert_text: impl Into<String>,
+        match_text: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            label: label.into(),
+            description: description.into(),
+            insert_text: insert_text.into(),
+            match_text: match_text.into(),
+        }
+    }
+
+    fn matches_query(&self, query: &str) -> bool {
+        self.match_text.contains(query)
+    }
+
+    fn match_rank(&self, query: &str) -> usize {
+        if query.is_empty() {
+            return 0;
+        }
+        let label = self.label.to_lowercase();
+        if label == format!("/{query}") || label == query {
+            0
+        } else if label.starts_with(&format!("/{query}")) || label.starts_with(query) {
+            1
+        } else if self.match_text.contains(query) {
+            2
+        } else {
+            3
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlashSuggestions {
+    pub query: String,
+    pub items: Vec<SuggestionItem>,
+    pub selected: usize,
+    pub scroll: usize,
+}
+
+struct SkillSuggestionSpec {
+    name: &'static str,
+    description: &'static str,
+}
+
 const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
         name: "/clear",
@@ -132,6 +198,29 @@ const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         name: "/exit",
         usage: "/exit",
         description: "Exit",
+    },
+];
+
+const SKILL_SUGGESTIONS: &[SkillSuggestionSpec] = &[
+    SkillSuggestionSpec {
+        name: "brainstorming",
+        description: "Explore requirements and design before implementation",
+    },
+    SkillSuggestionSpec {
+        name: "test-driven-development",
+        description: "Drive features and fixes with failing tests first",
+    },
+    SkillSuggestionSpec {
+        name: "verification-before-completion",
+        description: "Run fresh verification before claiming completion",
+    },
+    SkillSuggestionSpec {
+        name: "openspec-propose",
+        description: "Create a new OpenSpec change with proposal artifacts",
+    },
+    SkillSuggestionSpec {
+        name: "openspec-apply-change",
+        description: "Implement tasks from an existing OpenSpec change",
     },
 ];
 
@@ -502,6 +591,7 @@ pub struct App {
     pub permission_dialog: Option<PermissionDialog>,
     pub user_question_dialog: Option<UserQuestionDialog>,
     pub session_picker: Option<SessionPicker>,
+    pub slash_suggestions: Option<SlashSuggestions>,
 
     // -- task panel --
     pub todo_visible: bool,
@@ -570,6 +660,7 @@ impl App {
             permission_dialog: None,
             user_question_dialog: None,
             session_picker: None,
+            slash_suggestions: None,
             todo_visible: false,
             tasks: Vec::new(),
             history,
@@ -595,6 +686,178 @@ impl App {
     fn reset_input_navigation(&mut self) {
         self.history_index = None;
         self.draft_before_history = None;
+    }
+
+    fn refresh_slash_suggestions(&mut self) {
+        let input = self.input_text();
+        let Some(query) = input.strip_prefix('/') else {
+            self.slash_suggestions = None;
+            return;
+        };
+
+        let query = query.to_lowercase();
+        let mut items = Vec::new();
+
+        for command in SLASH_COMMANDS {
+            let match_text = format!(
+                "{} {} {}",
+                command.name.to_lowercase(),
+                command.usage.to_lowercase(),
+                command.description.to_lowercase()
+            );
+            let item = SuggestionItem::new(
+                SuggestionKind::Command,
+                command.name,
+                command.description,
+                command.name,
+                match_text,
+            );
+            if query.is_empty() || item.matches_query(&query) {
+                items.push(item);
+            }
+        }
+
+        for skill in SKILL_SUGGESTIONS {
+            let match_text = format!(
+                "{} {}",
+                skill.name.to_lowercase(),
+                skill.description.to_lowercase()
+            );
+            let item = SuggestionItem::new(
+                SuggestionKind::Skill,
+                skill.name,
+                skill.description,
+                skill.name,
+                match_text,
+            );
+            if query.is_empty() || item.matches_query(&query) {
+                items.push(item);
+            }
+        }
+
+        items.sort_by(|a, b| {
+            a.match_rank(&query)
+                .cmp(&b.match_rank(&query))
+                .then_with(|| a.label.cmp(&b.label))
+        });
+
+        self.slash_suggestions = Some(SlashSuggestions {
+            query,
+            items,
+            selected: 0,
+            scroll: 0,
+        });
+    }
+
+    fn slash_suggestion_visible_rows(&self) -> usize {
+        let input_height = self.input_buffer.line_count().max(1) as u16 + 2;
+        let input_area = Rect::new(
+            0,
+            self.terminal_height.saturating_sub(1 + input_height),
+            self.terminal_width,
+            input_height,
+        );
+        crate::ui::slash_suggestion_overlay_geometry(self, input_area)
+            .map(|(_, visible_rows)| visible_rows)
+            .unwrap_or(1)
+    }
+
+    fn sync_suggestion_scroll_to_selection(&mut self) {
+        let visible_rows = self.slash_suggestion_visible_rows();
+        let Some(suggestions) = self.slash_suggestions.as_ref() else {
+            return;
+        };
+        let (_, item_rows) = ui::build_slash_suggestion_render_rows(self, visible_rows.max(1));
+        let Some(selected_row) = item_rows.get(suggestions.selected).copied() else {
+            return;
+        };
+        let current_scroll = suggestions.scroll;
+        let new_scroll = if selected_row < current_scroll {
+            selected_row
+        } else if selected_row >= current_scroll + visible_rows {
+            selected_row + 1 - visible_rows
+        } else {
+            current_scroll
+        };
+        if let Some(suggestions) = self.slash_suggestions.as_mut() {
+            suggestions.scroll = new_scroll;
+        }
+    }
+
+    fn scroll_suggestions_up_page(&mut self) -> bool {
+        let visible_rows = self.slash_suggestion_visible_rows();
+        let Some(suggestions) = self.slash_suggestions.as_mut() else {
+            return false;
+        };
+        if suggestions.items.is_empty() {
+            return false;
+        }
+        suggestions.scroll = suggestions.scroll.saturating_sub(visible_rows);
+        true
+    }
+
+    fn scroll_suggestions_down_page(&mut self) -> bool {
+        let visible_rows = self.slash_suggestion_visible_rows();
+        let Some(suggestions) = self.slash_suggestions.as_ref() else {
+            return false;
+        };
+        if suggestions.items.is_empty() {
+            return false;
+        }
+        let (rows, _) = ui::build_slash_suggestion_render_rows(self, visible_rows.max(1));
+        let current_scroll = suggestions.scroll;
+        let max_scroll = rows.len().saturating_sub(visible_rows);
+        if let Some(suggestions) = self.slash_suggestions.as_mut() {
+            suggestions.scroll = (current_scroll + visible_rows).min(max_scroll);
+        }
+        true
+    }
+
+    fn slash_suggestion_render_row_count(&self) -> usize {
+        let (rows, _) = ui::build_slash_suggestion_render_rows(self, self.terminal_width as usize);
+        rows.len()
+    }
+
+    fn move_suggestion_selection_up(&mut self) -> bool {
+        let Some(suggestions) = self.slash_suggestions.as_mut() else {
+            return false;
+        };
+        if suggestions.items.is_empty() {
+            return false;
+        }
+        suggestions.selected = suggestions.selected.saturating_sub(1);
+        self.sync_suggestion_scroll_to_selection();
+        true
+    }
+
+    fn move_suggestion_selection_down(&mut self) -> bool {
+        let Some(suggestions) = self.slash_suggestions.as_mut() else {
+            return false;
+        };
+        if suggestions.items.is_empty() {
+            return false;
+        }
+        suggestions.selected = (suggestions.selected + 1).min(suggestions.items.len() - 1);
+        self.sync_suggestion_scroll_to_selection();
+        true
+    }
+
+    fn apply_selected_suggestion(&mut self) -> bool {
+        let Some(suggestions) = self.slash_suggestions.as_ref() else {
+            return false;
+        };
+        let Some(selected) = suggestions.items.get(suggestions.selected) else {
+            return false;
+        };
+
+        if self.input_text() == selected.insert_text {
+            return false;
+        }
+
+        self.input_buffer = InputBuffer::from_text(&selected.insert_text);
+        self.slash_suggestions = None;
+        self.reset_input_navigation();
+        true
     }
 
     fn max_chat_scroll_offset(&self) -> u16 {
@@ -933,6 +1196,7 @@ impl App {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         self.input_buffer.insert_text(&normalized);
         self.reset_input_navigation();
+        self.refresh_slash_suggestions();
     }
 
     /// Process a keyboard event.
@@ -968,6 +1232,8 @@ impl App {
         }
 
         match key.code {
+            KeyCode::PageUp if !self.is_streaming && self.scroll_suggestions_up_page() => {}
+            KeyCode::PageDown if !self.is_streaming && self.scroll_suggestions_down_page() => {}
             KeyCode::PageUp => self.scroll_chat_up(),
             KeyCode::PageDown => self.scroll_chat_down(),
             KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -979,6 +1245,7 @@ impl App {
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) && !self.is_streaming => {
                 self.input_buffer.insert_newline();
                 self.reset_input_navigation();
+                self.refresh_slash_suggestions();
             }
             KeyCode::Enter => {
                 if self.is_streaming {
@@ -999,20 +1266,24 @@ impl App {
             KeyCode::Char(' ') if !self.is_streaming => {
                 self.input_buffer.insert_char(' ');
                 self.reset_input_navigation();
+                self.refresh_slash_suggestions();
             }
             KeyCode::Char(c)
                 if !key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming =>
             {
                 self.input_buffer.insert_char(c);
                 self.reset_input_navigation();
+                self.refresh_slash_suggestions();
             }
             KeyCode::Backspace if !self.is_streaming => {
                 self.input_buffer.backspace();
                 self.reset_input_navigation();
+                self.refresh_slash_suggestions();
             }
             KeyCode::Delete if !self.is_streaming => {
                 self.input_buffer.delete();
                 self.reset_input_navigation();
+                self.refresh_slash_suggestions();
             }
             KeyCode::Left
                 if key.modifiers.contains(KeyModifiers::CONTROL) && !self.is_streaming =>
@@ -1028,6 +1299,8 @@ impl App {
             KeyCode::Right if !self.is_streaming => self.input_buffer.move_right(),
             KeyCode::Home if !self.is_streaming => self.input_buffer.move_home(),
             KeyCode::End if !self.is_streaming => self.input_buffer.move_end(),
+            KeyCode::Up if !self.is_streaming && self.move_suggestion_selection_up() => {}
+            KeyCode::Down if !self.is_streaming && self.move_suggestion_selection_down() => {}
             KeyCode::Up if !self.is_streaming && self.input_buffer.line_count() > 1 => {
                 self.input_buffer.move_up();
             }
@@ -1041,12 +1314,19 @@ impl App {
                     let _ = user_tx.send(UserCommand::CancelStream).await;
                     self.cancel_stream_local();
                 } else {
+                    self.slash_suggestions = None;
                     self.input_buffer.clear();
                     self.reset_input_navigation();
                 }
             }
             KeyCode::Tab | KeyCode::BackTab => {
-                if self.is_streaming && self.is_thinking {
+                if !self.is_streaming && key.code == KeyCode::Tab && self.apply_selected_suggestion()
+                {
+                } else if !self.is_streaming
+                    && key.code == KeyCode::BackTab
+                    && self.move_suggestion_selection_up()
+                {
+                } else if self.is_streaming && self.is_thinking {
                     // Toggle thinking fold/unfold during streaming
                     self.thinking_folded = !self.thinking_folded;
                 } else if !self.is_streaming {
@@ -1054,7 +1334,8 @@ impl App {
                 }
             }
             KeyCode::Char('\t') => {
-                if self.is_streaming && self.is_thinking {
+                if !self.is_streaming && self.apply_selected_suggestion() {
+                } else if self.is_streaming && self.is_thinking {
                     self.thinking_folded = !self.thinking_folded;
                 } else if !self.is_streaming {
                     self.toggle_selected_thinking();
@@ -1129,7 +1410,42 @@ impl App {
         ((self.terminal_height as usize * 60 / 100).saturating_sub(6)).max(3)
     }
 
+    fn slash_suggestion_overlay_area(&self) -> Option<Rect> {
+        let suggestions = self.slash_suggestions.as_ref()?;
+        if suggestions.items.is_empty() {
+            return None;
+        }
+
+        let input_height = self.input_buffer.line_count().max(1) as u16 + 2;
+        let input_area = Rect::new(
+            0,
+            self.terminal_height.saturating_sub(1 + input_height),
+            self.terminal_width,
+            input_height,
+        );
+        crate::ui::slash_suggestion_overlay_geometry(self, input_area).map(|(area, _)| area)
+    }
+
     fn handle_mouse_event(&mut self, mouse: MouseEvent) {
+        if let Some(overlay_area) = self.slash_suggestion_overlay_area() {
+            let in_overlay = mouse.column >= overlay_area.x
+                && mouse.column < overlay_area.x + overlay_area.width
+                && mouse.row >= overlay_area.y
+                && mouse.row < overlay_area.y + overlay_area.height;
+            if in_overlay {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.scroll_suggestions_up_page();
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.scroll_suggestions_down_page();
+                    }
+                    _ => {}
+                }
+                return;
+            }
+        }
+
         let chat_area = ui::chat_viewport_area(
             self,
             Rect::new(0, 0, self.terminal_width, self.terminal_height),
@@ -3363,6 +3679,343 @@ mod tests {
         assert!(help.contains("/permissions"));
         assert!(help.contains("/init"));
         assert!(help.contains("/status"));
+    }
+
+    #[tokio::test]
+    async fn test_slash_prefix_shows_suggestions() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, mut rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::Char('/')), &tx).await;
+
+        assert!(app.slash_suggestions.is_some());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_slash_prefix_filters_suggestions() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, _rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::Char('/')), &tx).await;
+        app.handle_key_event(key(KeyCode::Char('h')), &tx).await;
+        app.handle_key_event(key(KeyCode::Char('e')), &tx).await;
+
+        let suggestions = app.slash_suggestions.as_ref().unwrap();
+        assert!(suggestions.items.iter().any(|item| item.label == "/help"));
+        assert!(suggestions.items.iter().all(|item| item.matches_query("he")));
+    }
+
+    #[tokio::test]
+    async fn test_enter_executes_current_slash_input_without_applying_suggestion() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, mut rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::Char('/')), &tx).await;
+        app.handle_key_event(key(KeyCode::Char('h')), &tx).await;
+        app.handle_key_event(key(KeyCode::Char('e')), &tx).await;
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        assert!(rx.try_recv().is_err());
+        let last = app.messages.last();
+        assert!(matches!(last, Some(ChatMessage::System(text)) if text.contains("Unknown command: /he")));
+    }
+
+    #[tokio::test]
+    async fn test_down_navigates_suggestions_instead_of_history() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        app.history = vec!["older history".into()];
+        let (tx, _rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::Char('/')), &tx).await;
+        let initial = app.slash_suggestions.as_ref().unwrap().selected;
+
+        app.handle_key_event(key(KeyCode::Down), &tx).await;
+
+        assert_eq!(app.input_text(), "/");
+        assert!(app.history_index.is_none());
+        assert_eq!(app.slash_suggestions.as_ref().unwrap().selected, initial + 1);
+    }
+
+    #[tokio::test]
+    async fn test_escape_clears_slash_input_even_when_suggestions_visible() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, _rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::Char('/')), &tx).await;
+        app.handle_key_event(key(KeyCode::Char('h')), &tx).await;
+        app.handle_key_event(key(KeyCode::Esc), &tx).await;
+
+        assert!(app.input_text().is_empty());
+        assert!(app.slash_suggestions.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_tab_applies_selected_suggestion_without_submit() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, mut rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::Char('/')), &tx).await;
+        app.handle_key_event(key(KeyCode::Char('h')), &tx).await;
+        app.handle_key_event(key(KeyCode::Char('e')), &tx).await;
+        app.handle_key_event(key(KeyCode::Tab), &tx).await;
+
+        assert_eq!(app.input_text(), "/help");
+        assert!(app.slash_suggestions.is_none());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_shift_tab_moves_suggestion_selection_backward() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, _rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::Char('/')), &tx).await;
+        app.handle_key_event(key(KeyCode::Down), &tx).await;
+        let after_down = app.slash_suggestions.as_ref().unwrap().selected;
+
+        app.handle_key_event(key_shift(KeyCode::BackTab), &tx).await;
+
+        assert_eq!(after_down, 1);
+        assert_eq!(app.slash_suggestions.as_ref().unwrap().selected, 0);
+    }
+
+    #[tokio::test]
+    async fn test_selection_auto_scrolls_when_moving_beyond_visible_window() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, _rx) = mpsc::channel(1);
+        app.terminal_height = 10;
+
+        app.handle_key_event(key(KeyCode::Char('/')), &tx).await;
+        for _ in 0..8 {
+            app.handle_key_event(key(KeyCode::Down), &tx).await;
+        }
+
+        let suggestions = app.slash_suggestions.as_ref().unwrap();
+        assert!(suggestions.selected >= suggestions.scroll);
+        assert!(suggestions.scroll > 0);
+    }
+
+    #[tokio::test]
+    async fn test_selection_scrolls_immediately_after_first_hidden_row() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, _rx) = mpsc::channel(1);
+        app.terminal_height = 10;
+
+        app.handle_key_event(key(KeyCode::Char('/')), &tx).await;
+        for _ in 0..4 {
+            app.handle_key_event(key(KeyCode::Down), &tx).await;
+        }
+
+        let suggestions = app.slash_suggestions.as_ref().unwrap();
+        assert_eq!(suggestions.selected, 4);
+        assert!(suggestions.scroll > 0);
+    }
+
+    #[test]
+    fn test_overlay_area_matches_available_terminal_space() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        app.terminal_width = 80;
+        app.terminal_height = 10;
+        app.input_buffer = InputBuffer::from_text("/");
+        app.refresh_slash_suggestions();
+
+        let area = app.slash_suggestion_overlay_area().unwrap();
+        assert_eq!(area.height, 5);
+    }
+
+    #[test]
+    fn test_render_row_count_includes_group_headers_and_blank_separator() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        app.input_buffer = InputBuffer::from_text("/");
+        app.refresh_slash_suggestions();
+
+        assert_eq!(app.slash_suggestion_render_row_count(), 29);
+    }
+
+    #[tokio::test]
+    async fn test_page_down_scrolls_suggestions_without_changing_selection() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, _rx) = mpsc::channel(1);
+        app.terminal_height = 10;
+
+        app.handle_key_event(key(KeyCode::Char('/')), &tx).await;
+        let selected = app.slash_suggestions.as_ref().unwrap().selected;
+
+        app.handle_key_event(key(KeyCode::PageDown), &tx).await;
+
+        let suggestions = app.slash_suggestions.as_ref().unwrap();
+        assert_eq!(suggestions.selected, selected);
+        assert!(suggestions.scroll > 0);
+    }
+
+    #[test]
+    fn test_mouse_scroll_inside_suggestions_scrolls_overlay() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        app.terminal_width = 80;
+        app.terminal_height = 10;
+        app.input_buffer = InputBuffer::from_text("/");
+        app.refresh_slash_suggestions();
+
+        let overlay_column = 2;
+        let overlay_row = 4;
+        app.handle_mouse_event(mouse_at(MouseEventKind::ScrollDown, overlay_column, overlay_row));
+
+        assert!(app.slash_suggestions.as_ref().unwrap().scroll > 0);
+    }
+
+    #[test]
+    fn test_mouse_scroll_inside_suggestions_does_not_scroll_chat() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        app.terminal_width = 80;
+        app.terminal_height = 10;
+        app.messages = (0..50).map(|i| ChatMessage::Assistant(format!("msg {i}"))).collect();
+        app.follow_output = false;
+        app.scroll_offset = 5;
+        app.input_buffer = InputBuffer::from_text("/");
+        app.refresh_slash_suggestions();
+
+        let overlay_column = 2;
+        let overlay_row = 4;
+        app.handle_mouse_event(mouse_at(MouseEventKind::ScrollDown, overlay_column, overlay_row));
+
+        assert_eq!(app.scroll_offset, 5);
+    }
+
+    #[tokio::test]
+    async fn test_backspace_and_paste_refresh_suggestions() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, _rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::Char('/')), &tx).await;
+        app.handle_key_event(key(KeyCode::Char('x')), &tx).await;
+        let filtered_count = app.slash_suggestions.as_ref().unwrap().items.len();
+
+        app.handle_key_event(key(KeyCode::Backspace), &tx).await;
+        let reset_count = app.slash_suggestions.as_ref().unwrap().items.len();
+        app.input_buffer.clear();
+        app.slash_suggestions = None;
+
+        app.handle_paste("/he".into());
+
+        assert!(reset_count >= filtered_count);
+        assert!(app.slash_suggestions.is_some());
+        assert!(app
+            .slash_suggestions
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.label == "/help"));
+    }
+
+    #[tokio::test]
+    async fn test_enter_executes_exact_slash_command_without_extra_autocomplete_step() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, _rx) = mpsc::channel(1);
+
+        app.input_buffer = InputBuffer::from_text("/help");
+        app.refresh_slash_suggestions();
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        let last = app.messages.last();
+        assert!(matches!(last, Some(ChatMessage::System(text)) if text.contains("Available commands:")));
     }
 
     #[test]

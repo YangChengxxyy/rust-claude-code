@@ -381,8 +381,6 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let cwd = std::env::current_dir()?;
 
-    println!("rust-claude-code: Rust implementation of Claude Code");
-
     let user_settings = match &cli.settings {
         Some(path) => ClaudeSettings::load_from(std::path::Path::new(path))?,
         None => ClaudeSettings::load().unwrap_or_default(),

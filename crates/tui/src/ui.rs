@@ -11,7 +11,7 @@ use ratatui::{
 use rust_claude_core::state::TodoStatus;
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, CursorPosition};
+use crate::app::{App, CursorPosition, SuggestionKind};
 use crate::events::ChatMessage;
 use crate::theme::{self, Palette};
 
@@ -217,6 +217,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_chat_area(f, app, chat_area);
     draw_spinner_line(f, app, areas[1]);
     draw_input_area(f, app, areas[2]);
+    draw_slash_suggestions(f, app, areas[2]);
     draw_status_bar(f, app, areas[3]);
 
     if let Some(todo_area) = todo_area {
@@ -234,6 +235,31 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.session_picker.is_some() {
         draw_session_picker(f, app, full);
     }
+}
+
+pub fn slash_suggestion_overlay_geometry(app: &App, input_area: Rect) -> Option<(Rect, usize)> {
+    let suggestions = app.slash_suggestions.as_ref()?;
+    if suggestions.items.is_empty() {
+        return None;
+    }
+
+    let width = input_area.width.min(90).max(24);
+    let available_height = input_area.y.saturating_sub(1);
+    if available_height < 3 {
+        return None;
+    }
+
+    let (_, item_rows) = build_slash_suggestion_render_rows(app, width as usize);
+    let total_rows = if item_rows.is_empty() {
+        1usize
+    } else {
+        let (all_rows, _) = build_slash_suggestion_render_rows(app, width as usize);
+        all_rows.len()
+    };
+    let visible_rows = available_height.saturating_sub(2).max(1) as usize;
+    let height = (total_rows.min(visible_rows) as u16).saturating_add(2);
+    let y = input_area.y.saturating_sub(height);
+    Some((Rect::new(input_area.x, y, width.min(input_area.width), height), visible_rows))
 }
 
 fn input_area_height(app: &App) -> u16 {
@@ -432,10 +458,16 @@ fn render_message(
             }
         }
         ChatMessage::System(text) => {
-            lines.push(Line::from(vec![
-                Span::styled("  ", Style::default()),
-                Span::styled(text.clone(), palette.warning_style()),
-            ]));
+            for system_line in text.split('\n') {
+                if system_line.is_empty() {
+                    lines.push(Line::from(""));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ", Style::default()),
+                        Span::styled(system_line.to_string(), palette.warning_style()),
+                    ]));
+                }
+            }
         }
     }
 }
@@ -825,6 +857,103 @@ fn draw_input_area(f: &mut Frame, app: &App, area: Rect) {
             cursor_y.min(area.bottom().saturating_sub(1)),
         );
     }
+}
+
+pub fn build_slash_suggestion_render_rows(
+    app: &App,
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<usize>) {
+    let Some(suggestions) = app.slash_suggestions.as_ref() else {
+        return (Vec::new(), Vec::new());
+    };
+    if suggestions.items.is_empty() {
+        return (
+            vec![Line::from(Span::styled(
+                "  No matching commands or skills",
+                Style::default().fg(app.palette().inactive),
+            ))],
+            Vec::new(),
+        );
+    }
+
+    let palette = app.palette();
+    let name_width = suggestions
+        .items
+        .iter()
+        .map(|item| display_width(&item.label))
+        .max()
+        .unwrap_or(0)
+        .min(width.saturating_sub(10))
+        .max(8);
+
+    let mut lines = Vec::new();
+    let mut item_rows = Vec::new();
+    let mut current_group = None;
+    for (idx, item) in suggestions.items.iter().enumerate() {
+        let group = match item.kind {
+            SuggestionKind::Command => "Commands",
+            SuggestionKind::Skill => "Skills",
+        };
+        if current_group != Some(group) {
+            current_group = Some(group);
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(vec![Span::styled(
+                format!("  {group}"),
+                Style::default()
+                    .fg(palette.claude)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+        }
+
+        item_rows.push(lines.len());
+        let selected = idx == suggestions.selected;
+        let prefix = if selected { "> " } else { "  " };
+        let row_style = if selected {
+            Style::default()
+                .fg(palette.claude)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.text)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(prefix.to_string(), row_style),
+            Span::styled(format!("{:<width$}", item.label, width = name_width), row_style),
+            Span::raw("  "),
+            Span::styled(item.description.clone(), row_style),
+        ]));
+    }
+
+    (lines, item_rows)
+}
+
+fn build_slash_suggestion_lines(app: &App, visible_rows: usize) -> Vec<Line<'static>> {
+    let (lines, _) = build_slash_suggestion_render_rows(app, visible_rows.max(1));
+    let Some(suggestions) = app.slash_suggestions.as_ref() else {
+        return lines;
+    };
+    let start = suggestions.scroll.min(lines.len());
+    let end = lines.len().min(start + visible_rows.max(1));
+    lines[start..end].to_vec()
+}
+
+fn draw_slash_suggestions(f: &mut Frame, app: &App, input_area: Rect) {
+    let Some((area, visible_rows)) = slash_suggestion_overlay_geometry(app, input_area) else {
+        return;
+    };
+    let lines = build_slash_suggestion_lines(app, visible_rows.max(1));
+
+    f.render_widget(Clear, area);
+    let block = Block::default()
+        .title(" Suggestions ")
+        .borders(Borders::ALL)
+        .border_set(border::ROUNDED)
+        .border_style(Style::default().fg(app.palette().suggestion));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    f.render_widget(paragraph, inner);
 }
 
 fn build_input_text(app: &App, input_style: Style) -> Text<'static> {
@@ -1670,6 +1799,187 @@ mod tests {
             .filter(|content| *content == "• ")
             .collect();
         assert_eq!(prefixes.len(), 1);
+    }
+
+    #[test]
+    fn test_build_slash_suggestion_lines_groups_commands_and_skills() {
+        let mut app = App::new(
+            "test".into(),
+            "test".into(),
+            "default".into(),
+            None,
+            rust_claude_core::config::Theme::Dark,
+        );
+        app.slash_suggestions = Some(crate::app::SlashSuggestions {
+            query: String::new(),
+            selected: 0,
+            scroll: 0,
+            items: vec![
+                crate::app::SuggestionItem::new(
+                    SuggestionKind::Command,
+                    "/help",
+                    "Show this help",
+                    "/help",
+                    "/help help show this help",
+                ),
+                crate::app::SuggestionItem::new(
+                    SuggestionKind::Skill,
+                    "brainstorming",
+                    "Explore requirements",
+                    "brainstorming",
+                    "brainstorming explore requirements",
+                ),
+            ],
+        });
+
+        let lines = build_slash_suggestion_lines(&app, 60);
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+
+        assert!(rendered.iter().any(|line| line.contains("Commands")));
+        assert!(rendered.iter().any(|line| line.contains("Skills")));
+        assert!(rendered.iter().any(|line| line.contains("/help")));
+        assert!(rendered.iter().any(|line| line.contains("brainstorming")));
+    }
+
+    #[test]
+    fn test_build_slash_suggestion_lines_respects_scroll_window() {
+        let mut app = App::new(
+            "test".into(),
+            "test".into(),
+            "default".into(),
+            None,
+            rust_claude_core::config::Theme::Dark,
+        );
+        app.slash_suggestions = Some(crate::app::SlashSuggestions {
+            query: String::new(),
+            selected: 3,
+            scroll: 2,
+            items: vec![
+                crate::app::SuggestionItem::new(
+                    SuggestionKind::Command,
+                    "/a",
+                    "a",
+                    "/a",
+                    "/a a",
+                ),
+                crate::app::SuggestionItem::new(
+                    SuggestionKind::Command,
+                    "/b",
+                    "b",
+                    "/b",
+                    "/b b",
+                ),
+                crate::app::SuggestionItem::new(
+                    SuggestionKind::Command,
+                    "/c",
+                    "c",
+                    "/c",
+                    "/c c",
+                ),
+                crate::app::SuggestionItem::new(
+                    SuggestionKind::Command,
+                    "/d",
+                    "d",
+                    "/d",
+                    "/d d",
+                ),
+            ],
+        });
+
+        let lines = build_slash_suggestion_lines(&app, 40);
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+
+        assert!(rendered.iter().any(|line| line.contains("/c")));
+        assert!(rendered.iter().any(|line| line.contains("/d")));
+    }
+
+    #[test]
+    fn test_render_rows_include_group_headers_before_item_rows() {
+        let mut app = App::new(
+            "test".into(),
+            "test".into(),
+            "default".into(),
+            None,
+            rust_claude_core::config::Theme::Dark,
+        );
+        app.slash_suggestions = Some(crate::app::SlashSuggestions {
+            query: String::new(),
+            selected: 0,
+            scroll: 0,
+            items: vec![
+                crate::app::SuggestionItem::new(
+                    SuggestionKind::Command,
+                    "/help",
+                    "Show this help",
+                    "/help",
+                    "/help help show this help",
+                ),
+                crate::app::SuggestionItem::new(
+                    SuggestionKind::Skill,
+                    "brainstorming",
+                    "Explore requirements",
+                    "brainstorming",
+                    "brainstorming explore requirements",
+                ),
+            ],
+        });
+
+        let (_rows, item_rows) = build_slash_suggestion_render_rows(&app, 60);
+        assert_eq!(item_rows, vec![1, 4]);
+    }
+
+    #[test]
+    fn test_system_message_preserves_newlines() {
+        let mut lines = Vec::new();
+        let app = App::new(
+            "test".into(),
+            "test".into(),
+            "default".into(),
+            None,
+            rust_claude_core::config::Theme::Dark,
+        );
+        render_message(
+            &ChatMessage::System("first line\nsecond line\n\nthird line".into()),
+            0,
+            &app,
+            &mut lines,
+        );
+
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "  first line".to_string(),
+                "  second line".to_string(),
+                "".to_string(),
+                "  third line".to_string(),
+            ]
+        );
     }
 
     #[test]

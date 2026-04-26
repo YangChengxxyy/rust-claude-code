@@ -41,6 +41,9 @@ pub enum UserCommand {
         path: String,
     },
     ShowMcp,
+    ShowPermissions,
+    InitProject,
+    ShowStatus,
 }
 
 /// Events consumed by the TUI application.

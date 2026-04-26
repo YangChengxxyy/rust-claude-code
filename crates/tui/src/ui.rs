@@ -1525,10 +1525,7 @@ mod tests {
             format_model_display_name("claude-opus-4-6"),
             "claude-opus-4-6"
         );
-        assert_eq!(
-            format_model_display_name("opus[1m]"),
-            "opus (1M ctx)"
-        );
+        assert_eq!(format_model_display_name("opus[1m]"), "opus (1M ctx)");
     }
 
     #[test]

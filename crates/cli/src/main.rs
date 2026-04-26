@@ -1731,6 +1731,136 @@ async fn run_tui(
                     let msg = format_mcp_status(&worker_mcp_manager);
                     worker_bridge.send_assistant_message(&msg).await;
                 }
+                UserCommand::ShowPermissions => {
+                    let state = worker_state.lock().await;
+                    let mode_str = format!("{:?}", state.permission_mode);
+                    let mut text = format!("Permission Mode: {}\n", mode_str);
+
+                    if state.always_deny_rules.is_empty() && state.always_allow_rules.is_empty() {
+                        text.push_str("\nNo custom rules configured.\n");
+                    } else {
+                        if !state.always_deny_rules.is_empty() {
+                            text.push_str("\nDeny rules:\n");
+                            for rule in &state.always_deny_rules {
+                                text.push_str(&format!("  - {}\n", rule.to_compact_string()));
+                            }
+                        }
+                        if !state.always_allow_rules.is_empty() {
+                            text.push_str("\nAllow rules:\n");
+                            for rule in &state.always_allow_rules {
+                                text.push_str(&format!("  - {}\n", rule.to_compact_string()));
+                            }
+                        }
+                    }
+
+                    text.push_str("\nEdit ~/.config/rust-claude-code/permissions.json or .claude/settings.json to manage rules.");
+                    drop(state);
+                    worker_bridge.send_assistant_message(&text).await;
+                }
+                UserCommand::InitProject => {
+                    let cwd = { worker_state.lock().await.cwd.clone() };
+                    let msg = tokio::task::spawn_blocking(move || {
+                        let root = rust_claude_core::claude_md::find_git_root(&cwd)
+                            .unwrap_or_else(|| cwd.clone());
+                        let claude_dir = root.join(".claude");
+                        let claude_md_path = root.join("CLAUDE.md");
+
+                        let mut result = String::new();
+
+                        if !claude_dir.exists() {
+                            match std::fs::create_dir_all(&claude_dir) {
+                                Ok(()) => {
+                                    result.push_str(&format!(
+                                        "Created {}\n",
+                                        claude_dir.display()
+                                    ));
+                                }
+                                Err(e) => {
+                                    return format!(
+                                        "Failed to create {}: {}",
+                                        claude_dir.display(),
+                                        e
+                                    );
+                                }
+                            }
+                        } else {
+                            result.push_str(&format!(
+                                "{} already exists\n",
+                                claude_dir.display()
+                            ));
+                        }
+
+                        if !claude_md_path.exists() {
+                            let starter_content = "# Project Instructions\n\n<!-- Add your project-specific instructions for Claude here. -->\n<!-- These will be included in every conversation. -->\n";
+                            match std::fs::write(&claude_md_path, starter_content) {
+                                Ok(()) => {
+                                    result.push_str(&format!(
+                                        "Created {} with starter content\n",
+                                        claude_md_path.display()
+                                    ));
+                                }
+                                Err(e) => {
+                                    result.push_str(&format!(
+                                        "Failed to create {}: {}\n",
+                                        claude_md_path.display(),
+                                        e
+                                    ));
+                                }
+                            }
+                        } else {
+                            result.push_str(&format!(
+                                "{} already exists (not overwritten)\n",
+                                claude_md_path.display()
+                            ));
+                        }
+
+                        result.push_str(
+                            "\nTip: Add .claude/settings.local.json and CLAUDE.local.md to .gitignore for personal settings.",
+                        );
+                        result
+                    })
+                    .await
+                    .unwrap_or_else(|e| format!("init task failed: {e}"));
+                    worker_bridge.send_assistant_message(&msg).await;
+                }
+                UserCommand::ShowStatus => {
+                    let (mode_str, model, deny_count, allow_count, cwd) = {
+                        let state = worker_state.lock().await;
+                        (
+                            format!("{:?}", state.permission_mode),
+                            state.session.model_setting.clone(),
+                            state.always_deny_rules.len(),
+                            state.always_allow_rules.len(),
+                            state.cwd.clone(),
+                        )
+                    };
+                    let rule_count = deny_count + allow_count;
+
+                    let hook_count = match &worker_hook_runner {
+                        Some(runner) => runner.config().values().map(|v| v.len()).sum::<usize>(),
+                        None => 0,
+                    };
+
+                    let mcp_count = worker_mcp_manager.server_statuses().len();
+
+                    let memory_count = tokio::task::spawn_blocking(move || {
+                        let git_root = rust_claude_core::claude_md::find_git_root(&cwd);
+                        let root = git_root.as_deref().unwrap_or(&cwd);
+                        match rust_claude_core::memory::discover_memory_store(root) {
+                            Some(store) => rust_claude_core::memory::scan_memory_store(&store)
+                                .map_or(0, |s| s.entries.len()),
+                            None => 0,
+                        }
+                    })
+                    .await
+                    .unwrap_or(0);
+
+                    let msg = format!(
+                        "Status:\n  Model: {}\n  Permission mode: {}\n  Permission rules: {} ({} allow, {} deny)\n  MCP servers: {}\n  Hooks: {}\n  Memory entries: {}",
+                        model, mode_str, rule_count, allow_count, deny_count, mcp_count, hook_count, memory_count
+                    );
+                    worker_bridge.send_assistant_message(&msg).await;
+                }
                 UserCommand::Prompt(prompt) => {
                     // Abort any still-running query to prevent two loops
                     // racing on the same AppState.

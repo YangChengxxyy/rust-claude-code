@@ -1,12 +1,15 @@
 use std::path::{Path, PathBuf};
 
+use glob_match::glob_match;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionRequest<'a> {
     pub tool_name: &'a str,
     pub command: Option<&'a str>,
     pub is_read_only: bool,
+    /// Resolved absolute file path extracted from tool input (for path-based rule matching).
+    pub file_path: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -25,12 +28,16 @@ pub struct PermissionRule {
     pub tool_name: String,
     #[serde(default)]
     pub pattern: Option<String>,
+    /// Optional path-glob pattern for file-oriented tools.
+    #[serde(default)]
+    pub path_pattern: Option<String>,
     pub rule_type: RuleType,
 }
 
 impl PermissionRule {
-    /// Parse a permission rule string like "Bash", "Bash(git *)", or "FileRead".
-    /// The `rule_type` is determined by the caller context (allow vs deny).
+    /// Parse a permission rule string like "Bash", "Bash(git *)", "FileEdit(, /src/**/*.rs)", or
+    /// "Bash(git *, /repo/**)".
+    /// The `rule_type` is determined by the caller context (allow vs deny vs ask).
     pub fn parse(s: &str, rule_type: RuleType) -> Result<PermissionRule, PermissionError> {
         let s = s.trim();
         if s.is_empty() {
@@ -49,28 +56,73 @@ impl PermissionRule {
                     "missing closing ')' in rule".to_string(),
                 ));
             }
-            let pattern = s[paren_start + 1..s.len() - 1].to_string();
-            Ok(PermissionRule {
-                tool_name,
-                pattern: Some(pattern),
-                rule_type,
-            })
+            let inner = &s[paren_start + 1..s.len() - 1];
+
+            // Check for two-part syntax: "cmd_pattern, path_pattern"
+            // The path_pattern always starts with /, ./, ~/, or //
+            if let Some(comma_pos) = find_path_comma(inner) {
+                let cmd_part = inner[..comma_pos].trim();
+                let path_part = inner[comma_pos + 1..].trim();
+                let pattern = if cmd_part.is_empty() {
+                    None
+                } else {
+                    Some(cmd_part.to_string())
+                };
+                let path_pattern = if path_part.is_empty() {
+                    None
+                } else {
+                    Some(path_part.to_string())
+                };
+                Ok(PermissionRule {
+                    tool_name,
+                    pattern,
+                    path_pattern,
+                    rule_type,
+                })
+            } else {
+                Ok(PermissionRule {
+                    tool_name,
+                    pattern: Some(inner.to_string()),
+                    path_pattern: None,
+                    rule_type,
+                })
+            }
         } else {
             Ok(PermissionRule {
                 tool_name: s.to_string(),
                 pattern: None,
+                path_pattern: None,
                 rule_type,
             })
         }
     }
 
-    /// Format a rule as a compact string like "Bash" or "Bash(git *)".
+    /// Format a rule as a compact string like "Bash", "Bash(git *)", "FileEdit(, /src/**)", or
+    /// "Bash(git *, /repo/**)".
     pub fn to_compact_string(&self) -> String {
-        match &self.pattern {
-            Some(pattern) => format!("{}({})", self.tool_name, pattern),
-            None => self.tool_name.clone(),
+        match (&self.pattern, &self.path_pattern) {
+            (None, None) => self.tool_name.clone(),
+            (Some(pattern), None) => format!("{}({})", self.tool_name, pattern),
+            (None, Some(path)) => format!("{}(, {})", self.tool_name, path),
+            (Some(pattern), Some(path)) => {
+                format!("{}({}, {})", self.tool_name, pattern, path)
+            }
         }
     }
+}
+
+/// Find the comma that separates command pattern from path pattern in the inner
+/// parentheses of a rule string. The path pattern part starts with /, ./, ~/ or //.
+/// Returns the byte offset of the comma, or None if no such split exists.
+fn find_path_comma(inner: &str) -> Option<usize> {
+    // Look for ", /" or ", ./" or ", ~/" or ", //" pattern
+    for (i, _) in inner.match_indices(',') {
+        let after = inner[i + 1..].trim_start();
+        if after.starts_with('/') || after.starts_with("./") || after.starts_with("~/") {
+            return Some(i);
+        }
+    }
+    None
 }
 
 /// Errors from the permission subsystem.
@@ -84,13 +136,18 @@ pub enum PermissionError {
     Json(#[from] serde_json::Error),
 }
 
-/// Manages permission state: the current mode plus allow/deny rule lists.
+/// Manages permission state: the current mode plus allow/deny/ask rule lists.
 /// Provides check, persistence (load/save), and rule manipulation.
 #[derive(Debug, Clone)]
 pub struct PermissionManager {
     pub mode: PermissionMode,
     pub always_allow: Vec<PermissionRule>,
     pub always_deny: Vec<PermissionRule>,
+    pub always_ask: Vec<PermissionRule>,
+    /// Project root for resolving `/`-prefixed path patterns.
+    pub project_root: Option<PathBuf>,
+    /// Session CWD for resolving `./`-prefixed path patterns.
+    pub session_cwd: Option<PathBuf>,
 }
 
 /// JSON representation for persistence.
@@ -99,6 +156,8 @@ struct PermissionManagerFile {
     mode: String,
     allow: Vec<String>,
     deny: Vec<String>,
+    #[serde(default)]
+    ask: Vec<String>,
 }
 
 impl PermissionManager {
@@ -107,12 +166,137 @@ impl PermissionManager {
             mode,
             always_allow: Vec::new(),
             always_deny: Vec::new(),
+            always_ask: Vec::new(),
+            project_root: None,
+            session_cwd: None,
         }
     }
 
     pub fn check_permission(&self, request: PermissionRequest<'_>) -> PermissionCheck {
-        self.mode
-            .check(request, &self.always_deny, &self.always_allow)
+        // Three-level evaluation: Deny > Ask > Allow > mode default
+        // BypassPermissions overrides everything to Allowed (except explicit deny).
+        // Plan mode overrides Ask/Allow to Denied for non-read-only tools.
+
+        // 1. Check deny rules first
+        if let Some(check) = self.match_rule_with_path(&request, &self.always_deny) {
+            return check;
+        }
+
+        // 2. Check ask rules
+        if let Some(check) = self.match_rule_with_path(&request, &self.always_ask) {
+            // BypassPermissions overrides Ask to Allowed
+            if matches!(self.mode, PermissionMode::BypassPermissions) {
+                return PermissionCheck::Allowed;
+            }
+            // Plan mode overrides Ask to Denied for non-read-only
+            if matches!(self.mode, PermissionMode::Plan) && !request.is_read_only {
+                return PermissionCheck::Denied {
+                    reason: "Plan mode does not allow write operations".to_string(),
+                };
+            }
+            return check;
+        }
+
+        // 3. Check allow rules
+        if let Some(check) = self.match_rule_with_path(&request, &self.always_allow) {
+            if matches!(check, PermissionCheck::Allowed)
+                && matches!(self.mode, PermissionMode::Plan)
+                && !request.is_read_only
+            {
+                return PermissionCheck::Denied {
+                    reason: "Plan mode does not allow write operations".to_string(),
+                };
+            }
+            return check;
+        }
+
+        // 4. Fall back to mode default
+        self.mode.check_tool_with_command(
+            request.tool_name,
+            request.command,
+            request.is_read_only,
+            &[],
+        )
+    }
+
+    /// Match a request against a set of rules, considering both command and path patterns.
+    fn match_rule_with_path(
+        &self,
+        request: &PermissionRequest<'_>,
+        rules: &[PermissionRule],
+    ) -> Option<PermissionCheck> {
+        for rule in rules {
+            if rule.tool_name != request.tool_name && rule.tool_name != "*" {
+                continue;
+            }
+
+            // Check command pattern
+            let command_matches = match (&rule.pattern, request.command) {
+                (None, _) => true,
+                (Some(pattern), Some(command)) => pattern_matches(command, pattern),
+                (Some(_), None) => false,
+            };
+
+            if !command_matches {
+                continue;
+            }
+
+            // Check path pattern
+            let path_matches = match (&rule.path_pattern, request.file_path) {
+                (None, _) => true, // No path pattern means match all
+                (Some(pattern), Some(file_path)) => self.path_pattern_matches(file_path, pattern),
+                (Some(_), None) => false, // Rule requires path but none available
+            };
+
+            if path_matches {
+                return Some(rule.rule_type.to_permission_check());
+            }
+        }
+        None
+    }
+
+    /// Resolve a path pattern prefix and match against an absolute file path.
+    fn path_pattern_matches(&self, file_path: &str, pattern: &str) -> bool {
+        let resolved_pattern = self.resolve_path_pattern(pattern);
+        glob_match(&resolved_pattern, file_path)
+    }
+
+    /// Resolve path pattern prefix:
+    /// - `//path` → absolute path (strip one `/`)
+    /// - `~/path` → relative to home dir
+    /// - `./path` → relative to session CWD
+    /// - `/path` → relative to project root (git root)
+    /// - no prefix → treated as project-root-relative
+    pub fn resolve_path_pattern(&self, pattern: &str) -> String {
+        if let Some(rest) = pattern.strip_prefix("//") {
+            // Absolute path — `//` prefix means literal absolute; rest is the path
+            rest.to_string()
+        } else if let Some(rest) = pattern.strip_prefix("~/") {
+            // Home-relative
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+            format!("{}/{}", home, rest)
+        } else if let Some(rest) = pattern.strip_prefix("./") {
+            // CWD-relative
+            if let Some(cwd) = &self.session_cwd {
+                format!("{}/{}", cwd.display(), rest)
+            } else {
+                pattern.to_string()
+            }
+        } else if let Some(rest) = pattern.strip_prefix('/') {
+            // Project-root-relative
+            if let Some(root) = &self.project_root {
+                format!("{}/{}", root.display(), rest)
+            } else {
+                pattern.to_string()
+            }
+        } else {
+            // No recognized prefix — treat as project-root-relative
+            if let Some(root) = &self.project_root {
+                format!("{}/{}", root.display(), pattern)
+            } else {
+                pattern.to_string()
+            }
+        }
     }
 
     pub fn add_allow_rule(&mut self, rule: PermissionRule) {
@@ -121,6 +305,10 @@ impl PermissionManager {
 
     pub fn add_deny_rule(&mut self, rule: PermissionRule) {
         self.always_deny.push(rule);
+    }
+
+    pub fn add_ask_rule(&mut self, rule: PermissionRule) {
+        self.always_ask.push(rule);
     }
 
     /// Load a `PermissionManager` from a JSON file.
@@ -139,11 +327,19 @@ impl PermissionManager {
             .iter()
             .map(|s| PermissionRule::parse(s, RuleType::Deny))
             .collect::<Result<Vec<_>, _>>()?;
+        let always_ask = file
+            .ask
+            .iter()
+            .map(|s| PermissionRule::parse(s, RuleType::Ask))
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(PermissionManager {
             mode,
             always_allow,
             always_deny,
+            always_ask,
+            project_root: None,
+            session_cwd: None,
         })
     }
 
@@ -165,6 +361,11 @@ impl PermissionManager {
                 .iter()
                 .map(|r| r.to_compact_string())
                 .collect(),
+            ask: self
+                .always_ask
+                .iter()
+                .map(|r| r.to_compact_string())
+                .collect(),
         };
 
         let content = serde_json::to_string_pretty(&file)?;
@@ -179,6 +380,18 @@ impl PermissionManager {
             .join(".config")
             .join("rust-claude-code")
             .join("permissions.json")
+    }
+}
+
+/// Extract the target file path from a tool input JSON value.
+/// Works for `FileEdit`, `FileWrite`, and `FileRead` tools.
+pub fn extract_file_path(tool_name: &str, input: &serde_json::Value) -> Option<String> {
+    match tool_name {
+        "FileEdit" | "FileWrite" | "FileRead" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        _ => None,
     }
 }
 
@@ -210,6 +423,7 @@ fn mode_from_str(s: &str) -> Result<PermissionMode, PermissionError> {
 pub enum RuleType {
     Allow,
     Deny,
+    Ask,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,11 +440,11 @@ impl PermissionMode {
         always_deny: &[PermissionRule],
         always_allow: &[PermissionRule],
     ) -> PermissionCheck {
-        if let Some(check) = match_rule(request, always_deny) {
+        if let Some(check) = match_rule(&request, always_deny) {
             return check;
         }
 
-        if let Some(check) = match_rule(request, always_allow) {
+        if let Some(check) = match_rule(&request, always_allow) {
             if matches!(check, PermissionCheck::Allowed)
                 && matches!(self, PermissionMode::Plan)
                 && !request.is_read_only
@@ -339,23 +553,36 @@ impl RuleType {
             RuleType::Deny => PermissionCheck::Denied {
                 reason: "Denied by rule".to_string(),
             },
+            RuleType::Ask => PermissionCheck::NeedsConfirmation {
+                prompt: "Confirmation required by rule".to_string(),
+            },
         }
     }
 }
 
-fn match_rule(request: PermissionRequest<'_>, rules: &[PermissionRule]) -> Option<PermissionCheck> {
+fn match_rule(
+    request: &PermissionRequest<'_>,
+    rules: &[PermissionRule],
+) -> Option<PermissionCheck> {
     for rule in rules {
         if rule.tool_name != request.tool_name && rule.tool_name != "*" {
             continue;
         }
 
-        let pattern_matches = match (&rule.pattern, request.command) {
+        let cmd_matches = match (&rule.pattern, request.command) {
             (None, _) => true,
             (Some(pattern), Some(command)) => pattern_matches(command, pattern),
             (Some(_), None) => false,
         };
 
-        if pattern_matches {
+        // Legacy match_rule does not evaluate path patterns (used by the old
+        // PermissionMode::check which has no path context).  Rules with path
+        // patterns are skipped here so they don't accidentally match everything.
+        if rule.path_pattern.is_some() {
+            continue;
+        }
+
+        if cmd_matches {
             return Some(rule.rule_type.to_permission_check());
         }
     }
@@ -441,6 +668,7 @@ mod tests {
         let rules = vec![PermissionRule {
             tool_name: "Bash".to_string(),
             pattern: None,
+            path_pattern: None,
             rule_type: RuleType::Allow,
         }];
 
@@ -453,6 +681,7 @@ mod tests {
         let rules = vec![PermissionRule {
             tool_name: "Bash".to_string(),
             pattern: None,
+            path_pattern: None,
             rule_type: RuleType::Deny,
         }];
 
@@ -465,6 +694,7 @@ mod tests {
         let rules = vec![PermissionRule {
             tool_name: "Bash".to_string(),
             pattern: Some("git *".to_string()),
+            path_pattern: None,
             rule_type: RuleType::Allow,
         }];
 
@@ -482,6 +712,7 @@ mod tests {
         let rules = vec![PermissionRule {
             tool_name: "Bash".to_string(),
             pattern: Some("git *".to_string()),
+            path_pattern: None,
             rule_type: RuleType::Allow,
         }];
 
@@ -499,6 +730,7 @@ mod tests {
         let rules = vec![PermissionRule {
             tool_name: "*".to_string(),
             pattern: None,
+            path_pattern: None,
             rule_type: RuleType::Allow,
         }];
 
@@ -520,16 +752,19 @@ mod tests {
             tool_name: "Bash",
             command: Some("git status"),
             is_read_only: false,
+            file_path: None,
         };
 
         let allow_rules = vec![PermissionRule {
             tool_name: "Bash".to_string(),
             pattern: Some("git *".to_string()),
+            path_pattern: None,
             rule_type: RuleType::Allow,
         }];
         let deny_rules = vec![PermissionRule {
             tool_name: "Bash".to_string(),
             pattern: Some("git status".to_string()),
+            path_pattern: None,
             rule_type: RuleType::Deny,
         }];
 
@@ -543,11 +778,13 @@ mod tests {
             tool_name: "FileWrite",
             command: None,
             is_read_only: false,
+            file_path: None,
         };
 
         let allow_rules = vec![PermissionRule {
             tool_name: "FileWrite".to_string(),
             pattern: None,
+            path_pattern: None,
             rule_type: RuleType::Allow,
         }];
 
@@ -561,11 +798,13 @@ mod tests {
             tool_name: "FileRead",
             command: None,
             is_read_only: true,
+            file_path: None,
         };
 
         let allow_rules = vec![PermissionRule {
             tool_name: "FileRead".to_string(),
             pattern: None,
+            path_pattern: None,
             rule_type: RuleType::Allow,
         }];
 
@@ -579,11 +818,13 @@ mod tests {
             tool_name: "Bash",
             command: None,
             is_read_only: false,
+            file_path: None,
         };
 
         let allow_rules = vec![PermissionRule {
             tool_name: "Bash".to_string(),
             pattern: Some("git *".to_string()),
+            path_pattern: None,
             rule_type: RuleType::Allow,
         }];
 
@@ -597,11 +838,13 @@ mod tests {
             tool_name: "Bash",
             command: Some("git status"),
             is_read_only: false,
+            file_path: None,
         };
 
         let allow_rules = vec![PermissionRule {
             tool_name: "*".to_string(),
             pattern: Some("git *".to_string()),
+            path_pattern: None,
             rule_type: RuleType::Allow,
         }];
 
@@ -614,6 +857,7 @@ mod tests {
         let rule = PermissionRule {
             tool_name: "Bash".to_string(),
             pattern: Some("git *".to_string()),
+            path_pattern: None,
             rule_type: RuleType::Allow,
         };
         let json = serde_json::to_string(&rule).unwrap();
@@ -675,6 +919,7 @@ mod tests {
         let rule = PermissionRule {
             tool_name: "FileRead".to_string(),
             pattern: None,
+            path_pattern: None,
             rule_type: RuleType::Allow,
         };
         assert_eq!(rule.to_compact_string(), "FileRead");
@@ -685,6 +930,7 @@ mod tests {
         let rule = PermissionRule {
             tool_name: "Bash".to_string(),
             pattern: Some("git *".to_string()),
+            path_pattern: None,
             rule_type: RuleType::Allow,
         };
         assert_eq!(rule.to_compact_string(), "Bash(git *)");
@@ -722,6 +968,7 @@ mod tests {
         manager.add_allow_rule(PermissionRule {
             tool_name: "Bash".to_string(),
             pattern: Some("git *".to_string()),
+            path_pattern: None,
             rule_type: RuleType::Allow,
         });
 
@@ -729,6 +976,7 @@ mod tests {
             tool_name: "Bash",
             command: Some("git status"),
             is_read_only: false,
+            file_path: None,
         });
         assert_eq!(check, PermissionCheck::Allowed);
     }
@@ -739,6 +987,7 @@ mod tests {
         manager.add_deny_rule(PermissionRule {
             tool_name: "Bash".to_string(),
             pattern: None,
+            path_pattern: None,
             rule_type: RuleType::Deny,
         });
 
@@ -746,6 +995,7 @@ mod tests {
             tool_name: "Bash",
             command: Some("ls"),
             is_read_only: false,
+            file_path: None,
         });
         assert!(matches!(check, PermissionCheck::Denied { .. }));
     }
@@ -758,6 +1008,7 @@ mod tests {
             tool_name: "Bash",
             command: Some("ls"),
             is_read_only: false,
+            file_path: None,
         });
         assert!(matches!(check, PermissionCheck::NeedsConfirmation { .. }));
     }
@@ -770,6 +1021,7 @@ mod tests {
             tool_name: "Bash",
             command: Some("rm -rf /tmp/test"),
             is_read_only: false,
+            file_path: None,
         });
         assert_eq!(check, PermissionCheck::Allowed);
     }
@@ -782,6 +1034,7 @@ mod tests {
             tool_name: "FileWrite",
             command: None,
             is_read_only: false,
+            file_path: None,
         });
         assert!(matches!(check, PermissionCheck::Denied { .. }));
     }
@@ -794,6 +1047,7 @@ mod tests {
             tool_name: "FileRead",
             command: None,
             is_read_only: true,
+            file_path: None,
         });
         assert_eq!(check, PermissionCheck::Allowed);
     }
@@ -882,11 +1136,13 @@ mod tests {
         manager.add_allow_rule(PermissionRule {
             tool_name: "Bash".to_string(),
             pattern: Some("git *".to_string()),
+            path_pattern: None,
             rule_type: RuleType::Allow,
         });
         manager.add_deny_rule(PermissionRule {
             tool_name: "Bash".to_string(),
             pattern: Some("git status".to_string()),
+            path_pattern: None,
             rule_type: RuleType::Deny,
         });
 
@@ -894,6 +1150,7 @@ mod tests {
             tool_name: "Bash",
             command: Some("git status"),
             is_read_only: false,
+            file_path: None,
         });
         assert!(matches!(check, PermissionCheck::Denied { .. }));
     }
@@ -907,8 +1164,469 @@ mod tests {
             tool_name: "FileRead",
             command: None,
             is_read_only: true,
+            file_path: None,
         });
         // DontAsk falls through to mode default which denies
         assert!(matches!(check, PermissionCheck::Denied { .. }));
+    }
+
+    // --- Path pattern parsing and serialization tests ---
+
+    #[test]
+    fn test_parse_path_only_rule() {
+        let rule = PermissionRule::parse("FileEdit(, /src/**/*.ts)", RuleType::Allow).unwrap();
+        assert_eq!(rule.tool_name, "FileEdit");
+        assert_eq!(rule.pattern, None);
+        assert_eq!(rule.path_pattern, Some("/src/**/*.ts".to_string()));
+        assert_eq!(rule.rule_type, RuleType::Allow);
+    }
+
+    #[test]
+    fn test_parse_rule_with_both_patterns() {
+        let rule = PermissionRule::parse("Bash(git *, /repo/**)", RuleType::Deny).unwrap();
+        assert_eq!(rule.tool_name, "Bash");
+        assert_eq!(rule.pattern, Some("git *".to_string()));
+        assert_eq!(rule.path_pattern, Some("/repo/**".to_string()));
+    }
+
+    #[test]
+    fn test_parse_path_only_cwd_relative() {
+        let rule = PermissionRule::parse("FileRead(, ./config/**)", RuleType::Allow).unwrap();
+        assert_eq!(rule.pattern, None);
+        assert_eq!(rule.path_pattern, Some("./config/**".to_string()));
+    }
+
+    #[test]
+    fn test_parse_path_only_home_relative() {
+        let rule = PermissionRule::parse("FileRead(, ~/.ssh/*)", RuleType::Deny).unwrap();
+        assert_eq!(rule.pattern, None);
+        assert_eq!(rule.path_pattern, Some("~/.ssh/*".to_string()));
+    }
+
+    #[test]
+    fn test_parse_path_only_absolute() {
+        let rule = PermissionRule::parse("FileRead(, ///etc/hosts)", RuleType::Deny).unwrap();
+        assert_eq!(rule.pattern, None);
+        assert_eq!(rule.path_pattern, Some("///etc/hosts".to_string()));
+    }
+
+    #[test]
+    fn test_compact_string_path_only() {
+        let rule = PermissionRule {
+            tool_name: "FileEdit".to_string(),
+            pattern: None,
+            path_pattern: Some("/src/**/*.ts".to_string()),
+            rule_type: RuleType::Allow,
+        };
+        assert_eq!(rule.to_compact_string(), "FileEdit(, /src/**/*.ts)");
+    }
+
+    #[test]
+    fn test_compact_string_both_patterns() {
+        let rule = PermissionRule {
+            tool_name: "Bash".to_string(),
+            pattern: Some("git *".to_string()),
+            path_pattern: Some("/repo/**".to_string()),
+            rule_type: RuleType::Deny,
+        };
+        assert_eq!(rule.to_compact_string(), "Bash(git *, /repo/**)");
+    }
+
+    #[test]
+    fn test_path_rule_parse_roundtrip() {
+        let cases = [
+            "FileEdit(, /src/**/*.ts)",
+            "Bash(git *, /repo/**)",
+            "FileRead(, ~/.ssh/*)",
+            "FileWrite(, ./temp/**)",
+        ];
+        for original in cases {
+            let rule = PermissionRule::parse(original, RuleType::Allow).unwrap();
+            assert_eq!(
+                rule.to_compact_string(),
+                original,
+                "round-trip failed for {}",
+                original
+            );
+        }
+    }
+
+    // --- Ask rule type tests ---
+
+    #[test]
+    fn test_ask_rule_type_serde() {
+        let json = serde_json::to_string(&RuleType::Ask).unwrap();
+        assert_eq!(json, "\"ask\"");
+        let parsed: RuleType = serde_json::from_str("\"ask\"").unwrap();
+        assert_eq!(parsed, RuleType::Ask);
+    }
+
+    #[test]
+    fn test_ask_rule_forces_confirmation() {
+        let mut manager = PermissionManager::new(PermissionMode::Default);
+        manager.add_ask_rule(PermissionRule {
+            tool_name: "FileEdit".to_string(),
+            pattern: None,
+            path_pattern: None,
+            rule_type: RuleType::Ask,
+        });
+
+        let check = manager.check_permission(PermissionRequest {
+            tool_name: "FileEdit",
+            command: None,
+            is_read_only: false,
+            file_path: None,
+        });
+        assert!(matches!(check, PermissionCheck::NeedsConfirmation { .. }));
+    }
+
+    #[test]
+    fn test_deny_takes_precedence_over_ask() {
+        let mut manager = PermissionManager::new(PermissionMode::Default);
+        manager.add_deny_rule(PermissionRule {
+            tool_name: "FileEdit".to_string(),
+            pattern: None,
+            path_pattern: None,
+            rule_type: RuleType::Deny,
+        });
+        manager.add_ask_rule(PermissionRule {
+            tool_name: "FileEdit".to_string(),
+            pattern: None,
+            path_pattern: None,
+            rule_type: RuleType::Ask,
+        });
+
+        let check = manager.check_permission(PermissionRequest {
+            tool_name: "FileEdit",
+            command: None,
+            is_read_only: false,
+            file_path: None,
+        });
+        assert!(matches!(check, PermissionCheck::Denied { .. }));
+    }
+
+    #[test]
+    fn test_ask_takes_precedence_over_allow() {
+        let mut manager = PermissionManager::new(PermissionMode::Default);
+        manager.add_ask_rule(PermissionRule {
+            tool_name: "FileEdit".to_string(),
+            pattern: None,
+            path_pattern: None,
+            rule_type: RuleType::Ask,
+        });
+        manager.add_allow_rule(PermissionRule {
+            tool_name: "FileEdit".to_string(),
+            pattern: None,
+            path_pattern: None,
+            rule_type: RuleType::Allow,
+        });
+
+        let check = manager.check_permission(PermissionRequest {
+            tool_name: "FileEdit",
+            command: None,
+            is_read_only: false,
+            file_path: None,
+        });
+        assert!(matches!(check, PermissionCheck::NeedsConfirmation { .. }));
+    }
+
+    #[test]
+    fn test_bypass_overrides_ask_to_allowed() {
+        let mut manager = PermissionManager::new(PermissionMode::BypassPermissions);
+        manager.add_ask_rule(PermissionRule {
+            tool_name: "FileEdit".to_string(),
+            pattern: None,
+            path_pattern: None,
+            rule_type: RuleType::Ask,
+        });
+
+        let check = manager.check_permission(PermissionRequest {
+            tool_name: "FileEdit",
+            command: None,
+            is_read_only: false,
+            file_path: None,
+        });
+        assert_eq!(check, PermissionCheck::Allowed);
+    }
+
+    #[test]
+    fn test_plan_mode_overrides_ask_to_denied_for_writes() {
+        let mut manager = PermissionManager::new(PermissionMode::Plan);
+        manager.add_ask_rule(PermissionRule {
+            tool_name: "FileEdit".to_string(),
+            pattern: None,
+            path_pattern: None,
+            rule_type: RuleType::Ask,
+        });
+
+        let check = manager.check_permission(PermissionRequest {
+            tool_name: "FileEdit",
+            command: None,
+            is_read_only: false,
+            file_path: None,
+        });
+        assert!(matches!(check, PermissionCheck::Denied { .. }));
+    }
+
+    // --- Path-based permission matching tests ---
+
+    #[test]
+    fn test_path_rule_allow_matching_file() {
+        let mut manager = PermissionManager::new(PermissionMode::Default);
+        manager.project_root = Some(PathBuf::from("/repo"));
+        manager.add_allow_rule(PermissionRule {
+            tool_name: "FileEdit".to_string(),
+            pattern: None,
+            path_pattern: Some("/src/**/*.rs".to_string()),
+            rule_type: RuleType::Allow,
+        });
+
+        let check = manager.check_permission(PermissionRequest {
+            tool_name: "FileEdit",
+            command: None,
+            is_read_only: false,
+            file_path: Some("/repo/src/main.rs"),
+        });
+        assert_eq!(check, PermissionCheck::Allowed);
+    }
+
+    #[test]
+    fn test_path_rule_deny_matching_file() {
+        let mut manager = PermissionManager::new(PermissionMode::Default);
+        manager.project_root = Some(PathBuf::from("/repo"));
+        manager.add_deny_rule(PermissionRule {
+            tool_name: "FileRead".to_string(),
+            pattern: None,
+            path_pattern: Some("/.env".to_string()),
+            rule_type: RuleType::Deny,
+        });
+
+        let check = manager.check_permission(PermissionRequest {
+            tool_name: "FileRead",
+            command: None,
+            is_read_only: true,
+            file_path: Some("/repo/.env"),
+        });
+        assert!(matches!(check, PermissionCheck::Denied { .. }));
+    }
+
+    #[test]
+    fn test_path_rule_no_match_falls_through() {
+        let mut manager = PermissionManager::new(PermissionMode::Default);
+        manager.project_root = Some(PathBuf::from("/repo"));
+        manager.add_allow_rule(PermissionRule {
+            tool_name: "FileEdit".to_string(),
+            pattern: None,
+            path_pattern: Some("/src/**/*.rs".to_string()),
+            rule_type: RuleType::Allow,
+        });
+
+        // File not under /src/ should not match the rule
+        let check = manager.check_permission(PermissionRequest {
+            tool_name: "FileEdit",
+            command: None,
+            is_read_only: false,
+            file_path: Some("/repo/tests/test.rs"),
+        });
+        // Falls through to mode default (NeedsConfirmation for Default mode)
+        assert!(matches!(check, PermissionCheck::NeedsConfirmation { .. }));
+    }
+
+    #[test]
+    fn test_path_rule_without_file_path_doesnt_match() {
+        let mut manager = PermissionManager::new(PermissionMode::Default);
+        manager.project_root = Some(PathBuf::from("/repo"));
+        manager.add_allow_rule(PermissionRule {
+            tool_name: "FileEdit".to_string(),
+            pattern: None,
+            path_pattern: Some("/src/**".to_string()),
+            rule_type: RuleType::Allow,
+        });
+
+        // No file_path provided — rule with path_pattern should not match
+        let check = manager.check_permission(PermissionRequest {
+            tool_name: "FileEdit",
+            command: None,
+            is_read_only: false,
+            file_path: None,
+        });
+        assert!(matches!(check, PermissionCheck::NeedsConfirmation { .. }));
+    }
+
+    #[test]
+    fn test_combined_command_and_path_rule() {
+        let mut manager = PermissionManager::new(PermissionMode::Default);
+        manager.project_root = Some(PathBuf::from("/repo"));
+        manager.add_allow_rule(PermissionRule {
+            tool_name: "Bash".to_string(),
+            pattern: Some("npm *".to_string()),
+            path_pattern: Some("/package.json".to_string()),
+            rule_type: RuleType::Allow,
+        });
+
+        // Both command and path match
+        let check = manager.check_permission(PermissionRequest {
+            tool_name: "Bash",
+            command: Some("npm install"),
+            is_read_only: false,
+            file_path: Some("/repo/package.json"),
+        });
+        assert_eq!(check, PermissionCheck::Allowed);
+
+        // Command matches but path doesn't
+        let check = manager.check_permission(PermissionRequest {
+            tool_name: "Bash",
+            command: Some("npm install"),
+            is_read_only: false,
+            file_path: Some("/repo/other.json"),
+        });
+        assert!(matches!(check, PermissionCheck::NeedsConfirmation { .. }));
+    }
+
+    // --- Path prefix resolution tests ---
+
+    #[test]
+    fn test_resolve_project_relative() {
+        let mut manager = PermissionManager::new(PermissionMode::Default);
+        manager.project_root = Some(PathBuf::from("/repo"));
+        let resolved = manager.resolve_path_pattern("/src/**/*.rs");
+        assert_eq!(resolved, "/repo/src/**/*.rs");
+    }
+
+    #[test]
+    fn test_resolve_cwd_relative() {
+        let mut manager = PermissionManager::new(PermissionMode::Default);
+        manager.session_cwd = Some(PathBuf::from("/repo/frontend"));
+        let resolved = manager.resolve_path_pattern("./components/**");
+        assert_eq!(resolved, "/repo/frontend/components/**");
+    }
+
+    #[test]
+    fn test_resolve_home_relative() {
+        let manager = PermissionManager::new(PermissionMode::Default);
+        let resolved = manager.resolve_path_pattern("~/secrets/*");
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+        assert_eq!(resolved, format!("{}/secrets/*", home));
+    }
+
+    #[test]
+    fn test_resolve_absolute_path() {
+        let manager = PermissionManager::new(PermissionMode::Default);
+        let resolved = manager.resolve_path_pattern("///etc/hosts");
+        assert_eq!(resolved, "/etc/hosts");
+    }
+
+    // --- extract_file_path tests ---
+
+    #[test]
+    fn test_extract_file_path_file_edit() {
+        let input =
+            serde_json::json!({"file_path": "src/main.rs", "old_string": "a", "new_string": "b"});
+        let result = extract_file_path("FileEdit", &input);
+        assert_eq!(result, Some("src/main.rs".to_string()));
+    }
+
+    #[test]
+    fn test_extract_file_path_file_write() {
+        let input = serde_json::json!({"file_path": "/tmp/output.txt", "content": "hello"});
+        let result = extract_file_path("FileWrite", &input);
+        assert_eq!(result, Some("/tmp/output.txt".to_string()));
+    }
+
+    #[test]
+    fn test_extract_file_path_file_read() {
+        let input = serde_json::json!({"file_path": "README.md"});
+        let result = extract_file_path("FileRead", &input);
+        assert_eq!(result, Some("README.md".to_string()));
+    }
+
+    #[test]
+    fn test_extract_file_path_bash_returns_none() {
+        let input = serde_json::json!({"command": "cat /etc/passwd"});
+        let result = extract_file_path("Bash", &input);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_file_path_no_field() {
+        let input = serde_json::json!({"content": "hello"});
+        let result = extract_file_path("FileEdit", &input);
+        assert_eq!(result, None);
+    }
+
+    // --- Save/load roundtrip with ask rules ---
+
+    #[test]
+    fn test_permission_manager_save_load_with_ask_rules() {
+        let temp_dir = std::env::temp_dir().join(format!("perm-ask-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let path = temp_dir.join("permissions.json");
+
+        let mut manager = PermissionManager::new(PermissionMode::Default);
+        manager
+            .add_ask_rule(PermissionRule::parse("FileEdit(, /config/**)", RuleType::Ask).unwrap());
+        manager.add_allow_rule(PermissionRule::parse("FileRead", RuleType::Allow).unwrap());
+
+        manager.save(&path).unwrap();
+
+        let loaded = PermissionManager::load(&path).unwrap();
+        assert_eq!(loaded.always_ask.len(), 1);
+        assert_eq!(loaded.always_ask[0].tool_name, "FileEdit");
+        assert_eq!(
+            loaded.always_ask[0].path_pattern,
+            Some("/config/**".to_string())
+        );
+        assert_eq!(loaded.always_ask[0].rule_type, RuleType::Ask);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // --- Path pattern with ask rule ---
+
+    #[test]
+    fn test_manual_verification_path_glob_matching_and_non_matching() {
+        let mut manager = PermissionManager::new(PermissionMode::Default);
+        manager.project_root = Some(PathBuf::from("/repo"));
+
+        manager.add_allow_rule(PermissionRule {
+            tool_name: "FileEdit".to_string(),
+            pattern: None,
+            path_pattern: Some("/crates/core/src/**/*.rs".to_string()),
+            rule_type: RuleType::Allow,
+        });
+        manager.add_deny_rule(PermissionRule {
+            tool_name: "FileEdit".to_string(),
+            pattern: None,
+            path_pattern: Some("/target/**".to_string()),
+            rule_type: RuleType::Deny,
+        });
+
+        let matching = manager.check_permission(PermissionRequest {
+            tool_name: "FileEdit",
+            command: None,
+            is_read_only: false,
+            file_path: Some("/repo/crates/core/src/permission.rs"),
+        });
+        assert_eq!(matching, PermissionCheck::Allowed);
+
+        let non_matching = manager.check_permission(PermissionRequest {
+            tool_name: "FileEdit",
+            command: None,
+            is_read_only: false,
+            file_path: Some("/repo/other/file.rs"),
+        });
+        assert!(matches!(
+            non_matching,
+            PermissionCheck::NeedsConfirmation { .. }
+        ));
+
+        let denied = manager.check_permission(PermissionRequest {
+            tool_name: "FileEdit",
+            command: None,
+            is_read_only: false,
+            file_path: Some("/repo/target/generated.rs"),
+        });
+        assert!(matches!(denied, PermissionCheck::Denied { .. }));
     }
 }

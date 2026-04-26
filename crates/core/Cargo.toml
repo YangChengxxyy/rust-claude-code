@@ -10,3 +10,5 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+glob-match = "0.2"
+serde_yaml = "0.9"

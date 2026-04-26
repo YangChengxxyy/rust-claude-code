@@ -331,17 +331,20 @@ mod tests {
             tool_name: "Bash".to_string(),
             pattern: Some("git status".to_string()),
             rule_type: crate::permission::RuleType::Deny,
+            path_pattern: None,
         }];
         state.always_allow_rules = vec![PermissionRule {
             tool_name: "Bash".to_string(),
             pattern: Some("git *".to_string()),
             rule_type: crate::permission::RuleType::Allow,
+            path_pattern: None,
         }];
 
         let check = state.check_permission(PermissionRequest {
             tool_name: "Bash",
             command: Some("git status"),
             is_read_only: false,
+            file_path: None,
         });
 
         assert!(matches!(check, PermissionCheck::Denied { .. }));
@@ -361,11 +364,13 @@ mod tests {
                 tool_name: "FileEdit".to_string(),
                 pattern: None,
                 rule_type: crate::permission::RuleType::Allow,
+                path_pattern: None,
             }],
             always_deny: vec![PermissionRule {
                 tool_name: "Bash".to_string(),
                 pattern: None,
                 rule_type: crate::permission::RuleType::Deny,
+                path_pattern: None,
             }],
             stream: true,
             theme: crate::config::Theme::Dark,

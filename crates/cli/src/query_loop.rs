@@ -493,10 +493,26 @@ where
             None
         };
 
+        // Extract file path from tool input for path-based permission matching
+        let extracted_path = rust_claude_core::permission::extract_file_path(tool_name, input);
+        let resolved_path = extracted_path.as_ref().map(|p| {
+            let path = std::path::Path::new(p);
+            if path.is_absolute() {
+                p.clone()
+            } else {
+                // Resolve relative to CWD
+                std::env::current_dir()
+                    .unwrap_or_default()
+                    .join(p)
+                    .to_string_lossy()
+                    .to_string()
+            }
+        });
         let request = PermissionRequest {
             tool_name,
             command,
             is_read_only,
+            file_path: resolved_path.as_deref(),
         };
 
         let check = {
@@ -522,6 +538,7 @@ where
                                 // don't accidentally allow broader commands
                                 // than the user intended.
                                 pattern: command.map(|c| c.to_string()),
+                                path_pattern: None,
                                 rule_type: rust_claude_core::permission::RuleType::Allow,
                             };
                             state.always_allow_rules.push(rule);
@@ -535,6 +552,7 @@ where
                             let rule = rust_claude_core::permission::PermissionRule {
                                 tool_name: tool_name.to_string(),
                                 pattern: command.map(|c| c.to_string()),
+                                path_pattern: None,
                                 rule_type: rust_claude_core::permission::RuleType::Deny,
                             };
                             state.always_deny_rules.push(rule);

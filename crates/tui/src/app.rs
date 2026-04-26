@@ -109,6 +109,21 @@ const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         description: "Show MCP server status and tools",
     },
     SlashCommandSpec {
+        name: "/permissions",
+        usage: "/permissions",
+        description: "Show active permission rules",
+    },
+    SlashCommandSpec {
+        name: "/init",
+        usage: "/init",
+        description: "Scaffold .claude/ directory with starter CLAUDE.md",
+    },
+    SlashCommandSpec {
+        name: "/status",
+        usage: "/status",
+        description: "Show consolidated system overview",
+    },
+    SlashCommandSpec {
         name: "/help",
         usage: "/help",
         description: "Show this help",
@@ -1542,6 +1557,15 @@ impl App {
             "/mcp" => {
                 let _ = user_tx.send(UserCommand::ShowMcp).await;
             }
+            "/permissions" => {
+                let _ = user_tx.send(UserCommand::ShowPermissions).await;
+            }
+            "/init" => {
+                let _ = user_tx.send(UserCommand::InitProject).await;
+            }
+            "/status" => {
+                let _ = user_tx.send(UserCommand::ShowStatus).await;
+            }
             "/help" => {
                 self.messages
                     .push(ChatMessage::System(slash_command_help_text()));
@@ -1930,10 +1954,7 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
             .map(|s| truncate(s, 100))
             .unwrap_or_default(),
         "AskUserQuestion" => {
-            let question = input
-                .get("question")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let question = input.get("question").and_then(|v| v.as_str()).unwrap_or("");
             truncate(question, 100)
         }
         "TodoWrite" => {
@@ -1982,14 +2003,8 @@ fn summarize_tool_result(tool_name: &str, output: &str) -> String {
                     .get("selected_label")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let answer = val
-                    .get("answer")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let custom = val
-                    .get("custom")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let answer = val.get("answer").and_then(|v| v.as_str()).unwrap_or("");
+                let custom = val.get("custom").and_then(|v| v.as_bool()).unwrap_or(false);
                 if custom {
                     truncate(answer, 200)
                 } else if !label.is_empty() {
@@ -3333,6 +3348,21 @@ mod tests {
         assert!(!is_file_tool);
         assert!(diff_lines.is_none());
         assert!(file_path.is_none());
+    }
+
+    #[test]
+    fn test_slash_commands_include_new_commands() {
+        assert!(has_slash_command("/permissions"));
+        assert!(has_slash_command("/init"));
+        assert!(has_slash_command("/status"));
+    }
+
+    #[test]
+    fn test_slash_command_help_includes_new_commands() {
+        let help = slash_command_help_text();
+        assert!(help.contains("/permissions"));
+        assert!(help.contains("/init"));
+        assert!(help.contains("/status"));
     }
 
     #[test]

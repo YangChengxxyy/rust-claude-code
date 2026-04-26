@@ -7,7 +7,7 @@
 //! - Project instructions from CLAUDE.md files
 //! - Git context for the current repository when available
 
-use rust_claude_core::claude_md::ClaudeMdFile;
+use rust_claude_core::claude_md::{ClaudeMdFile, ClaudeMdSourceType};
 use rust_claude_core::git::GitContextSnapshot;
 use rust_claude_core::memory::{
     build_memory_contract_prompt, build_relevant_memories_section, RelevantMemory,
@@ -138,6 +138,33 @@ fn build_memory_section(memory_store: Option<&ScannedMemoryStore>) -> Option<Str
     Some(lines.join("\n"))
 }
 
+/// Annotation text for a CLAUDE.md file based on its source type.
+fn source_annotation(file: &ClaudeMdFile) -> &'static str {
+    match file.source_type {
+        ClaudeMdSourceType::Global => "user instructions, global",
+        ClaudeMdSourceType::GlobalLocal => {
+            "local user instructions, not checked into version control"
+        }
+        ClaudeMdSourceType::Project => "project instructions, checked into the codebase",
+        ClaudeMdSourceType::ProjectLocal => {
+            "local project instructions, not checked into version control"
+        }
+        ClaudeMdSourceType::Rule => "project rules",
+    }
+}
+
+/// Truncation priority category. Lower number = truncated first.
+fn truncation_priority(file: &ClaudeMdFile) -> u8 {
+    match file.source_type {
+        ClaudeMdSourceType::Global | ClaudeMdSourceType::GlobalLocal => 0,
+        ClaudeMdSourceType::Rule => 1,
+        // Root-level project files truncated before deeper ones, but that is
+        // handled by iterating from the start of the block list (which is
+        // ordered root-to-leaf).
+        ClaudeMdSourceType::Project | ClaudeMdSourceType::ProjectLocal => 2,
+    }
+}
+
 fn build_claude_md_section(files: &[ClaudeMdFile]) -> String {
     if files.is_empty() {
         return String::new();
@@ -147,31 +174,51 @@ fn build_claude_md_section(files: &[ClaudeMdFile]) -> String {
         .iter()
         .map(|f| {
             format!(
-                "Contents of {} (project instructions, checked into the codebase):\n\n{}",
+                "Contents of {} ({}):\n\n{}",
                 f.path.display(),
+                source_annotation(f),
                 f.content.trim()
             )
         })
         .collect();
 
-    let mut total: usize = blocks.iter().map(|b| b.len()).sum();
-    let mut start_index = 0;
+    // Build a truncation order: indices sorted by truncation priority (lowest first).
+    // Within the same priority, root-most (earlier index) is truncated first.
+    let mut truncation_order: Vec<usize> = (0..files.len()).collect();
+    truncation_order.sort_by_key(|&i| (truncation_priority(&files[i]), i));
 
-    while total > CLAUDE_MD_MAX_CHARS && start_index < blocks.len() - 1 {
-        total -= blocks[start_index].len();
-        start_index += 1;
+    let mut total: usize = blocks.iter().map(|b| b.len()).sum();
+    let mut included = vec![true; blocks.len()];
+    let mut truncated_count = 0;
+
+    for &idx in &truncation_order {
+        if total <= CLAUDE_MD_MAX_CHARS {
+            break;
+        }
+        // Don't truncate the very last included block
+        let remaining_included = included.iter().filter(|&&b| b).count();
+        if remaining_included <= 1 {
+            break;
+        }
+        total -= blocks[idx].len();
+        included[idx] = false;
+        truncated_count += 1;
     }
 
     let mut section = String::from("# claudeMd\n\nCodebase and user instructions are shown below. Be sure to adhere to these instructions.\n");
 
-    if start_index > 0 {
+    if truncated_count > 0 {
         section.push_str(&format!(
             "\n(Note: {} instruction file(s) truncated due to size limits)\n",
-            start_index
+            truncated_count
         ));
     }
 
-    for (i, block) in blocks[start_index..].iter().enumerate() {
+    let mut first = true;
+    for (i, block) in blocks.iter().enumerate() {
+        if !included[i] {
+            continue;
+        }
         section.push('\n');
         if block.len() > CLAUDE_MD_MAX_CHARS {
             section.push_str(&block[..CLAUDE_MD_MAX_CHARS]);
@@ -179,8 +226,10 @@ fn build_claude_md_section(files: &[ClaudeMdFile]) -> String {
         } else {
             section.push_str(block);
         }
-        if i < blocks[start_index..].len() - 1 {
-            section.push('\n');
+        if first {
+            first = false;
+        } else {
+            // Separator between blocks already handled by the \n above
         }
     }
 
@@ -301,6 +350,7 @@ mod tests {
         let files = vec![ClaudeMdFile {
             path: PathBuf::from("/repo/CLAUDE.md"),
             content: "Use conventional commits.".to_string(),
+            source_type: ClaudeMdSourceType::Project,
         }];
         let section = build_claude_md_section(&files);
         assert!(section.contains("# claudeMd"));
@@ -314,10 +364,12 @@ mod tests {
             ClaudeMdFile {
                 path: PathBuf::from("/home/user/.claude/CLAUDE.md"),
                 content: "Global rules".to_string(),
+                source_type: ClaudeMdSourceType::Global,
             },
             ClaudeMdFile {
                 path: PathBuf::from("/repo/CLAUDE.md"),
                 content: "Project rules".to_string(),
+                source_type: ClaudeMdSourceType::Project,
             },
         ];
         let section = build_claude_md_section(&files);
@@ -335,10 +387,12 @@ mod tests {
             ClaudeMdFile {
                 path: PathBuf::from("/global/CLAUDE.md"),
                 content: large_content.clone(),
+                source_type: ClaudeMdSourceType::Global,
             },
             ClaudeMdFile {
                 path: PathBuf::from("/repo/CLAUDE.md"),
                 content: large_content.clone(),
+                source_type: ClaudeMdSourceType::Project,
             },
         ];
         let section = build_claude_md_section(&files);
@@ -353,6 +407,7 @@ mod tests {
         let files = vec![ClaudeMdFile {
             path: PathBuf::from("/repo/CLAUDE.md"),
             content: "Project instructions here".to_string(),
+            source_type: ClaudeMdSourceType::Project,
         }];
         let prompt =
             build_system_prompt(&cwd, &tools, &files, None, &[], None, Some("Custom append"));
@@ -427,5 +482,98 @@ mod tests {
         assert!(prompt.contains("# relevantMemories"));
         assert!(prompt.contains("testing.md"));
         assert!(prompt.contains("freshness_days: 3"));
+    }
+
+    // --- Local file annotation tests ---
+
+    #[test]
+    fn test_claude_md_local_file_annotation() {
+        let files = vec![
+            ClaudeMdFile {
+                path: PathBuf::from("/repo/CLAUDE.md"),
+                content: "Shared instructions".to_string(),
+                source_type: ClaudeMdSourceType::Project,
+            },
+            ClaudeMdFile {
+                path: PathBuf::from("/repo/CLAUDE.local.md"),
+                content: "Local instructions".to_string(),
+                source_type: ClaudeMdSourceType::ProjectLocal,
+            },
+        ];
+        let section = build_claude_md_section(&files);
+        assert!(section.contains("project instructions, checked into the codebase"));
+        assert!(section.contains("local project instructions, not checked into version control"));
+    }
+
+    #[test]
+    fn test_claude_md_rule_file_annotation() {
+        let files = vec![
+            ClaudeMdFile {
+                path: PathBuf::from("/repo/CLAUDE.md"),
+                content: "Project".to_string(),
+                source_type: ClaudeMdSourceType::Project,
+            },
+            ClaudeMdFile {
+                path: PathBuf::from("/repo/.claude/rules/testing.md"),
+                content: "Testing rules".to_string(),
+                source_type: ClaudeMdSourceType::Rule,
+            },
+        ];
+        let section = build_claude_md_section(&files);
+        assert!(section.contains("project rules"));
+        assert!(section.contains("Testing rules"));
+    }
+
+    #[test]
+    fn test_claude_md_rule_file_after_local() {
+        let files = vec![
+            ClaudeMdFile {
+                path: PathBuf::from("/repo/CLAUDE.md"),
+                content: "Project".to_string(),
+                source_type: ClaudeMdSourceType::Project,
+            },
+            ClaudeMdFile {
+                path: PathBuf::from("/repo/CLAUDE.local.md"),
+                content: "Local".to_string(),
+                source_type: ClaudeMdSourceType::ProjectLocal,
+            },
+            ClaudeMdFile {
+                path: PathBuf::from("/repo/.claude/rules/style.md"),
+                content: "Style rules".to_string(),
+                source_type: ClaudeMdSourceType::Rule,
+            },
+        ];
+        let section = build_claude_md_section(&files);
+        let local_pos = section.find("Local").unwrap();
+        let rules_pos = section.find("Style rules").unwrap();
+        assert!(rules_pos > local_pos);
+    }
+
+    #[test]
+    fn test_truncation_with_mixed_types() {
+        // Global should be truncated first, then rules, then project
+        let large = "x".repeat(15_000);
+        let files = vec![
+            ClaudeMdFile {
+                path: PathBuf::from("/home/.claude/CLAUDE.md"),
+                content: large.clone(),
+                source_type: ClaudeMdSourceType::Global,
+            },
+            ClaudeMdFile {
+                path: PathBuf::from("/repo/CLAUDE.md"),
+                content: large.clone(),
+                source_type: ClaudeMdSourceType::Project,
+            },
+            ClaudeMdFile {
+                path: PathBuf::from("/repo/.claude/rules/style.md"),
+                content: large.clone(),
+                source_type: ClaudeMdSourceType::Rule,
+            },
+        ];
+        let section = build_claude_md_section(&files);
+        // Global should be truncated first (priority 0), then rule (priority 1)
+        // Project should remain
+        assert!(section.contains("truncated"));
+        assert!(section.contains("/repo/CLAUDE.md"));
     }
 }

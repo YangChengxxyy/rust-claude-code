@@ -108,10 +108,42 @@ impl ClaudeSettings {
             })
     }
 
+    /// Discover the local project settings file (`.claude/settings.local.json`).
+    /// Looks in the same directory as `.claude/settings.json`.
+    pub fn discover_project_local_settings(cwd: &Path) -> Option<PathBuf> {
+        crate::claude_md::project_discovery_dirs(cwd)
+            .into_iter()
+            .find_map(|dir| {
+                let path = dir.join(".claude").join("settings.local.json");
+                path.exists().then_some(path)
+            })
+    }
+
+    /// Load project settings, merging shared and local layers.
+    /// Returns a single merged layer with the local-project settings taking
+    /// priority over shared-project settings.
     pub fn load_project(cwd: &Path) -> Result<Option<SettingsLayer>, SettingsError> {
-        match Self::discover_project_settings(cwd) {
-            Some(path) => Self::load_layer_from(&path),
-            None => Ok(None),
+        let shared = match Self::discover_project_settings(cwd) {
+            Some(path) => Self::load_layer_from(&path)?,
+            None => None,
+        };
+        let local = match Self::discover_project_local_settings(cwd) {
+            Some(path) => Self::load_layer_from(&path)?,
+            None => None,
+        };
+
+        match (shared, local) {
+            (None, None) => Ok(None),
+            (Some(s), None) => Ok(Some(s)),
+            (None, Some(l)) => Ok(Some(l)),
+            (Some(s), Some(l)) => {
+                // Merge: local takes priority over shared
+                let merged = ClaudeSettings::merge(&l.settings, &s.settings);
+                Ok(Some(SettingsLayer {
+                    path: l.path, // Use local path as the representative
+                    settings: merged,
+                }))
+            }
         }
     }
 
@@ -648,6 +680,105 @@ mod tests {
         let merged = ClaudeSettings::merge(&project, &user);
         assert_eq!(merged.mcp_servers.len(), 1);
         assert!(merged.mcp_servers.contains_key("github"));
+    }
+
+    #[test]
+    fn test_discover_project_local_settings() {
+        let root = make_temp_dir("project-local-settings");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(".claude")).unwrap();
+        fs::write(
+            root.join(".claude/settings.local.json"),
+            r#"{"model": "local-model"}"#,
+        )
+        .unwrap();
+        let subdir = root.join("nested/app");
+        fs::create_dir_all(&subdir).unwrap();
+
+        let found = ClaudeSettings::discover_project_local_settings(&subdir).unwrap();
+        assert!(found.ends_with(".claude/settings.local.json"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_load_project_local_only() {
+        let root = make_temp_dir("project-local-only");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(".claude")).unwrap();
+        fs::write(
+            root.join(".claude/settings.local.json"),
+            r#"{"model": "local-model"}"#,
+        )
+        .unwrap();
+
+        let layer = ClaudeSettings::load_project(&root).unwrap().unwrap();
+        assert_eq!(layer.settings.model.as_deref(), Some("local-model"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_load_project_shared_only() {
+        let root = make_temp_dir("project-shared-only");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(".claude")).unwrap();
+        fs::write(
+            root.join(".claude/settings.json"),
+            r#"{"model": "shared-model"}"#,
+        )
+        .unwrap();
+
+        let layer = ClaudeSettings::load_project(&root).unwrap().unwrap();
+        assert_eq!(layer.settings.model.as_deref(), Some("shared-model"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_load_project_local_overrides_shared() {
+        let root = make_temp_dir("project-local-override");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(root.join(".claude")).unwrap();
+        fs::write(
+            root.join(".claude/settings.json"),
+            r#"{"model": "shared-model", "permissions": {"allow": ["FileRead"], "deny": ["Bash(rm *)"]}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(".claude/settings.local.json"),
+            r#"{"model": "local-model", "permissions": {"allow": ["FileEdit"], "deny": []}}"#,
+        )
+        .unwrap();
+
+        let layer = ClaudeSettings::load_project(&root).unwrap().unwrap();
+        // Local model overrides shared
+        assert_eq!(layer.settings.model.as_deref(), Some("local-model"));
+        // Permissions are concatenated across layers
+        assert!(layer
+            .settings
+            .permissions
+            .allow
+            .contains(&"FileRead".to_string()));
+        assert!(layer
+            .settings
+            .permissions
+            .allow
+            .contains(&"FileEdit".to_string()));
+        // Shared deny rules are preserved
+        assert!(layer
+            .settings
+            .permissions
+            .deny
+            .contains(&"Bash(rm *)".to_string()));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_load_project_no_settings_returns_none() {
+        let root = make_temp_dir("project-no-settings");
+        fs::create_dir_all(root.join(".git")).unwrap();
+
+        let layer = ClaudeSettings::load_project(&root).unwrap();
+        assert!(layer.is_none());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

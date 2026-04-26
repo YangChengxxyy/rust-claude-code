@@ -18,7 +18,7 @@ use rust_claude_core::{
     permission::{PermissionCheck, PermissionRequest},
     state::AppState,
 };
-use rust_claude_tools::{ToolContext, ToolRegistry};
+use rust_claude_tools::{ToolContext, ToolRegistry, UserQuestionCallback};
 use tokio::sync::Mutex;
 
 use crate::hooks::HookRunner;
@@ -88,6 +88,14 @@ where
     pub fn with_agent_context(mut self, ctx: rust_claude_tools::AgentContext) -> Self {
         self.agent_context = Some(ctx);
         self
+    }
+
+    fn user_question_callback(&self) -> Option<UserQuestionCallback> {
+        let bridge = self.bridge.clone()?;
+        Some(Arc::new(move |request| {
+            let bridge = bridge.clone();
+            Box::pin(async move { bridge.request_user_question(request).await })
+        }))
     }
 
     pub async fn run(
@@ -554,6 +562,7 @@ where
         let mut concurrent = Vec::new();
         let mut serial = Vec::new();
         let mut tool_results: Vec<(usize, String, String, bool)> = Vec::new();
+        let user_question_callback = self.user_question_callback();
 
         for (index, (tool_use_id, name, input)) in tool_uses.into_iter().enumerate() {
             let is_read_only = self
@@ -581,7 +590,10 @@ where
 
             // Run PreToolUse hooks after permission check passes
             if let Some(runner) = &self.hook_runner {
-                let hook_result = runner.run_pre_tool_use(name, input, "").await;
+                let cwd = { app_state.lock().await.cwd.clone() };
+                let hook_result = runner
+                    .run_pre_tool_use_with_cwd(name, input, "", &cwd)
+                    .await;
                 if let rust_claude_core::hooks::HookResult::Block { reason } = hook_result {
                     let msg = format!("Hook blocked: {}", reason);
                     if let Some(bridge) = &self.bridge {
@@ -607,20 +619,24 @@ where
         }
 
         let concurrent_results = join_all(concurrent.into_iter().map(
-            |(index, tool_use_id, name, input)| async move {
-                let result = self
-                    .tools
-                    .execute(
-                        &name,
-                        input.clone(),
-                        ToolContext {
-                            tool_use_id,
-                            app_state: Some(app_state.clone()),
-                            agent_context: self.agent_context.clone(),
-                        },
-                    )
-                    .await;
-                (index, name, input, result)
+            |(index, tool_use_id, name, input)| {
+                let user_question_callback = user_question_callback.clone();
+                async move {
+                    let result = self
+                        .tools
+                        .execute(
+                            &name,
+                            input.clone(),
+                            ToolContext {
+                                tool_use_id,
+                                app_state: Some(app_state.clone()),
+                                agent_context: self.agent_context.clone(),
+                                user_question_callback: user_question_callback.clone(),
+                            },
+                        )
+                        .await;
+                    (index, name, input, result)
+                }
             },
         ))
         .await;
@@ -634,8 +650,16 @@ where
             }
             // Fire PostToolUse hooks
             if let Some(runner) = &self.hook_runner {
+                let cwd = { app_state.lock().await.cwd.clone() };
                 runner
-                    .run_post_tool_use(&name, &input, &result.content, result.is_error, "")
+                    .run_post_tool_use_with_cwd(
+                        &name,
+                        &input,
+                        &result.content,
+                        result.is_error,
+                        "",
+                        &cwd,
+                    )
                     .await;
             }
             tool_results.push((index, result.tool_use_id, result.content, result.is_error));
@@ -651,6 +675,7 @@ where
                         tool_use_id,
                         app_state: Some(app_state.clone()),
                         agent_context: self.agent_context.clone(),
+                        user_question_callback: user_question_callback.clone(),
                     },
                 )
                 .await
@@ -663,8 +688,16 @@ where
             }
             // Fire PostToolUse hooks
             if let Some(runner) = &self.hook_runner {
+                let cwd = { app_state.lock().await.cwd.clone() };
                 runner
-                    .run_post_tool_use(&name, &input, &result.content, result.is_error, "")
+                    .run_post_tool_use_with_cwd(
+                        &name,
+                        &input,
+                        &result.content,
+                        result.is_error,
+                        "",
+                        &cwd,
+                    )
                     .await;
             }
             tool_results.push((index, result.tool_use_id, result.content, result.is_error));
@@ -695,8 +728,11 @@ mod tests {
     use async_trait::async_trait;
     use rust_claude_api::MessageStream;
     use rust_claude_core::message::{ContentBlock, Message};
-    use rust_claude_tools::{BashTool, FileReadTool, Tool, ToolContext, ToolError};
-    use std::collections::VecDeque;
+    use rust_claude_tools::{
+        AskUserQuestionResponse, AskUserQuestionTool, BashTool, FileReadTool, Tool, ToolContext,
+        ToolError,
+    };
+    use std::collections::{HashMap, VecDeque};
     use std::time::{Duration, Instant};
 
     struct MockClient {
@@ -834,6 +870,81 @@ mod tests {
             state.messages[2].content[0],
             ContentBlock::ToolResult { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn test_query_loop_ask_user_question_uses_bridge_response() {
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                CreateMessageResponse {
+                    id: "msg_1".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::tool_use(
+                        "tool_1",
+                        "AskUserQuestion",
+                        serde_json::json!({
+                            "question": "Pick one",
+                            "options": [
+                                { "label": "A", "description": "Answer A" },
+                                { "label": "B", "description": "Answer B" }
+                            ],
+                            "allow_custom": true
+                        }),
+                    )],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_2".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("done")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+            ])),
+        };
+
+        let mut tools = ToolRegistry::new();
+        tools.register(AskUserQuestionTool::new());
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(4);
+        let bridge = rust_claude_tui::TuiBridge::new(event_tx);
+        let loop_runner = QueryLoop::new(client, tools).with_bridge(bridge);
+        let app_state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
+
+        let responder = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                if let rust_claude_tui::AppEvent::UserQuestionRequest { response_tx, .. } = event {
+                    let _ = response_tx.send(Some(AskUserQuestionResponse {
+                        selected_label: Some("B".into()),
+                        answer: "Answer B".into(),
+                        custom: false,
+                    }));
+                    return;
+                }
+            }
+            panic!("expected user question request");
+        });
+
+        let final_message = loop_runner.run(app_state.clone(), "choose").await.unwrap();
+        responder.await.unwrap();
+
+        assert_eq!(final_message.content, vec![ContentBlock::text("done")]);
+        let state = app_state.lock().await;
+        match &state.messages[2].content[0] {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(!is_error);
+                assert!(content.contains("\"selected_label\":\"B\""));
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -975,6 +1086,110 @@ mod tests {
         assert_eq!(final_message.content, vec![ContentBlock::text("complete")]);
         let state = app_state.lock().await;
         assert_eq!(state.messages.len(), 6);
+    }
+
+    #[tokio::test]
+    async fn test_query_loop_hooks_use_updated_session_cwd_between_bash_calls() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let initial_dir = std::env::temp_dir().join(format!(
+            "rust-claude-query-hook-initial-{}-{suffix}",
+            std::process::id(),
+        ));
+        let target_dir = std::env::temp_dir().join(format!(
+            "rust-claude-query-hook-target-{}-{suffix}",
+            std::process::id(),
+        ));
+        tokio::fs::create_dir_all(&initial_dir).await.unwrap();
+        tokio::fs::create_dir_all(&target_dir).await.unwrap();
+        let hook_log = initial_dir.join("hook-log.jsonl");
+
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                CreateMessageResponse {
+                    id: "msg_1".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::tool_use(
+                        "tool_1",
+                        "Bash",
+                        serde_json::json!({
+                            "command": format!("cd {} && pwd", target_dir.display())
+                        }),
+                    )],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_2".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::tool_use(
+                        "tool_2",
+                        "Bash",
+                        serde_json::json!({ "command": "pwd" }),
+                    )],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_3".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("complete")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+            ])),
+        };
+
+        let mut tools = ToolRegistry::new();
+        tools.register(BashTool::new());
+        let mut hooks = HashMap::new();
+        hooks.insert(
+            "PreToolUse".to_string(),
+            vec![rust_claude_core::hooks::HookEventGroup {
+                matcher: Some("Bash".to_string()),
+                hooks: vec![rust_claude_core::hooks::HookConfig {
+                    type_: "command".to_string(),
+                    command: Some(format!(
+                        "cat >> {}; printf '\\n' >> {}",
+                        hook_log.display(),
+                        hook_log.display()
+                    )),
+                    timeout: None,
+                }],
+            }],
+        );
+        let hook_runner = Arc::new(HookRunner::new(hooks, initial_dir.clone()));
+        let loop_runner = QueryLoop::new(client, tools)
+            .with_max_rounds(4)
+            .with_hook_runner(hook_runner);
+
+        let mut state = AppState::new(initial_dir.clone());
+        state.permission_mode = rust_claude_core::permission::PermissionMode::BypassPermissions;
+        let app_state = Arc::new(Mutex::new(state));
+
+        let final_message = loop_runner.run(app_state.clone(), "multi").await.unwrap();
+
+        assert_eq!(final_message.content, vec![ContentBlock::text("complete")]);
+        assert_eq!(
+            app_state.lock().await.cwd,
+            target_dir.canonicalize().unwrap()
+        );
+        let log = tokio::fs::read_to_string(&hook_log).await.unwrap();
+        let lines = log.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains(&initial_dir.display().to_string()));
+        assert!(lines[1].contains(&target_dir.display().to_string()));
     }
 
     #[tokio::test]

@@ -168,6 +168,7 @@ mod tests {
             tool_use_id: "tool_1".to_string(),
             app_state: Some(app_state.clone()),
             agent_context: None,
+            user_question_callback: None,
         }
     }
 
@@ -278,6 +279,7 @@ mod tests {
                     tool_use_id: "tool_1".into(),
                     app_state: None,
                     agent_context: None,
+                    user_question_callback: None,
                 },
             )
             .await

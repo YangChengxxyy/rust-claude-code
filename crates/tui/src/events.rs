@@ -3,6 +3,7 @@ use rust_claude_core::compaction::CompactionResult;
 use rust_claude_core::config::{ConfigProvenance, Theme};
 use rust_claude_core::session::{ContextSnapshot, SessionSummary};
 use rust_claude_core::state::TodoItem;
+use rust_claude_tools::{AskUserQuestionRequest, AskUserQuestionResponse};
 use std::path::PathBuf;
 
 use crate::diff::DiffLine;
@@ -135,6 +136,12 @@ pub enum AppEvent {
         /// Channel to send the user's response back.
         response_tx: tokio::sync::oneshot::Sender<PermissionResponse>,
     },
+    /// A tool asks the user a structured question.
+    UserQuestionRequest {
+        request: AskUserQuestionRequest,
+        /// Channel to send the user's answer back. None means cancel/unavailable.
+        response_tx: tokio::sync::oneshot::Sender<Option<AskUserQuestionResponse>>,
+    },
     /// Task list has been updated.
     TodoUpdate(Vec<TodoItem>),
     /// Conversation compaction has started.
@@ -230,6 +237,7 @@ impl ChatMessage {
             "Task" => "Task",
             "TodoWrite" => "Task",
             "Lsp" => "LSP",
+            "AskUserQuestion" => "Question",
             "WebFetch" => "Fetch",
             "WebSearch" => "Search",
             other => other,

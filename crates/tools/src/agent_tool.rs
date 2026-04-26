@@ -137,6 +137,7 @@ mod tests {
                     tool_use_id: "tool_1".into(),
                     app_state: Some(app_state()),
                     agent_context: None,
+                    user_question_callback: None,
                 },
             )
             .await
@@ -159,6 +160,7 @@ mod tests {
                         max_depth: 3,
                         ..Default::default()
                     }),
+                    user_question_callback: None,
                 },
             )
             .await
@@ -199,6 +201,7 @@ mod tests {
                         ),
                         ..Default::default()
                     }),
+                    user_question_callback: None,
                 },
             )
             .await

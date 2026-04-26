@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -41,6 +41,17 @@ impl HookRunner {
         tool_input: &serde_json::Value,
         session_id: &str,
     ) -> HookResult {
+        self.run_pre_tool_use_with_cwd(tool_name, tool_input, session_id, &self.cwd)
+            .await
+    }
+
+    pub async fn run_pre_tool_use_with_cwd(
+        &self,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        session_id: &str,
+        cwd: &Path,
+    ) -> HookResult {
         let matching = self.get_matching_hooks(&HookEvent::PreToolUse, Some(tool_name));
         if matching.is_empty() {
             return HookResult::Continue;
@@ -49,7 +60,7 @@ impl HookRunner {
         let input_json = serde_json::to_string(&PreToolUseInput {
             base: BaseHookInput {
                 session_id: session_id.to_string(),
-                cwd: self.cwd.to_string_lossy().to_string(),
+                cwd: cwd.to_string_lossy().to_string(),
             },
             tool_name: tool_name.to_string(),
             tool_input: tool_input.clone(),
@@ -58,7 +69,7 @@ impl HookRunner {
 
         for config in &matching {
             let result = self
-                .execute_and_parse_pre_tool_use(config, &input_json)
+                .execute_and_parse_pre_tool_use(config, &input_json, cwd)
                 .await;
             if let HookResult::Block { .. } = &result {
                 return result;
@@ -76,6 +87,26 @@ impl HookRunner {
         is_error: bool,
         session_id: &str,
     ) {
+        self.run_post_tool_use_with_cwd(
+            tool_name,
+            tool_input,
+            tool_output,
+            is_error,
+            session_id,
+            &self.cwd,
+        )
+        .await;
+    }
+
+    pub async fn run_post_tool_use_with_cwd(
+        &self,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+        tool_output: &str,
+        is_error: bool,
+        session_id: &str,
+        cwd: &Path,
+    ) {
         let matching = self.get_matching_hooks(&HookEvent::PostToolUse, Some(tool_name));
         if matching.is_empty() {
             return;
@@ -84,7 +115,7 @@ impl HookRunner {
         let input_json = serde_json::to_string(&PostToolUseInput {
             base: BaseHookInput {
                 session_id: session_id.to_string(),
-                cwd: self.cwd.to_string_lossy().to_string(),
+                cwd: cwd.to_string_lossy().to_string(),
             },
             tool_name: tool_name.to_string(),
             tool_input: tool_input.clone(),
@@ -95,7 +126,7 @@ impl HookRunner {
 
         for config in &matching {
             let _ = self
-                .execute_command_hook(config, &input_json, &HookEvent::PostToolUse)
+                .execute_command_hook(config, &input_json, &HookEvent::PostToolUse, cwd)
                 .await;
         }
     }
@@ -117,7 +148,7 @@ impl HookRunner {
 
         for config in &matching {
             let _ = self
-                .execute_command_hook(config, &input_json, &HookEvent::UserPromptSubmit)
+                .execute_command_hook(config, &input_json, &HookEvent::UserPromptSubmit, &self.cwd)
                 .await;
         }
     }
@@ -139,7 +170,7 @@ impl HookRunner {
 
         for config in &matching {
             let _ = self
-                .execute_command_hook(config, &input_json, &HookEvent::Stop)
+                .execute_command_hook(config, &input_json, &HookEvent::Stop, &self.cwd)
                 .await;
         }
     }
@@ -197,6 +228,7 @@ impl HookRunner {
         config: &HookConfig,
         input_json: &str,
         event: &HookEvent,
+        cwd: &Path,
     ) -> Option<(String, i32)> {
         let command = config.command.as_deref()?;
         let timeout_secs = config.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
@@ -206,7 +238,7 @@ impl HookRunner {
         let mut child = match tokio::process::Command::new(&shell)
             .arg("-c")
             .arg(command)
-            .env("CLAUDE_PROJECT_DIR", &self.cwd)
+            .env("CLAUDE_PROJECT_DIR", cwd)
             .env("HOOK_EVENT", event.as_str())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -258,9 +290,10 @@ impl HookRunner {
         &self,
         config: &HookConfig,
         input_json: &str,
+        cwd: &Path,
     ) -> HookResult {
         let (stdout, exit_code) = match self
-            .execute_command_hook(config, input_json, &HookEvent::PreToolUse)
+            .execute_command_hook(config, input_json, &HookEvent::PreToolUse, cwd)
             .await
         {
             Some(result) => result,

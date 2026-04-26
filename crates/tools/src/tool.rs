@@ -9,6 +9,9 @@ use tokio::sync::Mutex;
 use crate::ToolRegistry;
 
 pub type AgentRunFuture = Pin<Box<dyn Future<Output = Result<AgentRunOutput, ToolError>> + Send>>;
+pub type UserQuestionFuture = Pin<Box<dyn Future<Output = Option<AskUserQuestionResponse>> + Send>>;
+pub type UserQuestionCallback =
+    Arc<dyn Fn(AskUserQuestionRequest) -> UserQuestionFuture + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct AgentRunOutput {
@@ -61,12 +64,54 @@ impl Default for AgentContext {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct AskUserQuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct AskUserQuestionRequest {
+    pub question: String,
+    pub options: Vec<AskUserQuestionOption>,
+    pub allow_custom: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct AskUserQuestionResponse {
+    pub selected_label: Option<String>,
+    pub answer: String,
+    pub custom: bool,
+}
+
+#[derive(Clone, Default)]
 pub struct ToolContext {
     pub tool_use_id: String,
     pub app_state: Option<Arc<Mutex<AppState>>>,
     /// Context for spawning sub-agents. Only used by AgentTool.
     pub agent_context: Option<AgentContext>,
+    /// Optional UI/backend callback for structured user questions.
+    pub user_question_callback: Option<UserQuestionCallback>,
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("tool_use_id", &self.tool_use_id)
+            .field(
+                "app_state",
+                &self.app_state.as_ref().map(|_| "Some(AppState)"),
+            )
+            .field("agent_context", &self.agent_context)
+            .field(
+                "user_question_callback",
+                &self
+                    .user_question_callback
+                    .as_ref()
+                    .map(|_| "Some(callback)"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -227,6 +227,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_permission_dialog(f, app, full);
     }
 
+    if app.user_question_dialog.is_some() {
+        draw_user_question_dialog(f, app, full);
+    }
+
     if app.session_picker.is_some() {
         draw_session_picker(f, app, full);
     }
@@ -1143,6 +1147,111 @@ fn render_permission_options(lines: &mut Vec<Line<'static>>, selected: usize, pa
             Span::styled(*label, style),
         ]));
     }
+}
+
+fn draw_user_question_dialog(f: &mut Frame, app: &App, area: Rect) {
+    let palette = app.palette();
+    let dialog = match &app.user_question_dialog {
+        Some(dialog) => dialog,
+        None => return,
+    };
+
+    let width = ((area.width as u32 * 70 / 100) as u16)
+        .min(90)
+        .max(48)
+        .min(area.width.saturating_sub(4));
+    let option_rows = dialog.request.options.len() as u16;
+    let custom_rows = if dialog.request.allow_custom { 2 } else { 0 };
+    let height = (8 + option_rows + custom_rows)
+        .min(area.height.saturating_sub(2))
+        .max(10);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let dialog_area = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, dialog_area);
+
+    let block = Block::default()
+        .title(" Question ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_set(border::ROUNDED)
+        .border_style(Style::default().fg(palette.claude));
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                truncate_display(&dialog.request.question, width.saturating_sub(6) as usize),
+                Style::default()
+                    .fg(palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+    ];
+
+    for (index, option) in dialog.request.options.iter().enumerate() {
+        let is_selected = dialog.selected == index;
+        let style = if is_selected {
+            Style::default()
+                .fg(palette.claude)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.text)
+        };
+        let prefix = if is_selected { "  > " } else { "    " };
+        lines.push(Line::from(vec![
+            Span::styled(prefix, style),
+            Span::styled(option.label.clone(), style),
+            Span::styled(
+                format!(
+                    "  {}",
+                    truncate_display(&option.description, width.saturating_sub(16) as usize,)
+                ),
+                Style::default().fg(palette.inactive),
+            ),
+        ]));
+    }
+
+    if dialog.request.allow_custom {
+        let custom_index = dialog.request.options.len();
+        let is_selected = dialog.selected == custom_index;
+        let style = if is_selected {
+            Style::default()
+                .fg(palette.claude)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.text)
+        };
+        let prefix = if is_selected { "  > " } else { "    " };
+        lines.push(Line::from(vec![
+            Span::styled(prefix, style),
+            Span::styled("Custom", style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("      "),
+            Span::styled(
+                truncate_display(
+                    &dialog.custom_input.to_text(),
+                    width.saturating_sub(10) as usize,
+                ),
+                Style::default().fg(palette.text),
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  Enter submit  Esc cancel",
+        Style::default().fg(palette.inactive),
+    )));
+
+    let paragraph = Paragraph::new(Text::from(lines))
+        .block(block)
+        .wrap(Wrap { trim: false });
+    f.render_widget(paragraph, dialog_area);
 }
 
 fn draw_session_picker(f: &mut Frame, app: &App, area: Rect) {

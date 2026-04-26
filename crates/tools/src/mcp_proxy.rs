@@ -150,6 +150,7 @@ mod tests {
             tool_use_id: "test_id".into(),
             app_state: None,
             agent_context: None,
+            user_question_callback: None,
         };
 
         let result = tool.execute(serde_json::json!({}), context).await.unwrap();

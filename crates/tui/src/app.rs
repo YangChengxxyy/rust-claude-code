@@ -10,6 +10,7 @@ use ratatui::Terminal;
 use rust_claude_core::config::Theme;
 use rust_claude_core::session::{ContextSnapshot, SessionSummary};
 use rust_claude_core::state::TodoItem;
+use rust_claude_tools::{AskUserQuestionRequest, AskUserQuestionResponse};
 use tokio::sync::mpsc;
 
 use crate::diff::{self, DiffLine};
@@ -157,6 +158,14 @@ pub struct PermissionDialog {
     pub file_path: Option<String>,
     /// Whether replace_all mode is active (FileEdit only).
     pub replace_all: bool,
+}
+
+/// State of the modal structured user-question dialog.
+pub struct UserQuestionDialog {
+    pub request: AskUserQuestionRequest,
+    pub selected: usize,
+    pub custom_input: InputBuffer,
+    pub response_tx: Option<tokio::sync::oneshot::Sender<Option<AskUserQuestionResponse>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -476,6 +485,7 @@ pub struct App {
 
     // -- permission dialog --
     pub permission_dialog: Option<PermissionDialog>,
+    pub user_question_dialog: Option<UserQuestionDialog>,
     pub session_picker: Option<SessionPicker>,
 
     // -- task panel --
@@ -543,6 +553,7 @@ impl App {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             permission_dialog: None,
+            user_question_dialog: None,
             session_picker: None,
             todo_visible: false,
             tasks: Vec::new(),
@@ -911,6 +922,11 @@ impl App {
 
     /// Process a keyboard event.
     pub async fn handle_key_event(&mut self, key: KeyEvent, user_tx: &mpsc::Sender<UserCommand>) {
+        if self.user_question_dialog.is_some() {
+            self.handle_user_question_key(key);
+            return;
+        }
+
         if self.permission_dialog.is_some() {
             self.handle_permission_key(key);
             return;
@@ -1189,6 +1205,86 @@ impl App {
 
     fn finish_permission_dialog(&mut self, response: PermissionResponse) {
         if let Some(dialog) = self.permission_dialog.take() {
+            if let Some(tx) = dialog.response_tx {
+                let _ = tx.send(response);
+            }
+        }
+    }
+
+    fn handle_user_question_key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc {
+            self.finish_user_question_dialog(None);
+            return;
+        }
+
+        if key.code == KeyCode::Enter {
+            let response = self.user_question_dialog.as_ref().and_then(|dialog| {
+                let option_count = dialog.request.options.len();
+                let custom_selected =
+                    dialog.request.allow_custom && dialog.selected == option_count;
+                if custom_selected {
+                    let answer = dialog.custom_input.to_text().trim().to_string();
+                    if answer.is_empty() {
+                        return None;
+                    }
+                    Some(AskUserQuestionResponse {
+                        selected_label: None,
+                        answer,
+                        custom: true,
+                    })
+                } else {
+                    dialog.request.options.get(dialog.selected).map(|option| {
+                        let answer = if option.description.trim().is_empty() {
+                            option.label.clone()
+                        } else {
+                            option.description.clone()
+                        };
+                        AskUserQuestionResponse {
+                            selected_label: Some(option.label.clone()),
+                            answer,
+                            custom: false,
+                        }
+                    })
+                }
+            });
+            if let Some(response) = response {
+                self.finish_user_question_dialog(Some(response));
+            }
+            return;
+        }
+
+        let dialog = match self.user_question_dialog.as_mut() {
+            Some(d) => d,
+            None => return,
+        };
+        let option_count = dialog.request.options.len();
+        let max_selected = if dialog.request.allow_custom {
+            option_count
+        } else {
+            option_count.saturating_sub(1)
+        };
+        let custom_selected = dialog.request.allow_custom && dialog.selected == option_count;
+
+        match key.code {
+            KeyCode::Up => dialog.selected = dialog.selected.saturating_sub(1),
+            KeyCode::Down => dialog.selected = (dialog.selected + 1).min(max_selected),
+            KeyCode::Char(c)
+                if custom_selected && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                dialog.custom_input.insert_char(c);
+            }
+            KeyCode::Backspace if custom_selected => dialog.custom_input.backspace(),
+            KeyCode::Delete if custom_selected => dialog.custom_input.delete(),
+            KeyCode::Left if custom_selected => dialog.custom_input.move_left(),
+            KeyCode::Right if custom_selected => dialog.custom_input.move_right(),
+            KeyCode::Home if custom_selected => dialog.custom_input.move_home(),
+            KeyCode::End if custom_selected => dialog.custom_input.move_end(),
+            _ => {}
+        }
+    }
+
+    fn finish_user_question_dialog(&mut self, response: Option<AskUserQuestionResponse>) {
+        if let Some(dialog) = self.user_question_dialog.take() {
             if let Some(tx) = dialog.response_tx {
                 let _ = tx.send(response);
             }
@@ -1737,6 +1833,17 @@ impl App {
                     replace_all,
                 });
             }
+            AppEvent::UserQuestionRequest {
+                request,
+                response_tx,
+            } => {
+                self.user_question_dialog = Some(UserQuestionDialog {
+                    request,
+                    selected: 0,
+                    custom_input: InputBuffer::new(),
+                    response_tx: Some(response_tx),
+                });
+            }
             AppEvent::TodoUpdate(todos) => self.tasks = todos,
             AppEvent::CompactionStart => {
                 self.messages.push(ChatMessage::System(
@@ -2105,6 +2212,106 @@ mod tests {
         );
         app.handle_paste("line1\r\nline2".into());
         assert_eq!(app.input_text(), "line1\nline2");
+    }
+
+    #[tokio::test]
+    async fn test_user_question_selects_option() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        app.handle_app_event(AppEvent::UserQuestionRequest {
+            request: AskUserQuestionRequest {
+                question: "Pick a mode".into(),
+                options: vec![
+                    rust_claude_tools::AskUserQuestionOption {
+                        label: "Fast".into(),
+                        description: "Use fast path".into(),
+                    },
+                    rust_claude_tools::AskUserQuestionOption {
+                        label: "Careful".into(),
+                        description: "Use careful path".into(),
+                    },
+                ],
+                allow_custom: false,
+            },
+            response_tx,
+        });
+        let (tx, _rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::Down), &tx).await;
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        let response = response_rx.await.unwrap().unwrap();
+        assert_eq!(response.selected_label.as_deref(), Some("Careful"));
+        assert_eq!(response.answer, "Use careful path");
+        assert!(!response.custom);
+        assert!(app.user_question_dialog.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_user_question_custom_answer() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        app.handle_app_event(AppEvent::UserQuestionRequest {
+            request: AskUserQuestionRequest {
+                question: "Pick a mode".into(),
+                options: vec![rust_claude_tools::AskUserQuestionOption {
+                    label: "Fast".into(),
+                    description: "Use fast path".into(),
+                }],
+                allow_custom: true,
+            },
+            response_tx,
+        });
+        let (tx, _rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::Down), &tx).await;
+        for ch in "custom".chars() {
+            app.handle_key_event(key(KeyCode::Char(ch)), &tx).await;
+        }
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        let response = response_rx.await.unwrap().unwrap();
+        assert_eq!(response.selected_label, None);
+        assert_eq!(response.answer, "custom");
+        assert!(response.custom);
+    }
+
+    #[tokio::test]
+    async fn test_user_question_cancel_sends_none() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+        app.handle_app_event(AppEvent::UserQuestionRequest {
+            request: AskUserQuestionRequest {
+                question: "Pick a mode".into(),
+                options: vec![],
+                allow_custom: true,
+            },
+            response_tx,
+        });
+        let (tx, _rx) = mpsc::channel(1);
+
+        app.handle_key_event(key(KeyCode::Esc), &tx).await;
+
+        assert_eq!(response_rx.await.unwrap(), None);
+        assert!(app.user_question_dialog.is_none());
     }
 
     #[test]

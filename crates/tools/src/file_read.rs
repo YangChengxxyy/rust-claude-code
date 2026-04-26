@@ -133,6 +133,7 @@ mod tests {
                     tool_use_id: "tool_1".to_string(),
                     app_state: None,
                     agent_context: None,
+                    user_question_callback: None,
                 },
             )
             .await
@@ -155,6 +156,7 @@ mod tests {
                     tool_use_id: "tool_1".to_string(),
                     app_state: None,
                     agent_context: None,
+                    user_question_callback: None,
                 },
             )
             .await
@@ -176,6 +178,7 @@ mod tests {
                     tool_use_id: "tool_1".to_string(),
                     app_state: None,
                     agent_context: None,
+                    user_question_callback: None,
                 },
             )
             .await

@@ -20,9 +20,9 @@ use rust_claude_core::{
 };
 use rust_claude_mcp::{McpManager, McpManagerConfig};
 use rust_claude_tools::{
-    register_mcp_tools, AgentContext, AgentTool, BashTool, FileEditTool, FileReadTool,
-    FileWriteTool, GlobTool, GrepTool, LspTool, NotebookEditTool, TaskTool, ToolRegistry,
-    WebFetchTool, WebSearchTool,
+    register_mcp_tools, AgentContext, AgentTool, AskUserQuestionTool, BashTool, FileEditTool,
+    FileReadTool, FileWriteTool, GlobTool, GrepTool, LspTool, NotebookEditTool, TaskTool,
+    ToolRegistry, WebFetchTool, WebSearchTool,
 };
 use rust_claude_tui::{App, AppEvent, ChatMessage, TerminalGuard, TuiBridge, UserCommand};
 use tokio::sync::{mpsc, Mutex};
@@ -992,6 +992,7 @@ fn forget_memory(cwd: &std::path::Path, path: &str) -> String {
 fn build_tools() -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     tools.register(AgentTool::new());
+    tools.register(AskUserQuestionTool::new());
     tools.register(BashTool::new());
     tools.register(FileReadTool::new());
     tools.register(FileEditTool::new());

@@ -2,6 +2,7 @@ use rust_claude_core::compaction::CompactionResult;
 use rust_claude_core::config::ConfigProvenance;
 use rust_claude_core::session::{ContextSnapshot, SessionSummary};
 use rust_claude_core::state::TodoItem;
+use rust_claude_tools::{AskUserQuestionRequest, AskUserQuestionResponse};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::events::{format_provenance_summary, AppEvent, ChatMessage, PermissionResponse};
@@ -225,6 +226,26 @@ impl TuiBridge {
         rx.await.ok()
     }
 
+    pub async fn request_user_question(
+        &self,
+        request: AskUserQuestionRequest,
+    ) -> Option<AskUserQuestionResponse> {
+        let (tx, rx) = oneshot::channel();
+        let send_result = self
+            .event_tx
+            .send(AppEvent::UserQuestionRequest {
+                request,
+                response_tx: tx,
+            })
+            .await;
+
+        if send_result.is_err() {
+            return None;
+        }
+
+        rx.await.ok().flatten()
+    }
+
     pub async fn send_todo_update(&self, todos: Vec<TodoItem>) {
         let _ = self.event_tx.send(AppEvent::TodoUpdate(todos)).await;
     }
@@ -308,6 +329,48 @@ mod tests {
 
         let response = handle.await.unwrap();
         assert_eq!(response, Some(PermissionResponse::Allow));
+    }
+
+    #[tokio::test]
+    async fn test_bridge_request_user_question() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let bridge = TuiBridge::new(tx);
+
+        let bridge_clone = bridge.clone();
+        let handle = tokio::spawn(async move {
+            bridge_clone
+                .request_user_question(AskUserQuestionRequest {
+                    question: "Pick one".into(),
+                    options: vec![],
+                    allow_custom: true,
+                })
+                .await
+        });
+
+        match rx.recv().await {
+            Some(AppEvent::UserQuestionRequest {
+                request,
+                response_tx,
+            }) => {
+                assert_eq!(request.question, "Pick one");
+                let _ = response_tx.send(Some(AskUserQuestionResponse {
+                    selected_label: None,
+                    answer: "custom".into(),
+                    custom: true,
+                }));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let response = handle.await.unwrap();
+        assert_eq!(
+            response,
+            Some(AskUserQuestionResponse {
+                selected_label: None,
+                answer: "custom".into(),
+                custom: true,
+            })
+        );
     }
 
     #[tokio::test]

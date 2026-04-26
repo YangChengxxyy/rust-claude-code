@@ -399,7 +399,9 @@ fn render_message(
             let style = if *is_error {
                 palette.error_style()
             } else {
-                palette.assistant_text_style()
+                // Use a dimmer style for tool results so they don't compete
+                // with the main assistant text visually.
+                Style::default().fg(palette.inactive)
             };
 
             for (i, line) in output_summary.lines().take(6).enumerate() {
@@ -875,9 +877,13 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let model_display = if app.model == app.model_setting {
-        app.model.clone()
+        format_model_display_name(&app.model)
     } else {
-        format!("{} (from {})", app.model, app.model_setting)
+        format!(
+            "{} (from {})",
+            format_model_display_name(&app.model),
+            format_model_display_name(&app.model_setting)
+        )
     };
 
     let branch_display = app
@@ -1430,9 +1436,100 @@ fn format_tokens(n: u64) -> String {
     }
 }
 
+/// Strip ANSI escape sequences from a string.
+///
+/// Removes CSI sequences (e.g. `\x1b[1m`, `\x1b[0;31m`) and OSC sequences
+/// so that ratatui does not display raw escape characters.
+pub fn strip_ansi_codes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek() {
+                Some('[') => {
+                    // CSI sequence: consume until a letter in '@'..='~'
+                    chars.next();
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next.is_ascii_alphabetic() || next == '~' || next == '@' {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    // OSC sequence: consume until ST (\x1b\\ or \x07)
+                    chars.next();
+                    while let Some(&next) = chars.peek() {
+                        if next == '\x07' {
+                            chars.next();
+                            break;
+                        }
+                        if next == '\x1b' {
+                            chars.next();
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                        chars.next();
+                    }
+                }
+                _ => {
+                    // Unknown escape; skip ESC char only
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Format a model name for display in the status bar.
+///
+/// Converts context-window suffixes like `[1m]` and `[2m]` into
+/// human-readable badges, e.g. `claude-opus-4-6 (1M ctx)`.
+fn format_model_display_name(model: &str) -> String {
+    if let Some(base) = model.strip_suffix("[1m]") {
+        format!("{base} (1M ctx)")
+    } else if let Some(base) = model.strip_suffix("[1M]") {
+        format!("{base} (1M ctx)")
+    } else if let Some(base) = model.strip_suffix("[2m]") {
+        format!("{base} (2M ctx)")
+    } else if let Some(base) = model.strip_suffix("[2M]") {
+        format!("{base} (2M ctx)")
+    } else {
+        model.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_strip_ansi_codes_basic() {
+        assert_eq!(strip_ansi_codes("\x1b[1mhello\x1b[0m"), "hello");
+        assert_eq!(strip_ansi_codes("\x1b[0;31mred\x1b[0m"), "red");
+        assert_eq!(strip_ansi_codes("no ansi here"), "no ansi here");
+        assert_eq!(strip_ansi_codes(""), "");
+    }
+
+    #[test]
+    fn test_format_model_display_name() {
+        assert_eq!(
+            format_model_display_name("claude-opus-4-6[1m]"),
+            "claude-opus-4-6 (1M ctx)"
+        );
+        assert_eq!(
+            format_model_display_name("claude-opus-4-6"),
+            "claude-opus-4-6"
+        );
+        assert_eq!(
+            format_model_display_name("opus[1m]"),
+            "opus (1M ctx)"
+        );
+    }
 
     #[test]
     fn test_display_width_ascii() {
@@ -1480,7 +1577,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_result_uses_bright_text_for_success() {
+    fn test_tool_result_uses_dim_text_for_success() {
         let mut lines = Vec::new();
         let app = App::new(
             "test".into(),
@@ -1500,7 +1597,9 @@ mod tests {
             &mut lines,
         );
 
-        assert_eq!(lines[0].spans[1].style.fg, Some(app.palette().text));
+        // Successful tool results use dimmer (inactive) style to avoid
+        // competing with the main assistant text.
+        assert_eq!(lines[0].spans[1].style.fg, Some(app.palette().inactive));
     }
 
     #[test]

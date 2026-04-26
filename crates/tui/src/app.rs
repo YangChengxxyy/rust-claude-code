@@ -1601,9 +1601,10 @@ impl App {
             AppEvent::StreamDelta(text) => {
                 if self.is_streaming && !self.suppress_stream {
                     self.is_thinking = false;
-                    self.streaming_text.push_str(&text);
+                    let cleaned = crate::ui::strip_ansi_codes(&text);
+                    self.streaming_text.push_str(&cleaned);
                     self.streaming_text_raw.push_str(&text);
-                    self.streaming_md.push_delta(&text);
+                    self.streaming_md.push_delta(&cleaned);
                     self.sync_chat_viewport();
                 }
             }
@@ -1696,7 +1697,8 @@ impl App {
                 output,
                 is_error,
             } => {
-                let summary = truncate(&output, 200);
+                let cleaned = crate::ui::strip_ansi_codes(&output);
+                let summary = summarize_tool_result(&name, &cleaned);
                 self.messages.push(ChatMessage::ToolResult {
                     name,
                     output_summary: summary,
@@ -1706,7 +1708,8 @@ impl App {
             }
             AppEvent::AssistantMessage(text) => {
                 if !self.suppress_stream {
-                    self.messages.push(ChatMessage::Assistant(text));
+                    let cleaned = crate::ui::strip_ansi_codes(&text);
+                    self.messages.push(ChatMessage::Assistant(cleaned));
                 }
                 self.streaming_text.clear();
                 self.streaming_thinking.clear();
@@ -1926,7 +1929,79 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
             .and_then(|v| v.as_str())
             .map(|s| truncate(s, 100))
             .unwrap_or_default(),
-        _ => truncate(&input.to_string(), 80),
+        "AskUserQuestion" => {
+            let question = input
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            truncate(question, 100)
+        }
+        "TodoWrite" => {
+            let count = input
+                .get("todos")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            if count == 0 {
+                "update tasks".to_string()
+            } else {
+                format!("{count} tasks")
+            }
+        }
+        _ => {
+            // For unknown tools, try to extract a meaningful field rather than
+            // dumping the entire JSON object.
+            let candidates = ["query", "question", "path", "url", "command", "name"];
+            for key in &candidates {
+                if let Some(val) = input.get(*key).and_then(|v| v.as_str()) {
+                    return truncate(val, 80);
+                }
+            }
+            // Fallback: truncated JSON, but clean it up
+            let json_str = input.to_string();
+            if json_str.len() <= 80 {
+                json_str
+            } else {
+                truncate(&json_str, 60)
+            }
+        }
+    }
+}
+
+/// Produce a human-readable summary of a tool result.
+///
+/// For tools whose output is structured JSON (e.g. AskUserQuestion), this
+/// extracts key fields so users see a short, readable string instead of raw
+/// JSON.
+fn summarize_tool_result(tool_name: &str, output: &str) -> String {
+    match tool_name {
+        "AskUserQuestion" => {
+            // The result is JSON like {"selected_label":"X","answer":"Y","custom":false}
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(output) {
+                let label = val
+                    .get("selected_label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let answer = val
+                    .get("answer")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let custom = val
+                    .get("custom")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if custom {
+                    truncate(answer, 200)
+                } else if !label.is_empty() {
+                    label.to_string()
+                } else {
+                    truncate(answer, 200)
+                }
+            } else {
+                truncate(output, 200)
+            }
+        }
+        _ => truncate(output, 200),
     }
 }
 

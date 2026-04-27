@@ -121,9 +121,19 @@ const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         description: "Show current git working tree diff",
     },
     SlashCommandSpec {
+        name: "/doctor",
+        usage: "/doctor",
+        description: "Run environment diagnostics",
+    },
+    SlashCommandSpec {
         name: "/resume",
         usage: "/resume [session-id]",
         description: "Resume a saved session",
+    },
+    SlashCommandSpec {
+        name: "/review",
+        usage: "/review [pr-number-or-url]",
+        description: "Review current branch or PR changes",
     },
     SlashCommandSpec {
         name: "/context",
@@ -1857,6 +1867,17 @@ impl App {
             "/diff" => {
                 let _ = user_tx.send(UserCommand::ShowDiff).await;
             }
+            "/doctor" => {
+                let _ = user_tx.send(UserCommand::ShowDoctor).await;
+            }
+            "/review" => {
+                let target = cmd
+                    .strip_prefix("/review")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string);
+                let _ = user_tx.send(UserCommand::Review { target }).await;
+            }
             "/resume" => {
                 if self.is_streaming {
                     self.messages.push(ChatMessage::System(
@@ -2603,6 +2624,8 @@ mod tests {
         assert!(help.contains("/config"));
         assert!(help.contains("/cost"));
         assert!(help.contains("/diff"));
+        assert!(help.contains("/doctor"));
+        assert!(help.contains("/review [pr-number-or-url]"));
         assert!(help.contains("/resume [session-id]"));
         assert!(help.contains("/context"));
         assert!(help.contains("/export [path]"));
@@ -2610,6 +2633,8 @@ mod tests {
         assert!(help.contains("/theme [dark|light|custom]"));
         assert!(help.contains("/compact [default|aggressive|preserve-recent]"));
         assert!(has_slash_command("/resume"));
+        assert!(has_slash_command("/doctor"));
+        assert!(has_slash_command("/review"));
         assert!(has_slash_command("/context"));
         assert!(has_slash_command("/export"));
         assert!(has_slash_command("/copy"));
@@ -3293,6 +3318,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_doctor_and_review_commands_dispatch() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, mut rx) = mpsc::channel(3);
+
+        app.input_buffer = InputBuffer::from_text("/doctor");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+        assert_eq!(rx.recv().await, Some(UserCommand::ShowDoctor));
+
+        app.input_buffer = InputBuffer::from_text("/review");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+        assert_eq!(rx.recv().await, Some(UserCommand::Review { target: None }));
+
+        app.input_buffer = InputBuffer::from_text("/review https://github.com/a/b/pull/1");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+        assert_eq!(
+            rx.recv().await,
+            Some(UserCommand::Review {
+                target: Some("https://github.com/a/b/pull/1".into())
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn test_session_picker_navigation_and_confirm() {
         let mut app = App::new(
             "test-model".into(),
@@ -3754,6 +3808,8 @@ mod tests {
         assert!(has_slash_command("/permissions"));
         assert!(has_slash_command("/init"));
         assert!(has_slash_command("/status"));
+        assert!(has_slash_command("/doctor"));
+        assert!(has_slash_command("/review"));
     }
 
     #[test]
@@ -3762,6 +3818,8 @@ mod tests {
         assert!(help.contains("/permissions"));
         assert!(help.contains("/init"));
         assert!(help.contains("/status"));
+        assert!(help.contains("/doctor"));
+        assert!(help.contains("/review [pr-number-or-url]"));
     }
 
     #[tokio::test]
@@ -3987,7 +4045,7 @@ mod tests {
         app.input_buffer = InputBuffer::from_text("/");
         app.refresh_slash_suggestions();
 
-        assert_eq!(app.slash_suggestion_render_row_count(), 29);
+        assert_eq!(app.slash_suggestion_render_row_count(), 31);
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -20,9 +21,10 @@ use rust_claude_core::{
 };
 use rust_claude_mcp::{McpManager, McpManagerConfig};
 use rust_claude_tools::{
-    register_mcp_tools, AgentContext, AgentTool, AskUserQuestionTool, BashTool, EnterPlanModeTool,
-    ExitPlanModeTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, LspTool,
-    MonitorTool, NotebookEditTool, TaskTool, ToolRegistry, WebFetchTool, WebSearchTool,
+    register_mcp_tools, AgentContext, AgentTool, AskUserQuestionTool, AutoMemoryTool, BashTool,
+    EnterPlanModeTool, ExitPlanModeTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
+    GrepTool, LspTool, MonitorTool, NotebookEditTool, TaskTool, ToolRegistry, WebFetchTool,
+    WebSearchTool,
 };
 use rust_claude_tui::{App, AppEvent, ChatMessage, TerminalGuard, TuiBridge, UserCommand};
 use tokio::sync::{mpsc, Mutex};
@@ -33,6 +35,8 @@ use rust_claude_cli::query_loop::QueryLoop;
 use rust_claude_cli::session::{self, SessionFile};
 use rust_claude_cli::system_prompt;
 use rust_claude_core::compaction::{CompactStrategy, CompactionConfig};
+
+const REVIEW_DIFF_LIMIT: usize = 60_000;
 
 #[derive(Debug, Clone)]
 struct ModeArg(PermissionMode);
@@ -934,40 +938,23 @@ fn remember_memory(
         body: body.to_string(),
     };
 
-    // Check for duplicates before writing.  When a duplicate is found by
-    // name (not path), use the existing entry's path so `correct_memory_entry`
-    // targets the right file.
-    let existing_path = match memory::scan_memory_store(&store) {
-        Ok(scanned) => {
-            memory::find_duplicate_memory(&scanned, &request).map(|dup| dup.relative_path.clone())
+    match memory::save_memory_entry_dedup(&store, &request) {
+        Ok(memory::MemorySaveOutcome::Updated { path, .. }) => format!(
+            "Updated memory '{}' at {} and rebuilt {}",
+            title,
+            path.display(),
+            store.entrypoint.display()
+        ),
+        Ok(memory::MemorySaveOutcome::Created { path }) => format!(
+            "Saved memory '{}' to {} and updated {}",
+            title,
+            path.display(),
+            store.entrypoint.display()
+        ),
+        Ok(memory::MemorySaveOutcome::Skipped { reason }) => {
+            format!("Skipped memory save: {}", reason.as_str())
         }
-        Err(_) => None,
-    };
-
-    if let Some(target_path) = existing_path {
-        let corrected_request = memory::MemoryWriteRequest {
-            relative_path: target_path,
-            ..request
-        };
-        match memory::correct_memory_entry(&store, &corrected_request) {
-            Ok(written) => format!(
-                "Updated memory '{}' at {} and rebuilt {}",
-                title,
-                written.display(),
-                store.entrypoint.display()
-            ),
-            Err(e) => format!("Failed to update memory: {e}"),
-        }
-    } else {
-        match memory::write_memory_entry(&store, &request) {
-            Ok(written) => format!(
-                "Saved memory '{}' to {} and updated {}",
-                title,
-                written.display(),
-                store.entrypoint.display()
-            ),
-            Err(e) => format!("Failed to save memory: {e}"),
-        }
+        Err(e) => format!("Failed to save memory: {e}"),
     }
 }
 
@@ -987,10 +974,231 @@ fn forget_memory(cwd: &std::path::Path, path: &str) -> String {
     }
 }
 
+fn executable_available(name: &str) -> bool {
+    Command::new(name)
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn format_doctor_report(
+    state: &AppState,
+    config: &Config,
+    mcp_manager: &McpManager,
+    hook_runner: Option<&HookRunner>,
+) -> String {
+    let mut lines = vec!["Doctor Report".to_string(), String::new()];
+
+    lines.push("API".to_string());
+    lines.push(format!("  model: {}", state.session.model_setting));
+    lines.push(format!("  model_source: {}", state.config_provenance.model));
+    lines.push(format!(
+        "  credential: {}",
+        if config.api_key.trim().is_empty() {
+            "missing"
+        } else {
+            "available"
+        }
+    ));
+    lines.push(format!(
+        "  auth_mode: {}",
+        if config.bearer_auth { "bearer" } else { "x-api-key" }
+    ));
+    lines.push(format!(
+        "  base_url_source: {}",
+        state.config_provenance.base_url
+    ));
+
+    lines.push(String::new());
+    lines.push("Configuration".to_string());
+    lines.push(format!("  cwd: {}", state.cwd.display()));
+    lines.push(format!("  permission_mode: {:?}", state.permission_mode));
+    lines.push(format!("  stream: {}", state.session.stream));
+    lines.push(format!(
+        "  hooks: {}",
+        hook_runner
+            .map(|runner| runner.config().values().map(|groups| groups.len()).sum::<usize>())
+            .unwrap_or(0)
+    ));
+
+    lines.push(String::new());
+    lines.push("MCP".to_string());
+    let statuses = mcp_manager.server_statuses();
+    if statuses.is_empty() {
+        lines.push("  not configured".to_string());
+    } else {
+        for status in statuses {
+            lines.push(format!(
+                "  {}: {:?} ({} tools)",
+                status.name,
+                status.state,
+                status.tools.len()
+            ));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("Tools".to_string());
+    lines.push(format!(
+        "  git: {}",
+        if executable_available("git") {
+            "available"
+        } else {
+            "missing"
+        }
+    ));
+    lines.push(format!(
+        "  gh: {}",
+        if executable_available("gh") {
+            "available"
+        } else {
+            "missing (PR review degraded)"
+        }
+    ));
+
+    lines.push(String::new());
+    lines.push("Permissions".to_string());
+    let permission_path = rust_claude_core::permission::PermissionManager::default_path();
+    if permission_path.exists() {
+        match rust_claude_core::permission::PermissionManager::load(&permission_path) {
+            Ok(manager) => lines.push(format!(
+                "  {}: valid ({} allow, {} deny)",
+                permission_path.display(),
+                manager.always_allow.len(),
+                manager.always_deny.len()
+            )),
+            Err(error) => lines.push(format!(
+                "  {}: invalid ({})",
+                permission_path.display(),
+                error
+            )),
+        }
+    } else {
+        lines.push(format!("  {}: not found", permission_path.display()));
+    }
+
+    lines.join("\n")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewInput {
+    prompt: String,
+    truncated: bool,
+}
+
+fn collect_review_input(cwd: &std::path::Path, target: Option<&str>) -> Result<ReviewInput> {
+    match target.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(target) => collect_pr_review_input(cwd, target),
+        None => collect_branch_review_input(cwd),
+    }
+}
+
+fn collect_branch_review_input(cwd: &std::path::Path) -> Result<ReviewInput> {
+    let git_context = collect_git_context(cwd).ok_or_else(|| anyhow!("Git repository context is required for /review"))?;
+    let repo_root = git_context.repo_root;
+
+    if let Some(base) = detect_review_base(&repo_root) {
+        // We have a recognizable base branch — diff the full range.
+        let range = format!("{}...HEAD", base);
+        let diff = run_command_text(&repo_root, "git", &["diff", "--stat", &range])?
+            + "\n\n"
+            + &run_command_text(&repo_root, "git", &["diff", &range])?;
+        if diff.trim().is_empty() {
+            return Err(anyhow!("No reviewable diff was found."));
+        }
+        return Ok(build_review_input("current branch", &diff));
+    }
+
+    // No standard base branch found — fall back to uncommitted changes
+    // (staged + unstaged) so we don't silently miss committed branch work.
+    let diff = run_command_text(&repo_root, "git", &["diff", "--stat", "HEAD"])?
+        + "\n\n"
+        + &run_command_text(&repo_root, "git", &["diff", "HEAD"])?;
+    if diff.trim().is_empty() {
+        return Err(anyhow!(
+            "No reviewable diff was found. Could not detect a base branch \
+             (tried origin/HEAD, origin/main, origin/master, main, master). \
+             Use `/review <branch>` to specify the base branch explicitly."
+        ));
+    }
+    Ok(build_review_input("uncommitted changes", &diff))
+}
+
+fn collect_pr_review_input(cwd: &std::path::Path, target: &str) -> Result<ReviewInput> {
+    if !executable_available("gh") {
+        return Err(anyhow!(
+            "PR lookup requires `gh`. Run `/review` without arguments to review the local branch diff."
+        ));
+    }
+    let git_context = collect_git_context(cwd).ok_or_else(|| anyhow!("Git repository context is required for /review"))?;
+    let diff = run_command_text(&git_context.repo_root, "gh", &["pr", "diff", target])?;
+    if diff.trim().is_empty() {
+        return Err(anyhow!("No reviewable diff was found for {target}."));
+    }
+    Ok(build_review_input(target, &diff))
+}
+
+fn detect_review_base(repo_root: &std::path::Path) -> Option<String> {
+    for candidate in ["origin/HEAD", "origin/main", "origin/master", "main", "master"] {
+        if Command::new("git")
+            .args(["rev-parse", "--verify", candidate])
+            .current_dir(repo_root)
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+        {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+fn run_command_text(repo_root: &std::path::Path, program: &str, args: &[&str]) -> Result<String> {
+    let output = Command::new(program).args(args).current_dir(repo_root).output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{} {} failed: {}",
+            program,
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn build_review_input(source: &str, diff: &str) -> ReviewInput {
+    let (diff, truncated) = truncate_review_diff(diff);
+    let truncation_note = if truncated {
+        "\n\nNote: The diff was truncated deterministically because it exceeded the review input limit. Mention this as a residual risk."
+    } else {
+        ""
+    };
+    ReviewInput {
+        truncated,
+        prompt: format!(
+            "Please review the following changes from {source}. Prioritize correctness bugs, behavioral regressions, security issues, and missing tests. Findings must come first, ordered by severity, with file/line references where available. If no actionable findings are found, say so explicitly and mention residual risks or testing gaps.{truncation_note}\n\n```diff\n{}\n```",
+            diff.trim()
+        ),
+    }
+}
+
+fn truncate_review_diff(diff: &str) -> (String, bool) {
+    if diff.len() <= REVIEW_DIFF_LIMIT {
+        return (diff.to_string(), false);
+    }
+    let mut end = REVIEW_DIFF_LIMIT;
+    while !diff.is_char_boundary(end) {
+        end -= 1;
+    }
+    (diff[..end].to_string(), true)
+}
+
 fn build_tools() -> ToolRegistry {
     let mut tools = ToolRegistry::new();
     tools.register(AgentTool::new());
     tools.register(AskUserQuestionTool::new());
+    tools.register(AutoMemoryTool::new());
     tools.register(BashTool::new());
     tools.register(EnterPlanModeTool::new());
     tools.register(ExitPlanModeTool::new());
@@ -1268,6 +1476,7 @@ async fn run_tui(
 
     let base_url = config.base_url.clone();
     let bearer_auth = config.bearer_auth;
+    let theme = config.theme;
 
     let (event_tx, event_rx) = mpsc::channel(128);
     let (user_tx, mut user_rx) = mpsc::channel::<UserCommand>(16);
@@ -1287,13 +1496,14 @@ async fn run_tui(
 
     let worker_hook_runner = hook_runner;
     let worker_mcp_manager = mcp_manager.clone();
+    let worker_config = config.clone();
     tokio::spawn(async move {
         let mut active_query_task: Option<tokio::task::JoinHandle<()>> = None;
 
         while let Some(command) = user_rx.recv().await {
             match command {
                 UserCommand::Compact(strategy) => {
-                    let client = match build_client(&config.api_key, base_url.clone(), bearer_auth)
+                    let client = match build_client(&worker_config.api_key, base_url.clone(), bearer_auth)
                     {
                         Ok(client) => client,
                         Err(error) => {
@@ -1731,6 +1941,96 @@ async fn run_tui(
                     }
                     worker_bridge.send_assistant_message(&message).await;
                 }
+                UserCommand::ShowDoctor => {
+                    let state = worker_state.lock().await;
+                    let msg = format_doctor_report(
+                        &state,
+                        &worker_config,
+                        &worker_mcp_manager,
+                        worker_hook_runner.as_deref(),
+                    );
+                    drop(state);
+                    worker_bridge.send_assistant_message(&msg).await;
+                }
+                UserCommand::Review { target } => {
+                    if active_query_task
+                        .as_ref()
+                        .is_some_and(|handle| !handle.is_finished())
+                    {
+                        worker_bridge
+                            .send_error("Cannot start /review while a response is active. Cancel or wait for it to finish first.")
+                            .await;
+                        continue;
+                    }
+
+                    let cwd = { worker_state.lock().await.cwd.clone() };
+                    let target_for_blocking = target.clone();
+                    let review_input = tokio::task::spawn_blocking(move || {
+                        collect_review_input(&cwd, target_for_blocking.as_deref())
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow!("review task join failed: {e}")));
+
+                    let review_input = match review_input {
+                        Ok(input) => input,
+                        Err(error) => {
+                            worker_bridge
+                                .send_assistant_message(&format!("Review unavailable: {error}"))
+                                .await;
+                            continue;
+                        }
+                    };
+
+                    let client = match build_client(&worker_config.api_key, base_url.clone(), bearer_auth)
+                    {
+                        Ok(client) => client,
+                        Err(error) => {
+                            worker_bridge.send_error(&error.to_string()).await;
+                            continue;
+                        }
+                    };
+
+                    let mut tools = build_tools();
+                    register_mcp_tools(&mut tools, &worker_mcp_manager);
+                    tools.apply_tool_filters(&allowed_tools, &disallowed_tools);
+                    let agent_context = build_agent_context(Arc::new(client.clone()));
+                    let mut query_loop = QueryLoop::new(client, tools)
+                        .with_bridge(worker_bridge.clone())
+                        .with_compaction_config(CompactStrategy::Default.config())
+                        .with_agent_context(agent_context);
+                    if let Some(runner) = &worker_hook_runner {
+                        query_loop = query_loop.with_hook_runner(runner.clone());
+                    }
+                    let worker_bridge_clone = worker_bridge.clone();
+                    let worker_state_clone = worker_state.clone();
+                    let handle = tokio::spawn(async move {
+                        match query_loop
+                            .run(worker_state_clone.clone(), review_input.prompt)
+                            .await
+                        {
+                            Ok(final_message) => {
+                                let text = final_message
+                                    .content
+                                    .into_iter()
+                                    .filter_map(|block| match block {
+                                        ContentBlock::Text { text } => Some(text),
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                if !text.is_empty() {
+                                    worker_bridge_clone.send_assistant_message(&text).await;
+                                }
+                            }
+                            Err(error) => {
+                                worker_bridge_clone
+                                    .send_error(&format!("Review failed: {error}"))
+                                    .await;
+                            }
+                        }
+                    });
+                    active_query_task = Some(handle);
+                }
                 UserCommand::CancelStream => {
                     if let Some(handle) = active_query_task.take() {
                         handle.abort();
@@ -1877,7 +2177,7 @@ async fn run_tui(
                     if let Some(handle) = active_query_task.take() {
                         handle.abort();
                     }
-                    let client = match build_client(&config.api_key, base_url.clone(), bearer_auth)
+                    let client = match build_client(&worker_config.api_key, base_url.clone(), bearer_auth)
                     {
                         Ok(client) => client,
                         Err(error) => {
@@ -2014,7 +2314,7 @@ async fn run_tui(
         model_setting,
         permission_mode,
         git_branch,
-        config.theme,
+        theme,
     );
     app.run(terminal_guard.terminal_mut(), event_rx, user_tx)
         .await?;
@@ -2716,5 +3016,25 @@ mod tests {
 
         assert_eq!(resolved.model_setting, "override-model");
         assert_eq!(resolved.config.provenance.model, ConfigSource::Env);
+    }
+
+    #[test]
+    fn review_prompt_prioritizes_findings_and_notes_truncation() {
+        let diff = format!("diff --git a/a b/a\n{}", "x".repeat(REVIEW_DIFF_LIMIT + 10));
+        let input = build_review_input("current branch", &diff);
+        assert!(input.truncated);
+        assert!(input.prompt.contains("Findings must come first"));
+        assert!(input.prompt.contains("severity"));
+        assert!(input.prompt.contains("residual risk"));
+        assert!(input.prompt.len() < diff.len() + 1000);
+    }
+
+    #[test]
+    fn pr_review_reports_missing_gh() {
+        if executable_available("gh") {
+            return;
+        }
+        let error = collect_review_input(std::path::Path::new("."), Some("123")).unwrap_err();
+        assert!(error.to_string().contains("PR lookup requires `gh`"));
     }
 }

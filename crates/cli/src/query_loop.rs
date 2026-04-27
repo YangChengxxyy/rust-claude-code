@@ -815,8 +815,8 @@ mod tests {
     use rust_claude_api::MessageStream;
     use rust_claude_core::message::{ContentBlock, Message};
     use rust_claude_tools::{
-        AskUserQuestionResponse, AskUserQuestionTool, BashTool, FileReadTool, Tool, ToolContext,
-        ToolError,
+        AskUserQuestionResponse, AskUserQuestionTool, BashTool, EnterPlanModeTool, FileReadTool,
+        MonitorTool, Tool, ToolContext, ToolError,
     };
     use std::collections::{HashMap, VecDeque};
     use std::time::{Duration, Instant};
@@ -1685,6 +1685,7 @@ mod tests {
             .push(rust_claude_core::permission::PermissionRule {
                 tool_name: "Monitor".to_string(),
                 pattern: Some(command),
+                path_pattern: None,
                 rule_type: rust_claude_core::permission::RuleType::Deny,
             });
         let app_state = Arc::new(Mutex::new(state));

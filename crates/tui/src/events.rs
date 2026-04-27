@@ -28,6 +28,10 @@ pub enum UserCommand {
     ShowConfig,
     ShowCost,
     ShowDiff,
+    ShowDoctor,
+    Review {
+        target: Option<String>,
+    },
     ShowHooks,
     ShowMemory,
     RememberMemory {

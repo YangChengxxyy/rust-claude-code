@@ -191,6 +191,14 @@ impl<C: ModelClient> CompactionService<C> {
     fn collect_project_guidance(&self, cwd: &std::path::Path) -> Option<String> {
         let mut guidance = claude_md::discover_claude_md(cwd)
             .into_iter()
+            .filter(|file| {
+                matches!(
+                    file.source_type,
+                    claude_md::ClaudeMdSourceType::Project
+                        | claude_md::ClaudeMdSourceType::ProjectLocal
+                        | claude_md::ClaudeMdSourceType::Rule
+                )
+            })
             .map(|file| format!("## {}\n{}", file.path.display(), file.content.trim()))
             .filter(|section| !section.trim().is_empty())
             .collect::<Vec<_>>()

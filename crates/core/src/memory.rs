@@ -94,7 +94,96 @@ pub struct MemoryWriteRequest {
     pub body: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoMemoryCandidate {
+    pub request: MemoryWriteRequest,
+    pub trigger: AutoMemoryTrigger,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoMemoryTrigger {
+    UserCorrection,
+    StablePreference,
+    ProjectContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemorySaveOutcome {
+    Created { path: PathBuf },
+    Updated { path: PathBuf, previous_path: String },
+    Skipped { reason: MemorySaveSkipReason },
+}
+
+impl MemorySaveOutcome {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Created { path } => format!("created {}", path.display()),
+            Self::Updated {
+                path,
+                previous_path,
+            } => format!("updated {} at {}", previous_path, path.display()),
+            Self::Skipped { reason } => format!("skipped: {}", reason.as_str()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemorySaveSkipReason {
+    AutoMemoryDisabled,
+    StoreUnavailable,
+}
+
+impl MemorySaveSkipReason {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AutoMemoryDisabled => "auto-memory disabled",
+            Self::StoreUnavailable => "memory store unavailable",
+        }
+    }
+}
+
+pub fn is_auto_memory_disabled() -> bool {
+    std::env::var("CLAUDE_CODE_DISABLE_AUTO_MEMORY")
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+        .unwrap_or(false)
+}
+
+pub fn is_auto_memory_disabled_from_env<I, K, V>(vars: I) -> bool
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    vars.into_iter().any(|(key, value)| {
+        key.as_ref() == "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+            && matches!(
+                value.as_ref().trim().to_ascii_lowercase().as_str(),
+                "1" | "true"
+            )
+    })
+}
+
 pub fn build_memory_contract_prompt() -> String {
+    build_memory_contract_prompt_with_auto_memory(!is_auto_memory_disabled())
+}
+
+pub fn build_memory_contract_prompt_with_auto_memory(auto_memory_enabled: bool) -> String {
+    let auto_memory_section = if auto_memory_enabled {
+        [
+            "## Automatic memory",
+            "- You may request an automatic memory save only for durable corrections, stable user preferences, or non-derivable project context that should persist across sessions.",
+            "- Automatic memory is opportunistic and policy-gated; explicit user requests to remember or forget are authoritative.",
+            "- Prefer updating an existing relevant memory over creating a duplicate.",
+        ]
+    } else {
+        [
+            "## Automatic memory",
+            "- Automatic memory writes are disabled by environment configuration.",
+            "- Do not request automatic memory saves, but continue to follow explicit user memory commands.",
+            "- Manual memory inspection, remember, and forget behavior remains available.",
+        ]
+    };
+
     [
         "# memoryContract",
         "",
@@ -111,7 +200,14 @@ pub fn build_memory_contract_prompt() -> String {
         "- Git history, recent changes, or who changed what.",
         "- Debugging recipes whose authoritative source is the code or commit history.",
         "- Anything already documented in CLAUDE.md or equivalent instruction files.",
+        "- Secrets, credentials, API keys, tokens, or private values.",
+        "- Anything the user explicitly says not to remember.",
         "- Ephemeral task state or current conversation-only details.",
+        "",
+        auto_memory_section[0],
+        auto_memory_section[1],
+        auto_memory_section[2],
+        auto_memory_section[3],
         "",
         "## When to access memory",
         "- When memory seems relevant to the user's request or prior-conversation work.",
@@ -288,6 +384,48 @@ pub fn write_memory_entry(
     fs::write(&path, content)?;
     rebuild_memory_index(store)?;
     Ok(path)
+}
+
+pub fn save_memory_entry_dedup(
+    store: &MemoryStore,
+    request: &MemoryWriteRequest,
+) -> std::io::Result<MemorySaveOutcome> {
+    let scanned = scan_memory_store(store)?;
+    if let Some(duplicate) = find_duplicate_memory(&scanned, request) {
+        let previous_path = duplicate.relative_path.clone();
+        let corrected_request = MemoryWriteRequest {
+            relative_path: previous_path.clone(),
+            frontmatter: request.frontmatter.clone(),
+            body: request.body.clone(),
+        };
+        let path = correct_memory_entry(store, &corrected_request)?;
+        return Ok(MemorySaveOutcome::Updated {
+            path,
+            previous_path,
+        });
+    }
+
+    let path = write_memory_entry(store, request)?;
+    Ok(MemorySaveOutcome::Created { path })
+}
+
+pub fn save_auto_memory_candidate(
+    store: Option<&MemoryStore>,
+    candidate: &AutoMemoryCandidate,
+) -> std::io::Result<MemorySaveOutcome> {
+    if is_auto_memory_disabled() {
+        return Ok(MemorySaveOutcome::Skipped {
+            reason: MemorySaveSkipReason::AutoMemoryDisabled,
+        });
+    }
+
+    let Some(store) = store else {
+        return Ok(MemorySaveOutcome::Skipped {
+            reason: MemorySaveSkipReason::StoreUnavailable,
+        });
+    };
+
+    save_memory_entry_dedup(store, &candidate.request)
 }
 
 /// Update an existing memory file in-place with new frontmatter and body,
@@ -531,6 +669,40 @@ mod tests {
         assert!(prompt.contains("# memoryContract"));
         assert!(prompt.contains("What NOT to save"));
         assert!(prompt.contains("ignore or not use memory"));
+    }
+
+    #[test]
+    fn builds_enabled_auto_memory_guidance() {
+        let prompt = build_memory_contract_prompt_with_auto_memory(true);
+        assert!(prompt.contains("Automatic memory"));
+        assert!(prompt.contains("durable corrections"));
+        assert!(prompt.contains("stable user preferences"));
+        assert!(prompt.contains("Secrets, credentials"));
+    }
+
+    #[test]
+    fn builds_disabled_auto_memory_guidance() {
+        let prompt = build_memory_contract_prompt_with_auto_memory(false);
+        assert!(prompt.contains("Automatic memory writes are disabled"));
+        assert!(prompt.contains("Do not request automatic memory saves"));
+        assert!(prompt.contains("explicit user memory commands"));
+    }
+
+    #[test]
+    fn detects_auto_memory_disable_flag() {
+        assert!(is_auto_memory_disabled_from_env([(
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+            "1"
+        )]));
+        assert!(is_auto_memory_disabled_from_env([(
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+            "true"
+        )]));
+        assert!(!is_auto_memory_disabled_from_env([(
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+            "0"
+        )]));
+        assert!(!is_auto_memory_disabled_from_env([("OTHER", "true")]));
     }
 
     #[test]
@@ -831,6 +1003,155 @@ mod tests {
         let result = correct_memory_entry(&store, &request);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_memory_entry_dedup_creates_new_entry() {
+        let dir = std::env::temp_dir().join(format!("memory-dedup-new-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = MemoryStore {
+            project_root: PathBuf::from("/repo"),
+            memory_dir: dir.clone(),
+            entrypoint: dir.join("MEMORY.md"),
+        };
+
+        let request = MemoryWriteRequest {
+            relative_path: "project/context.md".to_string(),
+            frontmatter: MemoryFrontmatter {
+                name: Some("Project Context".to_string()),
+                memory_type: Some(MemoryType::Project),
+                ..MemoryFrontmatter::default()
+            },
+            body: "Stable project context.".to_string(),
+        };
+
+        let outcome = save_memory_entry_dedup(&store, &request).unwrap();
+        assert!(matches!(outcome, MemorySaveOutcome::Created { .. }));
+        assert!(dir.join("project/context.md").exists());
+        assert!(fs::read_to_string(&store.entrypoint)
+            .unwrap()
+            .contains("[Project Context](project/context.md)"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_memory_entry_dedup_updates_duplicate_path() {
+        let dir = std::env::temp_dir().join(format!("memory-dedup-path-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = MemoryStore {
+            project_root: PathBuf::from("/repo"),
+            memory_dir: dir.clone(),
+            entrypoint: dir.join("MEMORY.md"),
+        };
+        let initial = MemoryWriteRequest {
+            relative_path: "feedback/testing.md".to_string(),
+            frontmatter: MemoryFrontmatter {
+                name: Some("Testing".to_string()),
+                memory_type: Some(MemoryType::Feedback),
+                ..MemoryFrontmatter::default()
+            },
+            body: "Old body.".to_string(),
+        };
+        write_memory_entry(&store, &initial).unwrap();
+
+        let update = MemoryWriteRequest {
+            relative_path: "feedback/testing.md".to_string(),
+            frontmatter: MemoryFrontmatter {
+                name: Some("Testing".to_string()),
+                memory_type: Some(MemoryType::Feedback),
+                ..MemoryFrontmatter::default()
+            },
+            body: "New body.".to_string(),
+        };
+
+        let outcome = save_memory_entry_dedup(&store, &update).unwrap();
+        assert!(matches!(outcome, MemorySaveOutcome::Updated { .. }));
+        let content = fs::read_to_string(dir.join("feedback/testing.md")).unwrap();
+        assert!(content.contains("New body."));
+        assert!(!content.contains("Old body."));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_memory_entry_dedup_updates_duplicate_name_at_existing_path() {
+        let dir = std::env::temp_dir().join(format!("memory-dedup-name-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = MemoryStore {
+            project_root: PathBuf::from("/repo"),
+            memory_dir: dir.clone(),
+            entrypoint: dir.join("MEMORY.md"),
+        };
+        let initial = MemoryWriteRequest {
+            relative_path: "feedback/testing.md".to_string(),
+            frontmatter: MemoryFrontmatter {
+                name: Some("Testing".to_string()),
+                memory_type: Some(MemoryType::Feedback),
+                ..MemoryFrontmatter::default()
+            },
+            body: "Old body.".to_string(),
+        };
+        write_memory_entry(&store, &initial).unwrap();
+
+        let update = MemoryWriteRequest {
+            relative_path: "feedback/other.md".to_string(),
+            frontmatter: MemoryFrontmatter {
+                name: Some("testing".to_string()),
+                memory_type: Some(MemoryType::Feedback),
+                ..MemoryFrontmatter::default()
+            },
+            body: "New body.".to_string(),
+        };
+
+        let outcome = save_memory_entry_dedup(&store, &update).unwrap();
+        assert!(matches!(
+            outcome,
+            MemorySaveOutcome::Updated {
+                previous_path,
+                ..
+            } if previous_path == "feedback/testing.md"
+        ));
+        assert!(dir.join("feedback/testing.md").exists());
+        assert!(!dir.join("feedback/other.md").exists());
+        assert!(fs::read_to_string(dir.join("feedback/testing.md"))
+            .unwrap()
+            .contains("New body."));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn manual_memory_save_ignores_auto_memory_disable_policy() {
+        let dir = std::env::temp_dir().join(format!("memory-manual-save-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = MemoryStore {
+            project_root: PathBuf::from("/repo"),
+            memory_dir: dir.clone(),
+            entrypoint: dir.join("MEMORY.md"),
+        };
+        let request = MemoryWriteRequest {
+            relative_path: "user/style.md".to_string(),
+            frontmatter: MemoryFrontmatter {
+                name: Some("Style".to_string()),
+                memory_type: Some(MemoryType::User),
+                ..MemoryFrontmatter::default()
+            },
+            body: "Prefer concise answers.".to_string(),
+        };
+
+        assert!(is_auto_memory_disabled_from_env([(
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+            "1"
+        )]));
+        let outcome = save_memory_entry_dedup(&store, &request).unwrap();
+        assert!(matches!(outcome, MemorySaveOutcome::Created { .. }));
 
         let _ = fs::remove_dir_all(&dir);
     }

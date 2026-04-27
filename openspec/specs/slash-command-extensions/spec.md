@@ -49,15 +49,19 @@ The TUI SHALL support an enhanced `/clear` command that can clear the visible ch
 - **THEN** the TUI SHALL clear the visible chat output while preserving the underlying conversation context needed for subsequent turns
 
 ### Requirement: Slash commands are registered through a unified command registry
-The TUI SHALL register slash commands through a unified command registry so help output and command dispatch are derived from the same command definitions.
+The TUI SHALL register slash commands through a unified command registry so help output, command dispatch, and slash suggestions are derived from the same command definitions.
 
 #### Scenario: /help lists newly added commands
 - **WHEN** the user runs `/help`
-- **THEN** the help output SHALL include `/diff`, `/cost`, and `/config` with brief descriptions
+- **THEN** the help output SHALL include `/diff`, `/cost`, `/config`, `/resume`, `/context`, `/export`, `/copy`, and `/theme` with brief descriptions
 
 #### Scenario: Unknown slash command is rejected consistently
 - **WHEN** the user enters an unrecognized slash command
 - **THEN** the command dispatcher SHALL return a consistent unknown-command error message
+
+#### Scenario: Slash suggestions reuse registered command definitions
+- **WHEN** the input buffer begins with `/`
+- **THEN** the suggestion overlay SHALL source command candidates from the same registry used by `/help` and command dispatch
 
 ### Requirement: Built-in slash commands include memory inspection
 The built-in slash command set SHALL include `/memory` as a first-party command.
@@ -69,3 +73,36 @@ The built-in slash command set SHALL include `/memory` as a first-party command.
 #### Scenario: Command validation recognizes memory command
 - **WHEN** slash command parsing validates a built-in command token
 - **THEN** `/memory` is accepted as a supported built-in command
+
+### Requirement: Built-in slash commands SHALL include environment diagnostics
+The built-in slash command set SHALL include `/doctor` as a first-party command for diagnosing API, configuration, MCP, tool, and permission health.
+
+#### Scenario: Help output lists doctor command
+- **WHEN** the user requests slash command help or the command list is rendered
+- **THEN** `/doctor` appears in the built-in slash command inventory with a description of its purpose
+
+#### Scenario: Command validation recognizes doctor command
+- **WHEN** slash command parsing validates a built-in command token
+- **THEN** `/doctor` is accepted as a supported built-in command
+
+### Requirement: Built-in slash commands SHALL include code review
+The built-in slash command set SHALL include `/review` as a first-party command for reviewing current branch or PR changes.
+
+#### Scenario: Help output lists review command
+- **WHEN** the user requests slash command help or the command list is rendered
+- **THEN** `/review` appears in the built-in slash command inventory with usage that accepts an optional PR number or URL
+
+#### Scenario: Command validation recognizes review command
+- **WHEN** slash command parsing validates a built-in command token
+- **THEN** `/review` is accepted as a supported built-in command
+
+### Requirement: Slash suggestions present commands and skills as separate groups
+The TUI SHALL present slash-triggered suggestions with separate `Commands` and `Skills` groups so users can distinguish executable slash commands from discoverable skills.
+
+#### Scenario: Grouped suggestion headings are shown
+- **WHEN** the slash suggestion overlay is rendered with at least one command and one skill candidate
+- **THEN** the overlay SHALL show distinct group headings for `Commands` and `Skills`
+
+#### Scenario: Skills are not treated as built-in slash commands
+- **WHEN** a skill appears in the suggestion overlay
+- **THEN** the TUI SHALL present it as a suggestion source without implicitly registering it as an executable built-in slash command

@@ -15,6 +15,26 @@ pub enum UserCommand {
     Compact(CompactStrategy),
     SetMode(String),
     SetModel(String),
+    EnterPlan {
+        description: Option<String>,
+    },
+    RenameSession {
+        name: String,
+    },
+    BranchConversation {
+        name: Option<String>,
+    },
+    Recap,
+    Rewind,
+    AddDirectory {
+        path: PathBuf,
+    },
+    LoginStatus,
+    Logout,
+    SetEffort {
+        level: String,
+    },
+    ShowKeybindings,
     SetTheme(Theme),
     LoadCustomTheme,
     CancelStream,
@@ -132,6 +152,14 @@ pub enum AppEvent {
         cache_creation_input_tokens: u64,
     },
     ContextSnapshot(ContextSnapshot),
+    ConversationReplaced {
+        messages: Vec<ChatMessage>,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+        notice: String,
+    },
     /// An error to display to the user.
     Error(String),
     /// Terminal resize event.

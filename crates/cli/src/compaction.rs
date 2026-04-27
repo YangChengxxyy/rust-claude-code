@@ -134,7 +134,7 @@ impl<C: ModelClient> CompactionService<C> {
         .with_cache_control()]));
 
         // Enable thinking for compaction summary generation on supported models
-        let thinking_config = get_thinking_config_for_model(model, true);
+        let thinking_config = get_thinking_config_for_model(model, true, None);
         if let Some(thinking_value) = thinking_config.to_api_value(self.config.summary_max_tokens) {
             request = request.with_thinking(thinking_value);
         }

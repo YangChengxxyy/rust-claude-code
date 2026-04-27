@@ -22,10 +22,26 @@ const CHAT_SCROLL_PAGE_SIZE: u16 = 8;
 
 const MAX_HISTORY_ENTRIES: usize = 500;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SlashCommandSpec {
     name: &'static str,
     usage: &'static str,
     description: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SlashCommandRegistry {
+    commands: &'static [SlashCommandSpec],
+}
+
+impl SlashCommandRegistry {
+    fn commands(&self) -> &'static [SlashCommandSpec] {
+        self.commands
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.commands.iter().any(|command| command.name == name)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +182,56 @@ const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         description: "Switch model setting",
     },
     SlashCommandSpec {
+        name: "/plan",
+        usage: "/plan [description]",
+        description: "Enter plan mode with optional context",
+    },
+    SlashCommandSpec {
+        name: "/rename",
+        usage: "/rename <name>",
+        description: "Rename current session",
+    },
+    SlashCommandSpec {
+        name: "/branch",
+        usage: "/branch [name]",
+        description: "Fork current conversation history",
+    },
+    SlashCommandSpec {
+        name: "/recap",
+        usage: "/recap",
+        description: "Summarize current session",
+    },
+    SlashCommandSpec {
+        name: "/rewind",
+        usage: "/rewind",
+        description: "Rewind to before the latest user turn",
+    },
+    SlashCommandSpec {
+        name: "/add-dir",
+        usage: "/add-dir <path>",
+        description: "Add an extra workspace directory",
+    },
+    SlashCommandSpec {
+        name: "/login",
+        usage: "/login",
+        description: "Show authentication status and setup guidance",
+    },
+    SlashCommandSpec {
+        name: "/logout",
+        usage: "/logout",
+        description: "Clear local authentication when safe",
+    },
+    SlashCommandSpec {
+        name: "/effort",
+        usage: "/effort [low|medium|high]",
+        description: "Show or set model effort level",
+    },
+    SlashCommandSpec {
+        name: "/keybindings",
+        usage: "/keybindings",
+        description: "Show keyboard shortcuts",
+    },
+    SlashCommandSpec {
         name: "/theme",
         usage: "/theme [dark|light|custom]",
         description: "Show or switch TUI theme",
@@ -212,6 +278,12 @@ const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     },
 ];
 
+fn slash_command_registry() -> SlashCommandRegistry {
+    SlashCommandRegistry {
+        commands: SLASH_COMMANDS,
+    }
+}
+
 const SKILL_SUGGESTIONS: &[SkillSuggestionSpec] = &[
     SkillSuggestionSpec {
         name: "brainstorming",
@@ -237,7 +309,7 @@ const SKILL_SUGGESTIONS: &[SkillSuggestionSpec] = &[
 
 fn slash_command_help_text() -> String {
     let mut text = String::from("Available commands:\n");
-    for command in SLASH_COMMANDS {
+    for command in slash_command_registry().commands() {
         text.push_str(&format!(
             "  {:<22} — {}\n",
             command.usage, command.description
@@ -250,7 +322,7 @@ fn slash_command_help_text() -> String {
 }
 
 fn has_slash_command(name: &str) -> bool {
-    SLASH_COMMANDS.iter().any(|command| command.name == name)
+    slash_command_registry().contains(name)
 }
 
 /// State of the modal permission confirmation dialog.
@@ -709,7 +781,7 @@ impl App {
         let query = query.to_lowercase();
         let mut items = Vec::new();
 
-        for command in SLASH_COMMANDS {
+        for command in slash_command_registry().commands() {
             let match_text = format!(
                 "{} {} {}",
                 command.name.to_lowercase(),
@@ -824,6 +896,7 @@ impl App {
         true
     }
 
+    #[allow(dead_code)]
     fn slash_suggestion_render_row_count(&self) -> usize {
         let (rows, _) = ui::build_slash_suggestion_render_rows(self, self.terminal_width as usize);
         rows.len()
@@ -1756,6 +1829,87 @@ impl App {
                     self.sync_chat_viewport();
                 }
             }
+            "/plan" => {
+                let description = cmd
+                    .strip_prefix("/plan")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string);
+                let _ = user_tx.send(UserCommand::EnterPlan { description }).await;
+            }
+            "/rename" => {
+                let name = cmd.strip_prefix("/rename").map(str::trim).unwrap_or("");
+                if name.is_empty() {
+                    self.messages
+                        .push(ChatMessage::System("Usage: /rename <name>".into()));
+                    self.sync_chat_viewport();
+                } else {
+                    let _ = user_tx
+                        .send(UserCommand::RenameSession {
+                            name: name.to_string(),
+                        })
+                        .await;
+                }
+            }
+            "/branch" => {
+                let name = cmd
+                    .strip_prefix("/branch")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string);
+                let _ = user_tx.send(UserCommand::BranchConversation { name }).await;
+            }
+            "/recap" => {
+                let _ = user_tx.send(UserCommand::Recap).await;
+            }
+            "/rewind" => {
+                let _ = user_tx.send(UserCommand::Rewind).await;
+            }
+            "/add-dir" => {
+                let path = cmd.strip_prefix("/add-dir").map(str::trim).unwrap_or("");
+                if path.is_empty() {
+                    self.messages
+                        .push(ChatMessage::System("Usage: /add-dir <path>".into()));
+                    self.sync_chat_viewport();
+                } else {
+                    let _ = user_tx
+                        .send(UserCommand::AddDirectory {
+                            path: PathBuf::from(path),
+                        })
+                        .await;
+                }
+            }
+            "/login" => {
+                let _ = user_tx.send(UserCommand::LoginStatus).await;
+            }
+            "/logout" => {
+                let _ = user_tx.send(UserCommand::Logout).await;
+            }
+            "/effort" => match arg {
+                None => {
+                    let _ = user_tx
+                        .send(UserCommand::SetEffort {
+                            level: String::new(),
+                        })
+                        .await;
+                }
+                Some(level) if parts.len() == 2 && matches!(level, "low" | "medium" | "high") => {
+                    let _ = user_tx
+                        .send(UserCommand::SetEffort {
+                            level: level.to_string(),
+                        })
+                        .await;
+                }
+                _ => {
+                    self.messages.push(ChatMessage::System(
+                        "Usage: /effort [low|medium|high]".into(),
+                    ));
+                    self.sync_chat_viewport();
+                }
+            },
+            "/keybindings" => {
+                let _ = user_tx.send(UserCommand::ShowKeybindings).await;
+            }
             "/theme" => {
                 if let Some(theme_str) = arg {
                     let theme = match theme_str {
@@ -2182,6 +2336,28 @@ impl App {
                         self.terminal_width,
                     )));
                 self.sync_chat_viewport();
+            }
+            AppEvent::ConversationReplaced {
+                messages,
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+                notice,
+            } => {
+                self.messages = messages;
+                self.messages.push(ChatMessage::System(notice));
+                self.input_tokens = input_tokens;
+                self.output_tokens = output_tokens;
+                self.cache_read_input_tokens = cache_read_input_tokens;
+                self.cache_creation_input_tokens = cache_creation_input_tokens;
+                self.streaming_text.clear();
+                self.streaming_text_raw.clear();
+                self.streaming_thinking.clear();
+                self.streaming_tool = None;
+                self.is_streaming = false;
+                self.is_thinking = false;
+                self.jump_chat_to_latest();
             }
             AppEvent::Error(msg) => {
                 self.messages.push(ChatMessage::System(msg));
@@ -2638,6 +2814,92 @@ mod tests {
         assert!(has_slash_command("/context"));
         assert!(has_slash_command("/export"));
         assert!(has_slash_command("/copy"));
+    }
+
+    #[test]
+    fn test_command_registry_is_help_and_validation_source() {
+        let registry = slash_command_registry();
+        let help = slash_command_help_text();
+
+        for command in registry.commands() {
+            assert!(has_slash_command(command.name));
+            assert!(help.contains(command.usage));
+            assert!(help.contains(command.description));
+        }
+    }
+
+    #[test]
+    fn test_iteration_30_commands_are_registered() {
+        for command in [
+            "/plan",
+            "/rename",
+            "/branch",
+            "/recap",
+            "/rewind",
+            "/add-dir",
+            "/login",
+            "/logout",
+            "/effort",
+            "/keybindings",
+        ] {
+            assert!(has_slash_command(command), "missing {command}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_iteration_30_commands_route_to_user_commands() {
+        let cases = [
+            (
+                "/plan investigate",
+                UserCommand::EnterPlan {
+                    description: Some("investigate".into()),
+                },
+            ),
+            (
+                "/rename frontend cleanup",
+                UserCommand::RenameSession {
+                    name: "frontend cleanup".into(),
+                },
+            ),
+            (
+                "/branch experiment-a",
+                UserCommand::BranchConversation {
+                    name: Some("experiment-a".into()),
+                },
+            ),
+            ("/recap", UserCommand::Recap),
+            ("/rewind", UserCommand::Rewind),
+            (
+                "/add-dir ../shared",
+                UserCommand::AddDirectory {
+                    path: PathBuf::from("../shared"),
+                },
+            ),
+            ("/login", UserCommand::LoginStatus),
+            ("/logout", UserCommand::Logout),
+            (
+                "/effort high",
+                UserCommand::SetEffort {
+                    level: "high".into(),
+                },
+            ),
+            ("/keybindings", UserCommand::ShowKeybindings),
+        ];
+
+        for (input, expected) in cases {
+            let mut app = App::new(
+                "test-model".into(),
+                "test-model".into(),
+                "Default".into(),
+                None,
+                Theme::Dark,
+            );
+            let (tx, mut rx) = mpsc::channel(1);
+            app.input_buffer = InputBuffer::from_text(input);
+            app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+            assert_eq!(rx.recv().await, Some(expected));
+        }
     }
 
     #[tokio::test]
@@ -4045,7 +4307,8 @@ mod tests {
         app.input_buffer = InputBuffer::from_text("/");
         app.refresh_slash_suggestions();
 
-        assert_eq!(app.slash_suggestion_render_row_count(), 31);
+        let expected = slash_command_registry().commands().len() + SKILL_SUGGESTIONS.len() + 3;
+        assert_eq!(app.slash_suggestion_render_row_count(), expected);
     }
 
     #[tokio::test]

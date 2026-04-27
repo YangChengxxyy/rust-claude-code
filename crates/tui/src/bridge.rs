@@ -197,6 +197,28 @@ impl TuiBridge {
             .await;
     }
 
+    pub async fn send_conversation_replaced(
+        &self,
+        messages: Vec<ChatMessage>,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+        notice: String,
+    ) {
+        let _ = self
+            .event_tx
+            .send(AppEvent::ConversationReplaced {
+                messages,
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+                notice,
+            })
+            .await;
+    }
+
     pub async fn send_error(&self, message: &str) {
         let _ = self
             .event_tx

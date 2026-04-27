@@ -444,7 +444,7 @@ where
 
         // Determine thinking config based on model
         let thinking_config =
-            get_thinking_config_for_model(&runtime_model, state.session.thinking_enabled);
+            get_thinking_config_for_model(&runtime_model, state.session.thinking_enabled, state.session.thinking_budget);
         let max_tokens = state.session.max_tokens;
 
         let mut request =

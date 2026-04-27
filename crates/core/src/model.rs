@@ -5,7 +5,9 @@ const DEFAULT_OPUS_MODEL: &str = "claude-opus-4-6";
 const DEFAULT_SONNET_MODEL: &str = "claude-sonnet-4-6";
 const DEFAULT_HAIKU_MODEL: &str = "claude-haiku-4-5-20251001";
 const TOKENS_200K_THRESHOLD: u32 = 200_000;
-const DEFAULT_THINKING_BUDGET: u32 = 10_000;
+pub const EFFORT_LOW_THINKING_BUDGET: u32 = 3_000;
+pub const EFFORT_MEDIUM_THINKING_BUDGET: u32 = 10_000;
+const DEFAULT_THINKING_BUDGET: u32 = EFFORT_MEDIUM_THINKING_BUDGET;
 
 /// Configuration for extended thinking in API requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,13 +59,21 @@ pub fn model_supports_adaptive_thinking(model: &str) -> bool {
 }
 
 /// Determine the appropriate ThinkingConfig for a given model.
-pub fn get_thinking_config_for_model(model: &str, thinking_enabled: bool) -> ThinkingConfig {
+pub fn get_thinking_config_for_model(
+    model: &str,
+    thinking_enabled: bool,
+    budget_override: Option<u32>,
+) -> ThinkingConfig {
     if !thinking_enabled {
         return ThinkingConfig::Disabled;
     }
 
     if !model_supports_thinking(model) {
         return ThinkingConfig::Disabled;
+    }
+
+    if let Some(budget_tokens) = budget_override {
+        return ThinkingConfig::Enabled { budget_tokens };
     }
 
     if model_supports_adaptive_thinking(model) {
@@ -347,25 +357,36 @@ mod tests {
 
     #[test]
     fn get_thinking_config_opus_4_6_returns_adaptive() {
-        let config = get_thinking_config_for_model("claude-opus-4-6", true);
+        let config = get_thinking_config_for_model("claude-opus-4-6", true, None);
         assert_eq!(config, ThinkingConfig::Adaptive);
     }
 
     #[test]
     fn get_thinking_config_disabled_returns_disabled() {
-        let config = get_thinking_config_for_model("claude-opus-4-6", false);
+        let config = get_thinking_config_for_model("claude-opus-4-6", false, None);
         assert_eq!(config, ThinkingConfig::Disabled);
     }
 
     #[test]
     fn get_thinking_config_claude_3_returns_disabled() {
-        let config = get_thinking_config_for_model("claude-3-5-sonnet-20241022", true);
+        let config = get_thinking_config_for_model("claude-3-5-sonnet-20241022", true, None);
         assert_eq!(config, ThinkingConfig::Disabled);
     }
 
     #[test]
     fn get_thinking_config_haiku_4_returns_enabled() {
-        let config = get_thinking_config_for_model("claude-haiku-4-5-20251001", true);
+        let config = get_thinking_config_for_model("claude-haiku-4-5-20251001", true, None);
         assert!(matches!(config, ThinkingConfig::Enabled { .. }));
+    }
+
+    #[test]
+    fn get_thinking_config_uses_budget_override_for_thinking_models() {
+        let config = get_thinking_config_for_model("claude-opus-4-6", true, Some(3_000));
+        assert_eq!(
+            config,
+            ThinkingConfig::Enabled {
+                budget_tokens: 3_000
+            }
+        );
     }
 }

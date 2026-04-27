@@ -46,6 +46,8 @@ pub struct SessionSettings {
     pub stream: bool,
     #[serde(default = "default_thinking_enabled")]
     pub thinking_enabled: bool,
+    #[serde(default)]
+    pub thinking_budget: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +79,7 @@ pub struct AppState {
     pub always_deny_rules: Vec<PermissionRule>,
     pub session: SessionSettings,
     pub cwd: std::path::PathBuf,
+    pub extra_cwds: Vec<std::path::PathBuf>,
     pub total_usage: Usage,
     pub config: Config,
     pub config_provenance: ConfigProvenance,
@@ -105,8 +108,10 @@ impl AppState {
                 max_tokens: 16384,
                 stream: true,
                 thinking_enabled: true,
+                thinking_budget: None,
             },
             cwd,
+            extra_cwds: Vec::new(),
             total_usage: Usage {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -133,6 +138,7 @@ impl AppState {
                 max_tokens: config.max_tokens,
                 stream: config.stream,
                 thinking_enabled: true,
+                thinking_budget: None,
             },
             config: config.clone(),
             config_provenance: config.provenance.clone(),
@@ -484,6 +490,7 @@ mod tests {
             max_tokens: 4096,
             stream: false,
             thinking_enabled: true,
+            thinking_budget: Some(3_000),
         };
 
         let json = serde_json::to_string(&settings).unwrap();
@@ -494,6 +501,7 @@ mod tests {
         assert_eq!(parsed.system_prompt.as_deref(), Some("Be concise"));
         assert_eq!(parsed.max_tokens, 4096);
         assert!(!parsed.stream);
+        assert_eq!(parsed.thinking_budget, Some(3_000));
     }
 
     #[test]

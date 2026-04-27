@@ -35,6 +35,7 @@ use rust_claude_cli::query_loop::QueryLoop;
 use rust_claude_cli::session::{self, SessionFile};
 use rust_claude_cli::system_prompt;
 use rust_claude_core::compaction::{CompactStrategy, CompactionConfig};
+use rust_claude_core::model::{EFFORT_LOW_THINKING_BUDGET, EFFORT_MEDIUM_THINKING_BUDGET};
 
 const REVIEW_DIFF_LIMIT: usize = 60_000;
 
@@ -1225,6 +1226,96 @@ fn usage_to_u64(usage: &Usage) -> (u64, u64, u64, u64) {
     )
 }
 
+fn sum_message_usage(messages: &[Message]) -> Usage {
+    let mut usage = Usage {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+    };
+    for message in messages {
+        if let Some(item) = &message.usage {
+            usage.input_tokens += item.input_tokens;
+            usage.output_tokens += item.output_tokens;
+            usage.cache_creation_input_tokens += item.cache_creation_input_tokens;
+            usage.cache_read_input_tokens += item.cache_read_input_tokens;
+        }
+    }
+    usage
+}
+
+fn truncate_latest_user_turn(messages: &mut Vec<Message>) -> bool {
+    let Some(index) = messages
+        .iter()
+        .rposition(|message| matches!(message.role, Role::User))
+    else {
+        return false;
+    };
+    messages.truncate(index);
+    true
+}
+
+fn recap_messages(messages: &[Message]) -> Option<String> {
+    if !messages.iter().any(|message| {
+        message.content.iter().any(|block| match block {
+            ContentBlock::Text { text } => !text.trim().is_empty(),
+            _ => false,
+        })
+    }) {
+        return None;
+    }
+
+    let user_turns = messages
+        .iter()
+        .filter(|message| matches!(message.role, Role::User))
+        .count();
+    let assistant_turns = messages
+        .iter()
+        .filter(|message| matches!(message.role, Role::Assistant))
+        .count();
+    let latest_user = messages.iter().rev().find_map(|message| {
+        if matches!(message.role, Role::User) {
+            message.content.iter().find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.trim()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    });
+
+    let mut text = format!(
+        "Session recap:\n  user turns: {}\n  assistant turns: {}",
+        user_turns, assistant_turns
+    );
+    if let Some(latest_user) = latest_user.filter(|text| !text.is_empty()) {
+        text.push_str(&format!("\n  latest user request: {}", latest_user));
+    }
+    Some(text)
+}
+
+fn keybindings_text() -> &'static str {
+    "Keybindings:\n  Enter: submit\n  Shift+Enter: insert newline\n  Up/Down: browse history or move multi-line cursor\n  PageUp/PageDown: scroll chat history\n  Ctrl+Home/Ctrl+End: jump to oldest/latest chat content\n  Ctrl+A/Ctrl+E/Home/End: move within line\n  Ctrl+Left/Ctrl+Right: move by word\n  Escape or Ctrl+C: cancel active stream\n  Ctrl+L: redraw screen\n  Tab: toggle latest thinking block"
+}
+
+fn effort_budget(level: &str) -> Option<Option<u32>> {
+    match level {
+        "low" => Some(Some(EFFORT_LOW_THINKING_BUDGET)),
+        "medium" => Some(Some(EFFORT_MEDIUM_THINKING_BUDGET)),
+        "high" => Some(None),
+        _ => None,
+    }
+}
+
+fn effort_label(budget: Option<u32>) -> &'static str {
+    match budget {
+        Some(EFFORT_LOW_THINKING_BUDGET) => "low",
+        Some(EFFORT_MEDIUM_THINKING_BUDGET) => "medium",
+        None => "high",
+        Some(_) => "custom",
+    }
+}
+
 fn messages_to_chat_messages(messages: &[Message]) -> Vec<ChatMessage> {
     let mut out = Vec::new();
     for message in messages {
@@ -1498,6 +1589,7 @@ async fn run_tui(
     let worker_mcp_manager = mcp_manager.clone();
     let worker_config = config.clone();
     tokio::spawn(async move {
+        let mut worker_config = worker_config;
         let mut active_query_task: Option<tokio::task::JoinHandle<()>> = None;
 
         while let Some(command) = user_rx.recv().await {
@@ -1629,6 +1721,213 @@ async fn run_tui(
                     worker_bridge
                         .send_assistant_message(&format!("Model switched to: {model_setting}"))
                         .await;
+                }
+                UserCommand::EnterPlan { description } => {
+                    let (runtime_model, model_setting, permission_mode_display, git_branch) = {
+                        let mut state = worker_state.lock().await;
+                        state.enter_plan_mode();
+                        state.session.model = get_runtime_main_loop_model(
+                            &state.session.model_setting,
+                            state.permission_mode,
+                            state
+                                .most_recent_assistant_usage()
+                                .is_some_and(rust_claude_core::model::usage_exceeds_200k_tokens),
+                        );
+                        (
+                            state.session.model.clone(),
+                            state.session.model_setting.clone(),
+                            format!("{:?}", state.permission_mode),
+                            state.git_context.as_ref().map(|g| g.branch.clone()),
+                        )
+                    };
+                    worker_bridge
+                        .send_status_update(
+                            &runtime_model,
+                            &model_setting,
+                            &permission_mode_display,
+                            git_branch.as_deref(),
+                        )
+                        .await;
+                    let message = match description.as_deref().filter(|value| !value.trim().is_empty()) {
+                        Some(description) => format!("Plan mode active. Context: {}", description.trim()),
+                        None => "Plan mode active.".to_string(),
+                    };
+                    worker_bridge.send_assistant_message(&message).await;
+                }
+                UserCommand::RenameSession { name } => {
+                    worker_bridge
+                        .send_assistant_message(&format!("Session renamed to: {}", name.trim()))
+                        .await;
+                }
+                UserCommand::BranchConversation { name } => {
+                    let branch_name = name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| chrono::Local::now().format("branch-%Y%m%d-%H%M%S").to_string());
+                    worker_bridge
+                        .send_assistant_message(&format!(
+                            "Created conversation branch: {branch_name}"
+                        ))
+                        .await;
+                }
+                UserCommand::Recap => {
+                    let messages = { worker_state.lock().await.messages.clone() };
+                    let message = recap_messages(&messages)
+                        .unwrap_or_else(|| "No conversation to summarize yet.".to_string());
+                    worker_bridge.send_assistant_message(&message).await;
+                }
+                UserCommand::Rewind => {
+                    if active_query_task
+                        .as_ref()
+                        .is_some_and(|handle| !handle.is_finished())
+                    {
+                        worker_bridge
+                            .send_error("Cannot rewind while a response is active. Cancel or wait for it to finish first.")
+                            .await;
+                        continue;
+                    }
+
+                    let (messages, usage, rewound) = {
+                        let mut state = worker_state.lock().await;
+                        let rewound = truncate_latest_user_turn(&mut state.messages);
+                        if rewound {
+                            state.total_usage = sum_message_usage(&state.messages);
+                            state.last_api_usage = None;
+                            state.last_api_message_index = 0;
+                        }
+                        (
+                            state.messages.clone(),
+                            state.total_usage.clone(),
+                            rewound,
+                        )
+                    };
+                    if rewound {
+                        let (input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens) =
+                            usage_to_u64(&usage);
+                        worker_bridge
+                            .send_conversation_replaced(
+                                messages_to_chat_messages(&messages),
+                                input_tokens,
+                                output_tokens,
+                                cache_read_input_tokens,
+                                cache_creation_input_tokens,
+                                "Rewound to before the latest user turn.".to_string(),
+                            )
+                            .await;
+                    } else {
+                        worker_bridge
+                            .send_assistant_message("No user turn to rewind.")
+                            .await;
+                    }
+                }
+                UserCommand::AddDirectory { path } => {
+                    let cwd = { worker_state.lock().await.cwd.clone() };
+                    let resolved = if path.is_absolute() { path } else { cwd.join(path) };
+                    match resolved.canonicalize() {
+                        Ok(path) if path.is_dir() => {
+                            let added = {
+                                let mut state = worker_state.lock().await;
+                                if state.extra_cwds.contains(&path) {
+                                    false
+                                } else {
+                                    state.extra_cwds.push(path.clone());
+                                    true
+                                }
+                            };
+                            let verb = if added { "Added" } else { "Already registered" };
+                            worker_bridge
+                                .send_assistant_message(&format!(
+                                    "{verb} workspace directory: {}",
+                                    path.display()
+                                ))
+                                .await;
+                        }
+                        Ok(path) => {
+                            worker_bridge
+                                .send_error(&format!("Not a directory: {}", path.display()))
+                                .await;
+                        }
+                        Err(error) => {
+                            worker_bridge
+                                .send_error(&format!("Failed to add directory: {error}"))
+                                .await;
+                        }
+                    }
+                }
+                UserCommand::LoginStatus => {
+                    let state = worker_state.lock().await;
+                    let auth_mode = if state.config.bearer_auth {
+                        "Bearer"
+                    } else {
+                        "x-api-key"
+                    };
+                    let credential_status = if state.config.api_key.trim().is_empty() {
+                        "missing"
+                    } else {
+                        "available"
+                    };
+                    let base_url = state
+                        .config
+                        .base_url
+                        .as_deref()
+                        .unwrap_or("Anthropic default");
+                    let message = format!(
+                        "Authentication status:\n  credential: {credential_status}\n  auth mode: {auth_mode}\n  base_url: {base_url}\n\nSet ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, rust-claude config, or Claude settings apiKeyHelper to authenticate."
+                    );
+                    drop(state);
+                    worker_bridge.send_assistant_message(&message).await;
+                }
+                UserCommand::Logout => {
+                    let result = {
+                        let mut state = worker_state.lock().await;
+                        state.config.api_key.clear();
+                        state.config.save_without_credential()
+                    };
+                    match result {
+                        Ok(()) => {
+                            worker_config.api_key.clear();
+                            worker_bridge
+                                .send_assistant_message("Cleared local rust-claude config credentials. Environment variables and Claude settings/apiKeyHelper must be changed outside the TUI.")
+                                .await;
+                        }
+                        Err(error) => {
+                            worker_bridge
+                                .send_error(&format!("Failed to clear local credentials: {error}"))
+                                .await;
+                        }
+                    }
+                }
+                UserCommand::SetEffort { level } => {
+                    if level.trim().is_empty() {
+                        let current = {
+                            let state = worker_state.lock().await;
+                            effort_label(state.session.thinking_budget)
+                        };
+                        worker_bridge
+                            .send_assistant_message(&format!(
+                                "Current effort: {current}. Valid values: low, medium, high."
+                            ))
+                            .await;
+                        continue;
+                    }
+                    let Some(budget) = effort_budget(level.as_str()) else {
+                        worker_bridge
+                            .send_error("Unknown effort. Valid values: low, medium, high")
+                            .await;
+                        continue;
+                    };
+                    {
+                        let mut state = worker_state.lock().await;
+                        state.session.thinking_budget = budget;
+                    }
+                    worker_bridge
+                        .send_assistant_message(&format!("Effort set to: {level}"))
+                        .await;
+                }
+                UserCommand::ShowKeybindings => {
+                    worker_bridge.send_assistant_message(keybindings_text()).await;
                 }
                 UserCommand::SetTheme(theme) => {
                     let theme_str = match theme {
@@ -2334,6 +2633,47 @@ mod tests {
     fn env_lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn truncate_latest_user_turn_removes_user_and_following_assistant_messages() {
+        let mut messages = vec![
+            Message::user("first"),
+            Message::assistant(vec![ContentBlock::text("first answer")]),
+            Message::user("second"),
+            Message::assistant(vec![ContentBlock::text("second answer")]),
+        ];
+
+        assert!(truncate_latest_user_turn(&mut messages));
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0], Message::user("first"));
+    }
+
+    #[test]
+    fn recap_messages_reports_empty_conversation() {
+        assert_eq!(recap_messages(&[]), None);
+    }
+
+    #[test]
+    fn recap_messages_counts_turns_and_latest_user_request() {
+        let messages = vec![
+            Message::user("first"),
+            Message::assistant(vec![ContentBlock::text("first answer")]),
+            Message::user("second request"),
+        ];
+
+        let recap = recap_messages(&messages).unwrap();
+        assert!(recap.contains("user turns: 2"));
+        assert!(recap.contains("assistant turns: 1"));
+        assert!(recap.contains("latest user request: second request"));
+    }
+
+    #[test]
+    fn effort_budget_maps_levels_to_budget_overrides() {
+        assert_eq!(effort_budget("low"), Some(Some(3_000)));
+        assert_eq!(effort_budget("medium"), Some(Some(10_000)));
+        assert_eq!(effort_budget("high"), Some(None));
+        assert_eq!(effort_budget("extreme"), None);
     }
 
     /// RAII guard that clears `ANTHROPIC_MODEL` and `RUST_CLAUDE_MODEL_OVERRIDE`

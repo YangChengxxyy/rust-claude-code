@@ -215,6 +215,31 @@ impl Config {
         Ok(())
     }
 
+    pub fn save_without_credential(&self) -> Result<(), ConfigError> {
+        let config_path = Self::config_path()?;
+
+        if let Some(parent) = config_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let raw = RawConfig {
+            api_key: None,
+            model: Some(self.model.clone()),
+            base_url: self.base_url.clone(),
+            bearer_auth: Some(self.bearer_auth),
+            system_prompt: self.system_prompt.clone(),
+            max_tokens: Some(self.max_tokens),
+            permission_mode: Some(self.permission_mode),
+            always_allow: Some(self.always_allow.clone()),
+            always_deny: Some(self.always_deny.clone()),
+            stream: Some(self.stream),
+            theme: Some(self.theme),
+        };
+        let content = serde_json::to_string_pretty(&raw)?;
+        std::fs::write(&config_path, content)?;
+        Ok(())
+    }
+
     fn config_path() -> Result<PathBuf, ConfigError> {
         let home = std::env::var("HOME").map_err(|_| ConfigError::NoHomeDir)?;
         Ok(PathBuf::from(home)
@@ -345,29 +370,29 @@ impl Config {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct RawConfig {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     api_key: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     model: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     base_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     bearer_auth: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     system_prompt: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     permission_mode: Option<crate::permission::PermissionMode>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     always_allow: Option<Vec<crate::permission::PermissionRule>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     always_deny: Option<Vec<crate::permission::PermissionRule>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<Theme>,
 }
 
@@ -571,5 +596,19 @@ mod tests {
 
         let err = Config::load().unwrap_err();
         assert!(matches!(err, ConfigError::MissingApiKey));
+    }
+
+    #[test]
+    fn test_save_without_credential_omits_api_key() {
+        let _guard = env_lock().lock().unwrap();
+        let _env = TestEnv::new("save-without-credential");
+        let config = Config::with_credential("local-key".to_string(), false)
+            .with_model("claude-test");
+
+        config.save_without_credential().unwrap();
+
+        let content = fs::read_to_string(Config::config_path().unwrap()).unwrap();
+        assert!(!content.contains("api_key"));
+        assert!(content.contains("claude-test"));
     }
 }

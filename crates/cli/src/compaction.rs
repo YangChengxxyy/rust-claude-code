@@ -4,6 +4,7 @@ use rust_claude_core::compaction::needs_compaction;
 
 use rust_claude_api::{ApiMessage, CreateMessageRequest, SystemBlock, SystemPrompt};
 use rust_claude_core::{
+    claude_md,
     compaction::{
         estimate_current_tokens, estimate_message_tokens, estimate_system_prompt_tokens,
         partition_messages, CompactionConfig, CompactionResult,
@@ -12,7 +13,7 @@ use rust_claude_core::{
     model::{
         get_runtime_main_loop_model, get_thinking_config_for_model, normalize_model_string_for_api,
     },
-    state::AppState,
+    state::{AppState, McpToolUsage, PermissionDecisionRecord},
 };
 use tokio::sync::Mutex;
 
@@ -31,6 +32,13 @@ IMPORTANT: Your summary MUST preserve the following:
 Format the summary as a clear, structured narrative. Use bullet points for lists of files or tool calls. Do NOT include meta-commentary about the summarization process itself.
 
 The summary will replace the original messages in the conversation, so it must contain enough context for the conversation to continue naturally."#;
+
+#[derive(Debug, Clone, Default)]
+struct CompactionContext {
+    project_guidance: Option<String>,
+    used_mcp_tools: Vec<McpToolUsage>,
+    permission_decisions: Vec<PermissionDecisionRecord>,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum CompactionError {
@@ -59,6 +67,7 @@ impl<C: ModelClient> CompactionService<C> {
         &self,
         messages_to_compact: &[Message],
         model: &str,
+        context: &CompactionContext,
     ) -> Result<String, CompactionError> {
         // Format the messages into a readable transcript for summarization
         let mut transcript = String::new();
@@ -105,9 +114,14 @@ impl<C: ModelClient> CompactionService<C> {
             }
         }
 
-        let user_message = ApiMessage::from(&Message::user(format!(
-            "Please summarize the following conversation:\n\n{transcript}"
-        )));
+        let context_text = self.format_context(context);
+        let user_message = ApiMessage::from(&Message::user(if context_text.is_empty() {
+            format!("Please summarize the following conversation:\n\n{transcript}")
+        } else {
+            format!(
+                "Please summarize the following conversation. Preserve the supplemental context in the resulting summary where relevant.\n\n{context_text}\n\nConversation:\n\n{transcript}"
+            )
+        }));
 
         let mut request =
             CreateMessageRequest::new(normalize_model_string_for_api(model), vec![user_message])
@@ -144,6 +158,93 @@ impl<C: ModelClient> CompactionService<C> {
         Ok(summary)
     }
 
+    fn collect_context(&self, state: &AppState) -> CompactionContext {
+        let project_guidance = self.collect_project_guidance(&state.cwd);
+        let used_mcp_tools = state
+            .used_mcp_tools
+            .iter()
+            .rev()
+            .take(self.config.mcp_tool_limit)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let permission_decisions = state
+            .recent_permission_decisions
+            .iter()
+            .rev()
+            .take(self.config.permission_decision_limit)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+
+        CompactionContext {
+            project_guidance,
+            used_mcp_tools,
+            permission_decisions,
+        }
+    }
+
+    fn collect_project_guidance(&self, cwd: &std::path::Path) -> Option<String> {
+        let mut guidance = claude_md::discover_claude_md(cwd)
+            .into_iter()
+            .map(|file| format!("## {}\n{}", file.path.display(), file.content.trim()))
+            .filter(|section| !section.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        if guidance.trim().is_empty() {
+            return None;
+        }
+
+        if guidance.len() > self.config.project_guidance_char_limit {
+            let mut end = self.config.project_guidance_char_limit;
+            while end > 0 && !guidance.is_char_boundary(end) {
+                end -= 1;
+            }
+            guidance.truncate(end);
+            guidance.push_str("\n... project guidance truncated ...");
+        }
+
+        Some(guidance)
+    }
+
+    fn format_context(&self, context: &CompactionContext) -> String {
+        let mut sections = Vec::new();
+        if let Some(project_guidance) = &context.project_guidance {
+            sections.push(format!("Project guidance:\n{project_guidance}"));
+        }
+        if !context.used_mcp_tools.is_empty() {
+            let tools = context
+                .used_mcp_tools
+                .iter()
+                .map(|usage| format!("- {} / {}", usage.server_name, usage.tool_name))
+                .collect::<Vec<_>>()
+                .join("\n");
+            sections.push(format!("Used MCP tools:\n{tools}"));
+        }
+        if !context.permission_decisions.is_empty() {
+            let decisions = context
+                .permission_decisions
+                .iter()
+                .map(|decision| match &decision.command {
+                    Some(command) => format!(
+                        "- {}: {} ({})",
+                        decision.tool_name, decision.decision, command
+                    ),
+                    None => format!("- {}: {}", decision.tool_name, decision.decision),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            sections.push(format!("Recent permission decisions:\n{decisions}"));
+        }
+
+        sections.join("\n\n")
+    }
+
     /// Perform compaction on the conversation in AppState.
     ///
     /// Returns `Ok(result)` if compaction was performed, or an error if
@@ -159,6 +260,7 @@ impl<C: ModelClient> CompactionService<C> {
             model_setting,
             last_api_usage,
             last_api_message_index,
+            context,
         ) = {
             let state = app_state.lock().await;
             (
@@ -168,6 +270,7 @@ impl<C: ModelClient> CompactionService<C> {
                 state.session.model_setting.clone(),
                 state.last_api_usage.clone(),
                 state.last_api_message_index,
+                self.collect_context(&state),
             )
         };
 
@@ -193,10 +296,18 @@ impl<C: ModelClient> CompactionService<C> {
         let preserved_count = to_preserve.len();
 
         let runtime_model = get_runtime_main_loop_model(&model_setting, permission_mode, false);
-        let summary = self.generate_summary(&to_compact, &runtime_model).await?;
-        let summary_length = summary.len();
+        let summary = self
+            .generate_summary(&to_compact, &runtime_model, &context)
+            .await?;
+        let context_text = self.format_context(&context);
+        let compacted_text = if context_text.is_empty() {
+            format!("[COMPACTED]\n\n{summary}")
+        } else {
+            format!("[COMPACTED]\n\n{summary}\n\n[COMPACTION CONTEXT]\n\n{context_text}")
+        };
+        let summary_length = compacted_text.len();
 
-        let summary_message = Message::user(format!("[COMPACTED]\n\n{summary}"));
+        let summary_message = Message::user(compacted_text);
 
         let mut new_messages = Vec::with_capacity(1 + preserved_count);
         new_messages.push(summary_message);
@@ -275,6 +386,9 @@ mod tests {
     use async_trait::async_trait;
     use rust_claude_api::{ApiError, CreateMessageResponse, MessageStream};
     use rust_claude_core::message::Usage;
+    use rust_claude_core::state::{McpToolUsage, PermissionDecisionRecord};
+    use std::collections::VecDeque;
+    use std::fs;
 
     struct MockCompactionClient {
         summary_text: String,
@@ -328,6 +442,28 @@ mod tests {
             .collect()
     }
 
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "rust-claude-compaction-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn compact_test_config() -> CompactionConfig {
+        CompactionConfig {
+            context_window: 1000,
+            threshold_ratio: 0.8,
+            preserve_ratio: 0.5,
+            summary_max_tokens: 8192,
+            project_guidance_char_limit: 200,
+            mcp_tool_limit: 2,
+            permission_decision_limit: 2,
+        }
+    }
+
     #[tokio::test]
     async fn test_compact_success() {
         let client = MockCompactionClient {
@@ -339,6 +475,7 @@ mod tests {
             threshold_ratio: 0.8,
             preserve_ratio: 0.5,
             summary_max_tokens: 8192,
+            ..Default::default()
         };
         let service = CompactionService::new(client, config);
 
@@ -447,6 +584,7 @@ mod tests {
             threshold_ratio: 0.8,
             preserve_ratio: 0.5,
             summary_max_tokens: 8192,
+            ..Default::default()
         };
         let service = CompactionService::new(client, config);
 
@@ -460,5 +598,172 @@ mod tests {
 
         let result = service.compact_if_needed(&state).await.unwrap();
         assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_compact_includes_project_guidance_when_available() {
+        let dir = temp_dir("guidance");
+        fs::write(dir.join("CLAUDE.md"), "# Rules\nUse careful Rust.").unwrap();
+        let service = CompactionService::new(
+            MockCompactionClient {
+                summary_text: "summary".to_string(),
+                should_fail: false,
+            },
+            compact_test_config(),
+        );
+        let state = Arc::new(Mutex::new(AppState::new(dir.clone())));
+        {
+            let mut s = state.lock().await;
+            for msg in make_messages(10, 400) {
+                s.add_message(msg);
+            }
+        }
+
+        service.compact(&state).await.unwrap();
+        let s = state.lock().await;
+        if let ContentBlock::Text { text } = &s.messages[0].content[0] {
+            assert!(text.contains("Project guidance"));
+            assert!(text.contains("Use careful Rust"));
+        } else {
+            panic!("first message should be text");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_compact_omits_project_guidance_when_unavailable() {
+        let dir = temp_dir("no-guidance");
+        let service = CompactionService::new(
+            MockCompactionClient {
+                summary_text: "summary".to_string(),
+                should_fail: false,
+            },
+            compact_test_config(),
+        );
+        let state = Arc::new(Mutex::new(AppState::new(dir.clone())));
+        {
+            let mut s = state.lock().await;
+            for msg in make_messages(10, 400) {
+                s.add_message(msg);
+            }
+        }
+
+        service.compact(&state).await.unwrap();
+        let s = state.lock().await;
+        if let ContentBlock::Text { text } = &s.messages[0].content[0] {
+            assert!(!text.contains("Project guidance"));
+        } else {
+            panic!("first message should be text");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_compact_includes_mcp_usage_when_available() {
+        let dir = temp_dir("mcp");
+        let service = CompactionService::new(
+            MockCompactionClient {
+                summary_text: "summary".to_string(),
+                should_fail: false,
+            },
+            compact_test_config(),
+        );
+        let state = Arc::new(Mutex::new(AppState::new(dir.clone())));
+        {
+            let mut s = state.lock().await;
+            s.used_mcp_tools.push(McpToolUsage {
+                server_name: "filesystem".to_string(),
+                tool_name: "read_file".to_string(),
+            });
+            for msg in make_messages(10, 400) {
+                s.add_message(msg);
+            }
+        }
+
+        service.compact(&state).await.unwrap();
+        let s = state.lock().await;
+        if let ContentBlock::Text { text } = &s.messages[0].content[0] {
+            assert!(text.contains("Used MCP tools"));
+            assert!(text.contains("filesystem / read_file"));
+        } else {
+            panic!("first message should be text");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_compact_omits_mcp_usage_when_unavailable() {
+        let dir = temp_dir("no-mcp");
+        let service = CompactionService::new(
+            MockCompactionClient {
+                summary_text: "summary".to_string(),
+                should_fail: false,
+            },
+            compact_test_config(),
+        );
+        let state = Arc::new(Mutex::new(AppState::new(dir.clone())));
+        {
+            let mut s = state.lock().await;
+            for msg in make_messages(10, 400) {
+                s.add_message(msg);
+            }
+        }
+
+        service.compact(&state).await.unwrap();
+        let s = state.lock().await;
+        if let ContentBlock::Text { text } = &s.messages[0].content[0] {
+            assert!(!text.contains("Used MCP tools"));
+        } else {
+            panic!("first message should be text");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_compact_bounds_recent_permission_decisions() {
+        let dir = temp_dir("permissions");
+        let service = CompactionService::new(
+            MockCompactionClient {
+                summary_text: "summary".to_string(),
+                should_fail: false,
+            },
+            compact_test_config(),
+        );
+        let state = Arc::new(Mutex::new(AppState::new(dir.clone())));
+        {
+            let mut s = state.lock().await;
+            s.recent_permission_decisions = VecDeque::from(vec![
+                PermissionDecisionRecord {
+                    tool_name: "Bash".to_string(),
+                    decision: "allowed".to_string(),
+                    command: Some("one".to_string()),
+                },
+                PermissionDecisionRecord {
+                    tool_name: "Monitor".to_string(),
+                    decision: "denied".to_string(),
+                    command: Some("two".to_string()),
+                },
+                PermissionDecisionRecord {
+                    tool_name: "FileWrite".to_string(),
+                    decision: "ask_unavailable".to_string(),
+                    command: None,
+                },
+            ]);
+            for msg in make_messages(10, 400) {
+                s.add_message(msg);
+            }
+        }
+
+        service.compact(&state).await.unwrap();
+        let s = state.lock().await;
+        if let ContentBlock::Text { text } = &s.messages[0].content[0] {
+            assert!(text.contains("Recent permission decisions"));
+            assert!(!text.contains("one"));
+            assert!(text.contains("Monitor: denied (two)"));
+            assert!(text.contains("FileWrite: ask_unavailable"));
+        } else {
+            panic!("first message should be text");
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 }

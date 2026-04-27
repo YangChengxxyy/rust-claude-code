@@ -678,7 +678,6 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-
     #[test]
     fn test_manual_verification_local_and_rule_files_are_discovered() {
         let config_dir = make_temp_dir("manual-context-cfg");
@@ -703,7 +702,9 @@ mod tests {
         }
 
         assert!(results.iter().any(|f| f.path.ends_with("CLAUDE.local.md")));
-        assert!(results.iter().any(|f| f.path.ends_with(".claude/rules/test.md")));
+        assert!(results
+            .iter()
+            .any(|f| f.path.ends_with(".claude/rules/test.md")));
 
         let local_idx = results
             .iter()

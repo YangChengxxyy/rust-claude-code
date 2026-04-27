@@ -7,6 +7,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent,
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
+use rust_claude_core::compaction::CompactStrategy;
 use rust_claude_core::config::Theme;
 use rust_claude_core::session::{ContextSnapshot, SessionSummary};
 use rust_claude_core::state::TodoItem;
@@ -101,8 +102,8 @@ const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     },
     SlashCommandSpec {
         name: "/compact",
-        usage: "/compact",
-        description: "Compact conversation history",
+        usage: "/compact [default|aggressive|preserve-recent]",
+        description: "Compact conversation history with an optional retention strategy",
     },
     SlashCommandSpec {
         name: "/config",
@@ -1320,7 +1321,9 @@ impl App {
                 }
             }
             KeyCode::Tab | KeyCode::BackTab => {
-                if !self.is_streaming && key.code == KeyCode::Tab && self.apply_selected_suggestion()
+                if !self.is_streaming
+                    && key.code == KeyCode::Tab
+                    && self.apply_selected_suggestion()
                 {
                 } else if !self.is_streaming
                     && key.code == KeyCode::BackTab
@@ -1653,20 +1656,42 @@ impl App {
                 }
                 self.sync_chat_viewport();
             }
-            "/compact" => match user_tx.send(UserCommand::Compact).await {
-                Ok(()) => {
-                    self.messages.push(ChatMessage::System(
-                        "Compacting conversation history...".into(),
-                    ));
-                    self.sync_chat_viewport();
+            "/compact" => {
+                let strategy = match arg {
+                    None => CompactStrategy::Default,
+                    Some(value) if parts.len() == 2 => match value.parse::<CompactStrategy>() {
+                        Ok(strategy) => strategy,
+                        Err(error) => {
+                            self.messages.push(ChatMessage::System(error));
+                            self.sync_chat_viewport();
+                            return;
+                        }
+                    },
+                    Some(_) => {
+                        self.messages.push(ChatMessage::System(
+                            "Usage: /compact [default|aggressive|preserve-recent]".into(),
+                        ));
+                        self.sync_chat_viewport();
+                        return;
+                    }
+                };
+
+                match user_tx.send(UserCommand::Compact(strategy)).await {
+                    Ok(()) => {
+                        self.messages.push(ChatMessage::System(format!(
+                            "Compacting conversation history with {} strategy...",
+                            strategy.as_str()
+                        )));
+                        self.sync_chat_viewport();
+                    }
+                    Err(_) => {
+                        self.messages.push(ChatMessage::System(
+                            "Error: failed to send compact request".into(),
+                        ));
+                        self.sync_chat_viewport();
+                    }
                 }
-                Err(_) => {
-                    self.messages.push(ChatMessage::System(
-                        "Error: failed to send compact request".into(),
-                    ));
-                    self.sync_chat_viewport();
-                }
-            },
+            }
             "/mode" => {
                 if let Some(mode_str) = arg {
                     match mode_str {
@@ -2583,10 +2608,69 @@ mod tests {
         assert!(help.contains("/export [path]"));
         assert!(help.contains("/copy"));
         assert!(help.contains("/theme [dark|light|custom]"));
+        assert!(help.contains("/compact [default|aggressive|preserve-recent]"));
         assert!(has_slash_command("/resume"));
         assert!(has_slash_command("/context"));
         assert!(has_slash_command("/export"));
         assert!(has_slash_command("/copy"));
+    }
+
+    #[tokio::test]
+    async fn test_compact_command_without_arg_sends_default_strategy() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text("/compact");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        assert_eq!(
+            rx.recv().await,
+            Some(UserCommand::Compact(CompactStrategy::Default))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compact_command_with_named_strategy() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text("/compact preserve-recent");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        assert_eq!(
+            rx.recv().await,
+            Some(UserCommand::Compact(CompactStrategy::PreserveRecent))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_compact_command_with_unknown_strategy_shows_error() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text("/compact tiny");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        assert!(rx.try_recv().is_err());
+        assert!(matches!(
+            app.messages.last(),
+            Some(ChatMessage::System(message)) if message.contains("unknown compact strategy")
+        ));
     }
 
     #[test]
@@ -3607,7 +3691,6 @@ mod tests {
         let truncated = truncate(&input, 199);
         assert_eq!(truncated, format!("{}...", "a".repeat(198)));
     }
-
     #[test]
     fn test_extract_diff_info_file_edit() {
         let input = serde_json::json!({
@@ -3715,7 +3798,10 @@ mod tests {
 
         let suggestions = app.slash_suggestions.as_ref().unwrap();
         assert!(suggestions.items.iter().any(|item| item.label == "/help"));
-        assert!(suggestions.items.iter().all(|item| item.matches_query("he")));
+        assert!(suggestions
+            .items
+            .iter()
+            .all(|item| item.matches_query("he")));
     }
 
     #[tokio::test]
@@ -3736,7 +3822,9 @@ mod tests {
 
         assert!(rx.try_recv().is_err());
         let last = app.messages.last();
-        assert!(matches!(last, Some(ChatMessage::System(text)) if text.contains("Unknown command: /he")));
+        assert!(
+            matches!(last, Some(ChatMessage::System(text)) if text.contains("Unknown command: /he"))
+        );
     }
 
     #[tokio::test]
@@ -3758,7 +3846,10 @@ mod tests {
 
         assert_eq!(app.input_text(), "/");
         assert!(app.history_index.is_none());
-        assert_eq!(app.slash_suggestions.as_ref().unwrap().selected, initial + 1);
+        assert_eq!(
+            app.slash_suggestions.as_ref().unwrap().selected,
+            initial + 1
+        );
     }
 
     #[tokio::test]
@@ -3937,7 +4028,11 @@ mod tests {
 
         let overlay_column = 2;
         let overlay_row = 4;
-        app.handle_mouse_event(mouse_at(MouseEventKind::ScrollDown, overlay_column, overlay_row));
+        app.handle_mouse_event(mouse_at(
+            MouseEventKind::ScrollDown,
+            overlay_column,
+            overlay_row,
+        ));
 
         assert!(app.slash_suggestions.as_ref().unwrap().scroll > 0);
     }
@@ -3953,7 +4048,9 @@ mod tests {
         );
         app.terminal_width = 80;
         app.terminal_height = 10;
-        app.messages = (0..50).map(|i| ChatMessage::Assistant(format!("msg {i}"))).collect();
+        app.messages = (0..50)
+            .map(|i| ChatMessage::Assistant(format!("msg {i}")))
+            .collect();
         app.follow_output = false;
         app.scroll_offset = 5;
         app.input_buffer = InputBuffer::from_text("/");
@@ -3961,7 +4058,11 @@ mod tests {
 
         let overlay_column = 2;
         let overlay_row = 4;
-        app.handle_mouse_event(mouse_at(MouseEventKind::ScrollDown, overlay_column, overlay_row));
+        app.handle_mouse_event(mouse_at(
+            MouseEventKind::ScrollDown,
+            overlay_column,
+            overlay_row,
+        ));
 
         assert_eq!(app.scroll_offset, 5);
     }
@@ -4015,7 +4116,9 @@ mod tests {
         app.handle_key_event(key(KeyCode::Enter), &tx).await;
 
         let last = app.messages.last();
-        assert!(matches!(last, Some(ChatMessage::System(text)) if text.contains("Available commands:")));
+        assert!(
+            matches!(last, Some(ChatMessage::System(text)) if text.contains("Available commands:"))
+        );
     }
 
     #[test]

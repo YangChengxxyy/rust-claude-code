@@ -1,5 +1,5 @@
 use crossterm::event::{KeyEvent, MouseEvent};
-use rust_claude_core::compaction::CompactionResult;
+use rust_claude_core::compaction::{CompactStrategy, CompactionResult};
 use rust_claude_core::config::{ConfigProvenance, Theme};
 use rust_claude_core::session::{ContextSnapshot, SessionSummary};
 use rust_claude_core::state::TodoItem;
@@ -12,7 +12,7 @@ use crate::diff::DiffLine;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserCommand {
     Prompt(String),
-    Compact,
+    Compact(CompactStrategy),
     SetMode(String),
     SetModel(String),
     SetTheme(Theme),

@@ -781,7 +781,6 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
-
     #[test]
     fn test_manual_verification_settings_local_model_override() {
         let root = make_temp_dir("manual-local-model-override");

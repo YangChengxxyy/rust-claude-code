@@ -98,7 +98,10 @@ impl Default for ToolRegistry {
 mod tests {
     use super::*;
     use crate::bash::BashTool;
-    use crate::{FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, TodoWriteTool};
+    use crate::{
+        EnterPlanModeTool, ExitPlanModeTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
+        GrepTool, MonitorTool, TodoWriteTool,
+    };
 
     #[test]
     fn test_register_and_get() {
@@ -159,11 +162,14 @@ mod tests {
     fn test_register_all_core_tools() {
         let mut registry = ToolRegistry::new();
         registry.register(BashTool::new());
+        registry.register(EnterPlanModeTool::new());
+        registry.register(ExitPlanModeTool::new());
         registry.register(FileReadTool::new());
         registry.register(FileEditTool::new());
         registry.register(FileWriteTool::new());
         registry.register(GlobTool::new());
         registry.register(GrepTool::new());
+        registry.register(MonitorTool::new());
         registry.register(TodoWriteTool::new());
 
         let names = registry.names();
@@ -171,11 +177,14 @@ mod tests {
             names,
             vec![
                 "Bash",
+                "EnterPlanMode",
+                "ExitPlanMode",
                 "FileEdit",
                 "FileRead",
                 "FileWrite",
                 "Glob",
                 "Grep",
+                "Monitor",
                 "TodoWrite"
             ]
         );

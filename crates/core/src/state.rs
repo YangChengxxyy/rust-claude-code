@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 
 use crate::config::{Config, ConfigProvenance};
 use crate::git::GitContextSnapshot;
@@ -47,6 +48,19 @@ pub struct SessionSettings {
     pub thinking_enabled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpToolUsage {
+    pub server_name: String,
+    pub tool_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionDecisionRecord {
+    pub tool_name: String,
+    pub decision: String,
+    pub command: Option<String>,
+}
+
 fn default_thinking_enabled() -> bool {
     true
 }
@@ -56,6 +70,9 @@ pub struct AppState {
     pub messages: Vec<Message>,
     pub tasks: Vec<Task>,
     pub permission_mode: PermissionMode,
+    pub previous_permission_mode: Option<PermissionMode>,
+    pub used_mcp_tools: Vec<McpToolUsage>,
+    pub recent_permission_decisions: VecDeque<PermissionDecisionRecord>,
     pub always_allow_rules: Vec<PermissionRule>,
     pub always_deny_rules: Vec<PermissionRule>,
     pub session: SessionSettings,
@@ -76,6 +93,9 @@ impl AppState {
             messages: Vec::new(),
             tasks: Vec::new(),
             permission_mode: PermissionMode::Default,
+            previous_permission_mode: None,
+            used_mcp_tools: Vec::new(),
+            recent_permission_decisions: VecDeque::new(),
             always_allow_rules: Vec::new(),
             always_deny_rules: Vec::new(),
             session: SessionSettings {
@@ -172,6 +192,66 @@ impl AppState {
             .check(request, &self.always_deny_rules, &self.always_allow_rules)
     }
 
+    pub fn enter_plan_mode(&mut self) -> bool {
+        if self.permission_mode == PermissionMode::Plan {
+            return false;
+        }
+
+        self.previous_permission_mode = Some(self.permission_mode);
+        self.permission_mode = PermissionMode::Plan;
+        true
+    }
+
+    pub fn exit_plan_mode(&mut self) -> Option<PermissionMode> {
+        let previous = self.previous_permission_mode.take()?;
+        self.permission_mode = previous;
+        Some(previous)
+    }
+
+    pub fn record_mcp_tool_usage(&mut self, tool_name: &str, limit: usize) {
+        let Some(rest) = tool_name.strip_prefix("mcp__") else {
+            return;
+        };
+        // Use rsplit_once to split on the *last* "__" so server names containing
+        // double underscores (e.g. "my__server") are handled correctly.
+        let Some((server_name, tool_name)) = rest.rsplit_once("__") else {
+            return;
+        };
+        let usage = McpToolUsage {
+            server_name: server_name.to_string(),
+            tool_name: tool_name.to_string(),
+        };
+        if self.used_mcp_tools.contains(&usage) {
+            return;
+        }
+        self.used_mcp_tools.push(usage);
+        if self.used_mcp_tools.len() > limit {
+            let excess = self.used_mcp_tools.len() - limit;
+            self.used_mcp_tools.drain(0..excess);
+        }
+    }
+
+    pub fn record_permission_decision(
+        &mut self,
+        tool_name: impl Into<String>,
+        decision: impl Into<String>,
+        command: Option<String>,
+        limit: usize,
+    ) {
+        if limit == 0 {
+            return;
+        }
+        self.recent_permission_decisions
+            .push_back(PermissionDecisionRecord {
+                tool_name: tool_name.into(),
+                decision: decision.into(),
+                command,
+            });
+        while self.recent_permission_decisions.len() > limit {
+            self.recent_permission_decisions.pop_front();
+        }
+    }
+
     /// Record API usage from the most recent response, for usage-based token counting.
     pub fn update_api_usage(&mut self, usage: Usage) {
         self.last_api_usage = Some(usage);
@@ -196,6 +276,9 @@ mod tests {
         assert!(state.messages.is_empty());
         assert!(state.tasks.is_empty());
         assert_eq!(state.permission_mode, PermissionMode::Default);
+        assert_eq!(state.previous_permission_mode, None);
+        assert!(state.used_mcp_tools.is_empty());
+        assert!(state.recent_permission_decisions.is_empty());
         assert!(state.always_allow_rules.is_empty());
         assert!(state.always_deny_rules.is_empty());
         assert_eq!(state.session.model, "claude-sonnet-4-20250514");
@@ -411,5 +494,72 @@ mod tests {
         assert_eq!(parsed.system_prompt.as_deref(), Some("Be concise"));
         assert_eq!(parsed.max_tokens, 4096);
         assert!(!parsed.stream);
+    }
+
+    #[test]
+    fn test_plan_mode_transition_saves_and_restores_previous_mode() {
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.permission_mode = PermissionMode::AcceptEdits;
+
+        assert!(state.enter_plan_mode());
+        assert_eq!(state.permission_mode, PermissionMode::Plan);
+        assert_eq!(
+            state.previous_permission_mode,
+            Some(PermissionMode::AcceptEdits)
+        );
+
+        assert_eq!(state.exit_plan_mode(), Some(PermissionMode::AcceptEdits));
+        assert_eq!(state.permission_mode, PermissionMode::AcceptEdits);
+        assert_eq!(state.previous_permission_mode, None);
+    }
+
+    #[test]
+    fn test_enter_plan_mode_is_idempotent_when_already_plan() {
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.permission_mode = PermissionMode::Plan;
+
+        assert!(!state.enter_plan_mode());
+        assert_eq!(state.permission_mode, PermissionMode::Plan);
+        assert_eq!(state.previous_permission_mode, None);
+    }
+
+    #[test]
+    fn test_record_mcp_tool_usage_is_bounded_and_deduplicated() {
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+
+        state.record_mcp_tool_usage("mcp__fs__read", 2);
+        state.record_mcp_tool_usage("mcp__fs__read", 2);
+        state.record_mcp_tool_usage("mcp__git__status", 2);
+        state.record_mcp_tool_usage("mcp__db__query", 2);
+
+        assert_eq!(state.used_mcp_tools.len(), 2);
+        assert_eq!(state.used_mcp_tools[0].server_name, "git");
+        assert_eq!(state.used_mcp_tools[1].tool_name, "query");
+    }
+
+    #[test]
+    fn test_record_mcp_tool_usage_handles_server_name_with_double_underscores() {
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+
+        // Server name "my__server" contains "__", which previously would be
+        // mis-parsed by split_once("__"). Using rsplit_once fixes this.
+        state.record_mcp_tool_usage("mcp__my__server__read_file", 10);
+
+        assert_eq!(state.used_mcp_tools.len(), 1);
+        assert_eq!(state.used_mcp_tools[0].server_name, "my__server");
+        assert_eq!(state.used_mcp_tools[0].tool_name, "read_file");
+    }
+
+    #[test]
+    fn test_record_permission_decisions_keeps_most_recent() {
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+
+        state.record_permission_decision("Bash", "allowed", Some("one".into()), 2);
+        state.record_permission_decision("Bash", "denied", Some("two".into()), 2);
+        state.record_permission_decision("FileWrite", "ask", None, 2);
+
+        assert_eq!(state.recent_permission_decisions.len(), 2);
+        assert_eq!(state.recent_permission_decisions[0].decision, "denied");
+        assert_eq!(state.recent_permission_decisions[1].tool_name, "FileWrite");
     }
 }

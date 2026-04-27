@@ -1616,7 +1616,10 @@ mod tests {
             is_read_only: false,
             file_path: Some("/repo/other/file.rs"),
         });
-        assert!(matches!(non_matching, PermissionCheck::NeedsConfirmation { .. }));
+        assert!(matches!(
+            non_matching,
+            PermissionCheck::NeedsConfirmation { .. }
+        ));
 
         let denied = manager.check_permission(PermissionRequest {
             tool_name: "FileEdit",

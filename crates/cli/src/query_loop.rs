@@ -21,6 +21,9 @@ use rust_claude_core::{
 use rust_claude_tools::{ToolContext, ToolRegistry, UserQuestionCallback};
 use tokio::sync::Mutex;
 
+const SESSION_MCP_TOOL_LIMIT: usize = 20;
+const SESSION_PERMISSION_DECISION_LIMIT: usize = 10;
+
 use crate::hooks::HookRunner;
 
 #[derive(Debug, thiserror::Error)]
@@ -487,7 +490,7 @@ where
         input: &serde_json::Value,
         is_read_only: bool,
     ) -> Option<(String, bool)> {
-        let command = if tool_name == "Bash" {
+        let command = if tool_name == "Bash" || tool_name == "Monitor" {
             input.get("command").and_then(|v| v.as_str())
         } else {
             None
@@ -521,15 +524,40 @@ where
         };
 
         match check {
-            PermissionCheck::Allowed => None,
+            PermissionCheck::Allowed => {
+                let mut state = app_state.lock().await;
+                state.record_permission_decision(
+                    tool_name,
+                    "allowed",
+                    command.map(|value| value.to_string()),
+                    SESSION_PERMISSION_DECISION_LIMIT,
+                );
+                None
+            }
             PermissionCheck::Denied { reason } => {
+                let mut state = app_state.lock().await;
+                state.record_permission_decision(
+                    tool_name,
+                    "denied",
+                    command.map(|value| value.to_string()),
+                    SESSION_PERMISSION_DECISION_LIMIT,
+                );
                 Some((format!("Permission denied: {reason}"), true))
             }
             PermissionCheck::NeedsConfirmation { prompt: _ } => {
                 if let Some(bridge) = &self.bridge {
                     // Send permission request to TUI and wait for response
                     match bridge.request_permission(tool_name, input).await {
-                        Some(rust_claude_tui::PermissionResponse::Allow) => None,
+                        Some(rust_claude_tui::PermissionResponse::Allow) => {
+                            let mut state = app_state.lock().await;
+                            state.record_permission_decision(
+                                tool_name,
+                                "allowed",
+                                command.map(|value| value.to_string()),
+                                SESSION_PERMISSION_DECISION_LIMIT,
+                            );
+                            None
+                        }
                         Some(rust_claude_tui::PermissionResponse::AlwaysAllow) => {
                             let mut state = app_state.lock().await;
                             let rule = rust_claude_core::permission::PermissionRule {
@@ -542,9 +570,22 @@ where
                                 rule_type: rust_claude_core::permission::RuleType::Allow,
                             };
                             state.always_allow_rules.push(rule);
+                            state.record_permission_decision(
+                                tool_name,
+                                "allowed",
+                                command.map(|value| value.to_string()),
+                                SESSION_PERMISSION_DECISION_LIMIT,
+                            );
                             None
                         }
                         Some(rust_claude_tui::PermissionResponse::Deny) => {
+                            let mut state = app_state.lock().await;
+                            state.record_permission_decision(
+                                tool_name,
+                                "denied",
+                                command.map(|value| value.to_string()),
+                                SESSION_PERMISSION_DECISION_LIMIT,
+                            );
                             Some(("Permission denied by user".to_string(), true))
                         }
                         Some(rust_claude_tui::PermissionResponse::AlwaysDeny) => {
@@ -556,11 +597,33 @@ where
                                 rule_type: rust_claude_core::permission::RuleType::Deny,
                             };
                             state.always_deny_rules.push(rule);
+                            state.record_permission_decision(
+                                tool_name,
+                                "denied",
+                                command.map(|value| value.to_string()),
+                                SESSION_PERMISSION_DECISION_LIMIT,
+                            );
                             Some(("Permission denied by user (always deny)".to_string(), true))
                         }
-                        None => Some(("Permission denied: dialog unavailable".to_string(), true)),
+                        None => {
+                            let mut state = app_state.lock().await;
+                            state.record_permission_decision(
+                                tool_name,
+                                "ask_unavailable",
+                                command.map(|value| value.to_string()),
+                                SESSION_PERMISSION_DECISION_LIMIT,
+                            );
+                            Some(("Permission denied: dialog unavailable".to_string(), true))
+                        }
                     }
                 } else {
+                    let mut state = app_state.lock().await;
+                    state.record_permission_decision(
+                        tool_name,
+                        "ask_unavailable",
+                        command.map(|value| value.to_string()),
+                        SESSION_PERMISSION_DECISION_LIMIT,
+                    );
                     Some((
                         "Permission denied: interactive confirmation not yet supported".to_string(),
                         true,
@@ -604,6 +667,11 @@ where
                 }
                 tool_results.push((index, tool_use_id.to_string(), denial_msg, is_error));
                 continue;
+            }
+
+            if name.starts_with("mcp__") {
+                let mut state = app_state.lock().await;
+                state.record_mcp_tool_usage(name, SESSION_MCP_TOOL_LIMIT);
             }
 
             // Run PreToolUse hooks after permission check passes
@@ -1561,6 +1629,152 @@ mod tests {
             } => {
                 assert!(*is_error);
                 assert!(content.contains("Permission denied"));
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_loop_denies_monitor_command_before_spawn() {
+        let marker =
+            std::env::temp_dir().join(format!("rust-claude-monitor-denied-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let command = format!("printf started > {}", marker.display());
+
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                CreateMessageResponse {
+                    id: "msg_1".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::tool_use(
+                        "tool_1",
+                        "Monitor",
+                        serde_json::json!({
+                            "command": command,
+                            "pattern": "started",
+                            "timeout": 1_000
+                        }),
+                    )],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_2".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("done")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+            ])),
+        };
+
+        let mut tools = ToolRegistry::new();
+        tools.register(MonitorTool::new());
+        let loop_runner = QueryLoop::new(client, tools);
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.permission_mode = rust_claude_core::permission::PermissionMode::Default;
+        state
+            .always_deny_rules
+            .push(rust_claude_core::permission::PermissionRule {
+                tool_name: "Monitor".to_string(),
+                pattern: Some(command),
+                rule_type: rust_claude_core::permission::RuleType::Deny,
+            });
+        let app_state = Arc::new(Mutex::new(state));
+
+        let final_message = loop_runner.run(app_state.clone(), "monitor").await.unwrap();
+        assert_eq!(final_message.content, vec![ContentBlock::text("done")]);
+        assert!(!marker.exists());
+
+        let state = app_state.lock().await;
+        match &state.messages[2].content[0] {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(*is_error);
+                assert!(content.contains("Permission denied"));
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_query_loop_denies_mutating_tool_after_entering_plan_mode() {
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                CreateMessageResponse {
+                    id: "msg_1".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::tool_use(
+                        "tool_1",
+                        "EnterPlanMode",
+                        serde_json::json!({}),
+                    )],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_2".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::tool_use(
+                        "tool_2",
+                        "SlowWrite",
+                        serde_json::json!({}),
+                    )],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_3".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("planned")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+            ])),
+        };
+
+        let mut tools = ToolRegistry::new();
+        tools.register(EnterPlanModeTool::new());
+        tools.register(SlowWriteTool);
+        let loop_runner = QueryLoop::new(client, tools).with_max_rounds(4);
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.permission_mode = rust_claude_core::permission::PermissionMode::BypassPermissions;
+        let app_state = Arc::new(Mutex::new(state));
+
+        let final_message = loop_runner.run(app_state.clone(), "plan").await.unwrap();
+        assert_eq!(final_message.content, vec![ContentBlock::text("planned")]);
+
+        let state = app_state.lock().await;
+        assert_eq!(
+            state.permission_mode,
+            rust_claude_core::permission::PermissionMode::Plan
+        );
+        assert_eq!(state.messages.len(), 6);
+        match &state.messages[4].content[0] {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(*is_error);
+                assert!(content.contains("Permission denied"));
+                assert!(content.contains("Plan mode"));
             }
             other => panic!("Expected ToolResult, got {:?}", other),
         }

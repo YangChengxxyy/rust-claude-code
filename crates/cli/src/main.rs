@@ -20,9 +20,9 @@ use rust_claude_core::{
 };
 use rust_claude_mcp::{McpManager, McpManagerConfig};
 use rust_claude_tools::{
-    register_mcp_tools, AgentContext, AgentTool, AskUserQuestionTool, BashTool, FileEditTool,
-    FileReadTool, FileWriteTool, GlobTool, GrepTool, LspTool, NotebookEditTool, TaskTool,
-    ToolRegistry, WebFetchTool, WebSearchTool,
+    register_mcp_tools, AgentContext, AgentTool, AskUserQuestionTool, BashTool, EnterPlanModeTool,
+    ExitPlanModeTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, LspTool,
+    MonitorTool, NotebookEditTool, TaskTool, ToolRegistry, WebFetchTool, WebSearchTool,
 };
 use rust_claude_tui::{App, AppEvent, ChatMessage, TerminalGuard, TuiBridge, UserCommand};
 use tokio::sync::{mpsc, Mutex};
@@ -32,7 +32,7 @@ use rust_claude_cli::hooks::HookRunner;
 use rust_claude_cli::query_loop::QueryLoop;
 use rust_claude_cli::session::{self, SessionFile};
 use rust_claude_cli::system_prompt;
-use rust_claude_core::compaction::CompactionConfig;
+use rust_claude_core::compaction::{CompactStrategy, CompactionConfig};
 
 #[derive(Debug, Clone)]
 struct ModeArg(PermissionMode);
@@ -992,12 +992,15 @@ fn build_tools() -> ToolRegistry {
     tools.register(AgentTool::new());
     tools.register(AskUserQuestionTool::new());
     tools.register(BashTool::new());
+    tools.register(EnterPlanModeTool::new());
+    tools.register(ExitPlanModeTool::new());
     tools.register(FileReadTool::new());
     tools.register(FileEditTool::new());
     tools.register(FileWriteTool::new());
     tools.register(GlobTool::new());
     tools.register(GrepTool::new());
     tools.register(LspTool::new());
+    tools.register(MonitorTool::new());
     tools.register(NotebookEditTool::new());
     tools.register(TaskTool::new());
     tools.register(WebFetchTool::new());
@@ -1285,12 +1288,11 @@ async fn run_tui(
     let worker_hook_runner = hook_runner;
     let worker_mcp_manager = mcp_manager.clone();
     tokio::spawn(async move {
-        let compaction_config = CompactionConfig::default();
         let mut active_query_task: Option<tokio::task::JoinHandle<()>> = None;
 
         while let Some(command) = user_rx.recv().await {
             match command {
-                UserCommand::Compact => {
+                UserCommand::Compact(strategy) => {
                     let client = match build_client(&config.api_key, base_url.clone(), bearer_auth)
                     {
                         Ok(client) => client,
@@ -1301,6 +1303,7 @@ async fn run_tui(
                     };
 
                     worker_bridge.send_compaction_start().await;
+                    let compaction_config = strategy.config();
                     let service = CompactionService::new(client, compaction_config.clone());
                     match service.force_compact(&worker_state).await {
                         Ok(result) => worker_bridge.send_compaction_complete(result).await,
@@ -1344,7 +1347,16 @@ async fn run_tui(
 
                     let (runtime_model, model_setting, permission_mode_display, git_branch) = {
                         let mut state = worker_state.lock().await;
-                        state.permission_mode = mode;
+                        if mode == PermissionMode::Plan {
+                            // Use enter_plan_mode() so previous_permission_mode is
+                            // saved, allowing ExitPlanMode tool to restore it later.
+                            state.enter_plan_mode();
+                        } else {
+                            // Clear any saved plan-mode state when explicitly
+                            // switching away from plan mode via /mode.
+                            state.previous_permission_mode = None;
+                            state.permission_mode = mode;
+                        }
                         state.session.model = get_runtime_main_loop_model(
                             &state.session.model_setting,
                             state.permission_mode,
@@ -1880,7 +1892,7 @@ async fn run_tui(
                     let agent_context = build_agent_context(Arc::new(client.clone()));
                     let mut query_loop = QueryLoop::new(client, tools)
                         .with_bridge(worker_bridge.clone())
-                        .with_compaction_config(compaction_config.clone())
+                        .with_compaction_config(CompactStrategy::Default.config())
                         .with_agent_context(agent_context);
                     if let Some(runner) = &worker_hook_runner {
                         query_loop = query_loop.with_hook_runner(runner.clone());
@@ -2415,13 +2427,16 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-
     #[test]
     fn manual_verification_permissions_output_contains_rules() {
         let mut state = AppState::new(PathBuf::from("/repo"));
         state.permission_mode = PermissionMode::Default;
-        state.always_allow_rules.push(PermissionRule::parse("FileEdit(, /src/**)", RuleType::Allow).unwrap());
-        state.always_deny_rules.push(PermissionRule::parse("FileRead(, /.env)", RuleType::Deny).unwrap());
+        state
+            .always_allow_rules
+            .push(PermissionRule::parse("FileEdit(, /src/**)", RuleType::Allow).unwrap());
+        state
+            .always_deny_rules
+            .push(PermissionRule::parse("FileRead(, /.env)", RuleType::Deny).unwrap());
 
         let mode_str = format!("{:?}", state.permission_mode);
         let mut text = format!("Permission Mode: {}\n", mode_str);
@@ -2464,7 +2479,10 @@ mod tests {
         if !claude_md_path.exists() {
             fs::write(&claude_md_path, "starter").unwrap();
         } else {
-            result.push_str(&format!("{} already exists (not overwritten)\n", claude_md_path.display()));
+            result.push_str(&format!(
+                "{} already exists (not overwritten)\n",
+                claude_md_path.display()
+            ));
         }
 
         let content = fs::read_to_string(&claude_md_path).unwrap();

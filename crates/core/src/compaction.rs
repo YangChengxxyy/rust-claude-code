@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 use crate::message::{ContentBlock, Message, Usage};
 
@@ -13,6 +14,12 @@ pub struct CompactionConfig {
     pub preserve_ratio: f32,
     /// Max tokens for the summary generation request.
     pub summary_max_tokens: u32,
+    /// Maximum characters of project guidance to include in compaction context.
+    pub project_guidance_char_limit: usize,
+    /// Maximum MCP server/tool pairs to include in compaction context.
+    pub mcp_tool_limit: usize,
+    /// Maximum recent permission decisions to include in compaction context.
+    pub permission_decision_limit: usize,
 }
 
 impl Default for CompactionConfig {
@@ -22,6 +29,66 @@ impl Default for CompactionConfig {
             threshold_ratio: 0.8,
             preserve_ratio: 0.5,
             summary_max_tokens: 8192,
+            project_guidance_char_limit: 4_000,
+            mcp_tool_limit: 20,
+            permission_decision_limit: 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompactStrategy {
+    Default,
+    Aggressive,
+    PreserveRecent,
+}
+
+impl CompactStrategy {
+    pub fn config(self) -> CompactionConfig {
+        match self {
+            CompactStrategy::Default => CompactionConfig::default(),
+            CompactStrategy::Aggressive => CompactionConfig {
+                threshold_ratio: 0.65,
+                preserve_ratio: 0.25,
+                summary_max_tokens: 4096,
+                ..Default::default()
+            },
+            CompactStrategy::PreserveRecent => CompactionConfig {
+                threshold_ratio: 0.8,
+                preserve_ratio: 0.7,
+                summary_max_tokens: 8192,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CompactStrategy::Default => "default",
+            CompactStrategy::Aggressive => "aggressive",
+            CompactStrategy::PreserveRecent => "preserve-recent",
+        }
+    }
+}
+
+impl Default for CompactStrategy {
+    fn default() -> Self {
+        CompactStrategy::Default
+    }
+}
+
+impl FromStr for CompactStrategy {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "default" => Ok(CompactStrategy::Default),
+            "aggressive" => Ok(CompactStrategy::Aggressive),
+            "preserve-recent" => Ok(CompactStrategy::PreserveRecent),
+            other => Err(format!(
+                "unknown compact strategy '{other}'; valid strategies: default, aggressive, preserve-recent"
+            )),
         }
     }
 }
@@ -204,11 +271,30 @@ mod tests {
             threshold_ratio: 0.7,
             preserve_ratio: 0.4,
             summary_max_tokens: 4096,
+            ..Default::default()
         };
         let json = serde_json::to_string(&config).unwrap();
         let parsed: CompactionConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.context_window, 100_000);
         assert!((parsed.threshold_ratio - 0.7).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_compact_strategy_configs() {
+        assert_eq!(CompactStrategy::default(), CompactStrategy::Default);
+        assert!(
+            CompactStrategy::Aggressive.config().preserve_ratio
+                < CompactionConfig::default().preserve_ratio
+        );
+        assert!(
+            CompactStrategy::PreserveRecent.config().preserve_ratio
+                > CompactionConfig::default().preserve_ratio
+        );
+        assert_eq!(
+            "preserve-recent".parse::<CompactStrategy>().unwrap(),
+            CompactStrategy::PreserveRecent
+        );
+        assert!("unknown".parse::<CompactStrategy>().is_err());
     }
 
     // -- CompactionResult tests --

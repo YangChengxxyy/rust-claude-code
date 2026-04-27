@@ -259,7 +259,10 @@ pub fn slash_suggestion_overlay_geometry(app: &App, input_area: Rect) -> Option<
     let visible_rows = available_height.saturating_sub(2).max(1) as usize;
     let height = (total_rows.min(visible_rows) as u16).saturating_add(2);
     let y = input_area.y.saturating_sub(height);
-    Some((Rect::new(input_area.x, y, width.min(input_area.width), height), visible_rows))
+    Some((
+        Rect::new(input_area.x, y, width.min(input_area.width), height),
+        visible_rows,
+    ))
 }
 
 fn input_area_height(app: &App) -> u16 {
@@ -919,7 +922,10 @@ pub fn build_slash_suggestion_render_rows(
         };
         lines.push(Line::from(vec![
             Span::styled(prefix.to_string(), row_style),
-            Span::styled(format!("{:<width$}", item.label, width = name_width), row_style),
+            Span::styled(
+                format!("{:<width$}", item.label, width = name_width),
+                row_style,
+            ),
             Span::raw("  "),
             Span::styled(item.description.clone(), row_style),
         ]));
@@ -1863,34 +1869,10 @@ mod tests {
             selected: 3,
             scroll: 2,
             items: vec![
-                crate::app::SuggestionItem::new(
-                    SuggestionKind::Command,
-                    "/a",
-                    "a",
-                    "/a",
-                    "/a a",
-                ),
-                crate::app::SuggestionItem::new(
-                    SuggestionKind::Command,
-                    "/b",
-                    "b",
-                    "/b",
-                    "/b b",
-                ),
-                crate::app::SuggestionItem::new(
-                    SuggestionKind::Command,
-                    "/c",
-                    "c",
-                    "/c",
-                    "/c c",
-                ),
-                crate::app::SuggestionItem::new(
-                    SuggestionKind::Command,
-                    "/d",
-                    "d",
-                    "/d",
-                    "/d d",
-                ),
+                crate::app::SuggestionItem::new(SuggestionKind::Command, "/a", "a", "/a", "/a a"),
+                crate::app::SuggestionItem::new(SuggestionKind::Command, "/b", "b", "/b", "/b b"),
+                crate::app::SuggestionItem::new(SuggestionKind::Command, "/c", "c", "/c", "/c c"),
+                crate::app::SuggestionItem::new(SuggestionKind::Command, "/d", "d", "/d", "/d d"),
             ],
         });
 

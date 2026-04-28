@@ -1,6 +1,6 @@
 pub mod agent_tool;
-pub mod auto_memory;
 pub mod ask_user_question;
+pub mod auto_memory;
 pub mod bash;
 pub mod file_edit;
 pub mod file_read;
@@ -22,8 +22,8 @@ pub mod web_fetch_tool;
 pub mod web_search_tool;
 
 pub use agent_tool::AgentTool;
-pub use auto_memory::AutoMemoryTool;
 pub use ask_user_question::AskUserQuestionTool;
+pub use auto_memory::AutoMemoryTool;
 pub use bash::BashTool;
 pub use file_edit::FileEditTool;
 pub use file_read::FileReadTool;
@@ -39,8 +39,8 @@ pub use registry::{RegisteredTool, ToolRegistry};
 pub use task_tool::TaskTool;
 pub use todo_write::TodoWriteTool;
 pub use tool::{
-    AgentContext, AskUserQuestionOption, AskUserQuestionRequest, AskUserQuestionResponse, Tool,
-    ToolContext, ToolError, UserQuestionCallback,
+    AgentContext, AgentRunOptions, AskUserQuestionOption, AskUserQuestionRequest,
+    AskUserQuestionResponse, Tool, ToolContext, ToolError, UserQuestionCallback,
 };
 pub use web_fetch_tool::WebFetchTool;
 pub use web_search_tool::WebSearchTool;

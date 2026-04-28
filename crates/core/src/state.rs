@@ -39,6 +39,7 @@ pub type TodoPriority = TaskPriority;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSettings {
+    pub id: String,
     pub model: String,
     pub model_setting: String,
     pub system_prompt: Option<String>,
@@ -102,6 +103,7 @@ impl AppState {
             always_allow_rules: Vec::new(),
             always_deny_rules: Vec::new(),
             session: SessionSettings {
+                id: String::new(),
                 model: "claude-sonnet-4-20250514".to_string(),
                 model_setting: "claude-sonnet-4-20250514".to_string(),
                 system_prompt: None,
@@ -132,6 +134,7 @@ impl AppState {
             always_allow_rules: config.always_allow.clone(),
             always_deny_rules: config.always_deny.clone(),
             session: SessionSettings {
+                id: String::new(),
                 model: config.model.clone(),
                 model_setting: config.model.clone(),
                 system_prompt: config.system_prompt.clone(),

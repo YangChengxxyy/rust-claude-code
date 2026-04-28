@@ -8,6 +8,7 @@ use rust_claude_api::AnthropicClient;
 use rust_claude_core::{
     claude_md,
     config::{Config, ConfigError, ConfigOverrides, ConfigSource, Theme},
+    custom_agents::CustomAgentRegistry,
     git::collect_git_context,
     hooks::HooksConfig,
     mcp_config::McpServersConfig,
@@ -495,9 +496,24 @@ async fn main() -> Result<()> {
         }
     }
 
+    if state.session.id.is_empty() {
+        state.session.id = SessionFile::new(&state.session.model, &state.session.model_setting, &cwd).id;
+    }
+
     let app_state = Arc::new(Mutex::new(state));
 
     let claude_md_files = claude_md::discover_claude_md(&cwd);
+    let custom_agents = Arc::new(CustomAgentRegistry::discover(&cwd));
+    if resolved.verbose {
+        println!("Discovered {} custom agent(s)", custom_agents.list().len());
+        for error in custom_agents.errors() {
+            eprintln!(
+                "Warning: failed to load custom agent {}: {}",
+                error.path.display(),
+                error.message
+            );
+        }
+    }
     let memory_store = memory::discover_memory_store(&cwd)
         .and_then(|store| memory::scan_memory_store(&store).ok());
     if resolved.verbose && !claude_md_files.is_empty() {
@@ -516,6 +532,10 @@ async fn main() -> Result<()> {
             cwd.clone(),
         )))
     };
+    if let Some(runner) = &hook_runner {
+        let session_id = { app_state.lock().await.session.id.clone() };
+        runner.run_session_start(&session_id).await;
+    }
 
     // Initialize MCP servers (if any configured)
     let mcp_manager = if resolved.mcp_servers.is_empty() {
@@ -587,7 +607,7 @@ async fn main() -> Result<()> {
         let mut tools = build_tools();
         register_mcp_tools(&mut tools, &mcp_manager);
         tools.apply_tool_filters(&resolved.allowed_tools, &resolved.disallowed_tools);
-        let agent_context = build_agent_context(Arc::new(client.clone()));
+        let agent_context = build_agent_context(Arc::new(client.clone()), custom_agents.clone());
 
         let output_json = resolved.output_json;
         let stream_enabled = resolved.config.stream;
@@ -603,7 +623,7 @@ async fn main() -> Result<()> {
         }
 
         // For streaming print mode, attach a bridge that streams to stdout
-        if stream_enabled && !output_json {
+        let run_result = if stream_enabled && !output_json {
             let (print_tx, mut print_rx) = tokio::sync::mpsc::channel::<AppEvent>(256);
             let bridge = rust_claude_tui::TuiBridge::new(print_tx);
             query_loop = query_loop.with_bridge(bridge);
@@ -679,25 +699,42 @@ async fn main() -> Result<()> {
                 }
             });
 
-            let final_message = query_loop.run(app_state, prompt).await?;
+            let result = query_loop.run(app_state.clone(), prompt).await;
             // Drop happens when query_loop is done — print_handle will exit once channel closes
-            drop(final_message);
+            if let Ok(final_message) = &result {
+                drop(final_message.clone());
+            }
             let _ = print_handle.await;
+            result.map(|_| ())
         } else {
             // Non-streaming or JSON output mode: collect full response then dump
-            let final_message = query_loop.run(app_state, prompt).await?;
-            if output_json {
-                let json = serde_json::to_string_pretty(&final_message)?;
-                println!("{json}");
-            } else {
-                for block in final_message.content {
-                    if let ContentBlock::Text { text } = block {
-                        println!("{text}");
+            match query_loop.run(app_state.clone(), prompt).await {
+                Ok(final_message) => {
+                    if output_json {
+                        let json = serde_json::to_string_pretty(&final_message)?;
+                        println!("{json}");
+                    } else {
+                        for block in final_message.content {
+                            if let ContentBlock::Text { text } = block {
+                                println!("{text}");
+                            }
+                        }
                     }
+                    Ok(())
                 }
+                Err(error) => Err(error.into()),
             }
+        };
+        if let Some(runner) = &hook_runner {
+            let session_id = { app_state.lock().await.session.id.clone() };
+            let reason = if run_result.is_ok() {
+                "completed"
+            } else {
+                "error"
+            };
+            runner.run_session_end(reason, &session_id).await;
         }
-        Ok(())
+        Ok(run_result?)
     } else {
         let allowed_tools = resolved.allowed_tools.clone();
         let disallowed_tools = resolved.disallowed_tools.clone();
@@ -708,6 +745,7 @@ async fn main() -> Result<()> {
             disallowed_tools,
             hook_runner,
             mcp_manager,
+            custom_agents,
         )
         .await
     }
@@ -755,59 +793,123 @@ fn build_client(
     Ok(client)
 }
 
-fn build_agent_context(client: Arc<dyn rust_claude_api::ModelClient>) -> AgentContext {
+fn build_agent_context(
+    client: Arc<dyn rust_claude_api::ModelClient>,
+    custom_agents: Arc<CustomAgentRegistry>,
+) -> AgentContext {
+    let run_subagent_cell = Arc::new(std::sync::Mutex::new(None::<rust_claude_tools::tool::AgentContextRunSubagent>));
+    let runner_custom_agents = custom_agents.clone();
+    let runner_cell = run_subagent_cell.clone();
+    let run_subagent: rust_claude_tools::tool::AgentContextRunSubagent = Arc::new(
+        move |
+            prompt: String,
+            allowed_tools: Vec<String>,
+            options: rust_claude_tools::AgentRunOptions,
+            app_state: Arc<Mutex<AppState>>,
+            current_depth: u32,
+            max_depth: u32,
+        | {
+            let client = client.clone();
+            let custom_agents = runner_custom_agents.clone();
+            let nested_runner = runner_cell
+                .lock()
+                .unwrap()
+                .as_ref()
+                .cloned()
+                .expect("sub-agent runner initialized");
+            Box::pin(async move {
+                if options.system_prompt.is_some() || options.model.is_some() {
+                    let mut state = app_state.lock().await;
+                    if let Some(system_prompt) = options.system_prompt {
+                        state.session.system_prompt = Some(system_prompt);
+                    }
+                    if let Some(model) = options.model {
+                        state.session.model_setting = model.clone();
+                        state.session.model = model;
+                    }
+                }
+
+                let mut tools = build_tools();
+                if !allowed_tools.is_empty() {
+                    tools.apply_tool_filters(&allowed_tools, &[]);
+                }
+                let query_loop = QueryLoop::new(client.clone(), tools)
+                    .with_max_rounds(5)
+                    .with_agent_context(AgentContext {
+                        tool_registry_factory: Arc::new(build_tools),
+                        run_subagent: nested_runner,
+                        custom_agents,
+                        current_depth,
+                        max_depth,
+                    });
+
+                let message = query_loop
+                    .run(app_state.clone(), prompt)
+                    .await
+                    .map_err(|e| rust_claude_tools::ToolError::Execution(e.to_string()))?;
+
+                let text = message
+                    .content
+                    .into_iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                let usage = app_state.lock().await.total_usage.clone();
+                Ok(rust_claude_tools::tool::AgentRunOutput {
+                    text,
+                    input_tokens: usage.input_tokens as u64,
+                    output_tokens: usage.output_tokens as u64,
+                })
+            })
+        },
+    );
+    *run_subagent_cell.lock().unwrap() = Some(run_subagent.clone());
+
     AgentContext {
         tool_registry_factory: Arc::new(build_tools),
-        run_subagent: Arc::new(
-            move |prompt, allowed_tools, app_state, current_depth, max_depth| {
-                let client = client.clone();
-                Box::pin(async move {
-                    let mut tools = build_tools();
-                    if !allowed_tools.is_empty() {
-                        tools.apply_tool_filters(&allowed_tools, &[]);
-                    }
-                    let query_loop = QueryLoop::new(client.clone(), tools)
-                        .with_max_rounds(5)
-                        .with_agent_context(AgentContext {
-                            tool_registry_factory: Arc::new(build_tools),
-                            run_subagent: Arc::new(|_, _, _, _, _| {
-                                Box::pin(async {
-                                    Err(rust_claude_tools::ToolError::Execution(
-                                        "nested agent runner unavailable".to_string(),
-                                    ))
-                                })
-                            }),
-                            current_depth,
-                            max_depth,
-                        });
-
-                    let message = query_loop
-                        .run(app_state.clone(), prompt)
-                        .await
-                        .map_err(|e| rust_claude_tools::ToolError::Execution(e.to_string()))?;
-
-                    let text = message
-                        .content
-                        .into_iter()
-                        .filter_map(|block| match block {
-                            ContentBlock::Text { text } => Some(text),
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-
-                    let usage = app_state.lock().await.total_usage.clone();
-                    Ok(rust_claude_tools::tool::AgentRunOutput {
-                        text,
-                        input_tokens: usage.input_tokens as u64,
-                        output_tokens: usage.output_tokens as u64,
-                    })
-                })
-            },
-        ),
+        run_subagent,
+        custom_agents,
         current_depth: 0,
         max_depth: 3,
     }
+}
+
+fn format_custom_agents(registry: &CustomAgentRegistry) -> String {
+    let agents = registry.list();
+    if agents.is_empty() {
+        let mut text = String::from("No custom agents configured");
+        if !registry.errors().is_empty() {
+            text.push_str("\n\nLoad errors:");
+            for error in registry.errors() {
+                text.push_str(&format!(
+                    "\n  - {}: {}",
+                    error.path.display(),
+                    error.message
+                ));
+            }
+        }
+        return text;
+    }
+
+    let mut text = String::from("Custom agents:");
+    for agent in agents {
+        text.push_str(&format!("\n  {} - {}", agent.name, agent.description));
+    }
+    if !registry.errors().is_empty() {
+        text.push_str("\n\nLoad errors:");
+        for error in registry.errors() {
+            text.push_str(&format!(
+                "\n  - {}: {}",
+                error.path.display(),
+                error.message
+            ));
+        }
+    }
+    text
 }
 
 fn format_mcp_status(manager: &McpManager) -> String {
@@ -1004,7 +1106,11 @@ fn format_doctor_report(
     ));
     lines.push(format!(
         "  auth_mode: {}",
-        if config.bearer_auth { "bearer" } else { "x-api-key" }
+        if config.bearer_auth {
+            "bearer"
+        } else {
+            "x-api-key"
+        }
     ));
     lines.push(format!(
         "  base_url_source: {}",
@@ -1019,7 +1125,11 @@ fn format_doctor_report(
     lines.push(format!(
         "  hooks: {}",
         hook_runner
-            .map(|runner| runner.config().values().map(|groups| groups.len()).sum::<usize>())
+            .map(|runner| runner
+                .config()
+                .values()
+                .map(|groups| groups.len())
+                .sum::<usize>())
             .unwrap_or(0)
     ));
 
@@ -1096,7 +1206,8 @@ fn collect_review_input(cwd: &std::path::Path, target: Option<&str>) -> Result<R
 }
 
 fn collect_branch_review_input(cwd: &std::path::Path) -> Result<ReviewInput> {
-    let git_context = collect_git_context(cwd).ok_or_else(|| anyhow!("Git repository context is required for /review"))?;
+    let git_context = collect_git_context(cwd)
+        .ok_or_else(|| anyhow!("Git repository context is required for /review"))?;
     let repo_root = git_context.repo_root;
 
     if let Some(base) = detect_review_base(&repo_root) {
@@ -1132,7 +1243,8 @@ fn collect_pr_review_input(cwd: &std::path::Path, target: &str) -> Result<Review
             "PR lookup requires `gh`. Run `/review` without arguments to review the local branch diff."
         ));
     }
-    let git_context = collect_git_context(cwd).ok_or_else(|| anyhow!("Git repository context is required for /review"))?;
+    let git_context = collect_git_context(cwd)
+        .ok_or_else(|| anyhow!("Git repository context is required for /review"))?;
     let diff = run_command_text(&git_context.repo_root, "gh", &["pr", "diff", target])?;
     if diff.trim().is_empty() {
         return Err(anyhow!("No reviewable diff was found for {target}."));
@@ -1141,7 +1253,13 @@ fn collect_pr_review_input(cwd: &std::path::Path, target: &str) -> Result<Review
 }
 
 fn detect_review_base(repo_root: &std::path::Path) -> Option<String> {
-    for candidate in ["origin/HEAD", "origin/main", "origin/master", "main", "master"] {
+    for candidate in [
+        "origin/HEAD",
+        "origin/main",
+        "origin/master",
+        "main",
+        "master",
+    ] {
         if Command::new("git")
             .args(["rev-parse", "--verify", candidate])
             .current_dir(repo_root)
@@ -1156,7 +1274,10 @@ fn detect_review_base(repo_root: &std::path::Path) -> Option<String> {
 }
 
 fn run_command_text(repo_root: &std::path::Path, program: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(program).args(args).current_dir(repo_root).output()?;
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(repo_root)
+        .output()?;
     if !output.status.success() {
         return Err(anyhow!(
             "{} {} failed: {}",
@@ -1554,6 +1675,7 @@ async fn run_tui(
     disallowed_tools: Vec<String>,
     hook_runner: Option<Arc<HookRunner>>,
     mcp_manager: Arc<McpManager>,
+    custom_agents: Arc<CustomAgentRegistry>,
 ) -> Result<()> {
     let (model, model_setting, permission_mode, git_branch) = {
         let state = app_state.lock().await;
@@ -1585,8 +1707,9 @@ async fn run_tui(
         )
         .await;
 
-    let worker_hook_runner = hook_runner;
+    let worker_hook_runner = hook_runner.clone();
     let worker_mcp_manager = mcp_manager.clone();
+    let worker_custom_agents = custom_agents.clone();
     let worker_config = config.clone();
     tokio::spawn(async move {
         let mut worker_config = worker_config;
@@ -1595,14 +1718,14 @@ async fn run_tui(
         while let Some(command) = user_rx.recv().await {
             match command {
                 UserCommand::Compact(strategy) => {
-                    let client = match build_client(&worker_config.api_key, base_url.clone(), bearer_auth)
-                    {
-                        Ok(client) => client,
-                        Err(error) => {
-                            worker_bridge.send_error(&error.to_string()).await;
-                            continue;
-                        }
-                    };
+                    let client =
+                        match build_client(&worker_config.api_key, base_url.clone(), bearer_auth) {
+                            Ok(client) => client,
+                            Err(error) => {
+                                worker_bridge.send_error(&error.to_string()).await;
+                                continue;
+                            }
+                        };
 
                     worker_bridge.send_compaction_start().await;
                     let compaction_config = strategy.config();
@@ -1622,6 +1745,7 @@ async fn run_tui(
                         &state_snapshot.session.model_setting,
                         &state_snapshot.cwd,
                     );
+                    session_file.id = state_snapshot.session.id.clone();
                     session_file.messages = state_snapshot.messages.clone();
                     session_file.total_usage = Some(state_snapshot.total_usage.clone());
                     session_file.permission_mode = state_snapshot.permission_mode;
@@ -2169,6 +2293,10 @@ async fn run_tui(
                     };
                     worker_bridge.send_assistant_message(&msg).await;
                 }
+                UserCommand::ShowAgents => {
+                    let msg = format_custom_agents(&worker_custom_agents);
+                    worker_bridge.send_assistant_message(&msg).await;
+                }
                 UserCommand::ShowMemory => {
                     let cwd = { worker_state.lock().await.cwd.clone() };
                     let msg = tokio::task::spawn_blocking(move || format_memory_status(&cwd))
@@ -2280,19 +2408,20 @@ async fn run_tui(
                         }
                     };
 
-                    let client = match build_client(&worker_config.api_key, base_url.clone(), bearer_auth)
-                    {
-                        Ok(client) => client,
-                        Err(error) => {
-                            worker_bridge.send_error(&error.to_string()).await;
-                            continue;
-                        }
-                    };
+                    let client =
+                        match build_client(&worker_config.api_key, base_url.clone(), bearer_auth) {
+                            Ok(client) => client,
+                            Err(error) => {
+                                worker_bridge.send_error(&error.to_string()).await;
+                                continue;
+                            }
+                        };
 
                     let mut tools = build_tools();
                     register_mcp_tools(&mut tools, &worker_mcp_manager);
                     tools.apply_tool_filters(&allowed_tools, &disallowed_tools);
-                    let agent_context = build_agent_context(Arc::new(client.clone()));
+                    let agent_context =
+                        build_agent_context(Arc::new(client.clone()), worker_custom_agents.clone());
                     let mut query_loop = QueryLoop::new(client, tools)
                         .with_bridge(worker_bridge.clone())
                         .with_compaction_config(CompactStrategy::Default.config())
@@ -2476,19 +2605,20 @@ async fn run_tui(
                     if let Some(handle) = active_query_task.take() {
                         handle.abort();
                     }
-                    let client = match build_client(&worker_config.api_key, base_url.clone(), bearer_auth)
-                    {
-                        Ok(client) => client,
-                        Err(error) => {
-                            worker_bridge.send_error(&error.to_string()).await;
-                            continue;
-                        }
-                    };
+                    let client =
+                        match build_client(&worker_config.api_key, base_url.clone(), bearer_auth) {
+                            Ok(client) => client,
+                            Err(error) => {
+                                worker_bridge.send_error(&error.to_string()).await;
+                                continue;
+                            }
+                        };
 
                     let mut tools = build_tools();
                     register_mcp_tools(&mut tools, &worker_mcp_manager);
                     tools.apply_tool_filters(&allowed_tools, &disallowed_tools);
-                    let agent_context = build_agent_context(Arc::new(client.clone()));
+                    let agent_context =
+                        build_agent_context(Arc::new(client.clone()), worker_custom_agents.clone());
                     let mut query_loop = QueryLoop::new(client, tools)
                         .with_bridge(worker_bridge.clone())
                         .with_compaction_config(CompactStrategy::Default.config())
@@ -2588,6 +2718,7 @@ async fn run_tui(
                             &state_snapshot.session.model_setting,
                             &state_snapshot.cwd,
                         );
+                        session_file.id = state_snapshot.session.id.clone();
                         session_file.messages = state_snapshot.messages.clone();
                         session_file.total_usage = Some(state_snapshot.total_usage.clone());
                         session_file.permission_mode = state_snapshot.permission_mode;
@@ -2608,16 +2739,18 @@ async fn run_tui(
     });
 
     let mut terminal_guard = TerminalGuard::new()?;
-    let mut app = App::new(
-        model,
-        model_setting,
-        permission_mode,
-        git_branch,
-        theme,
-    );
-    app.run(terminal_guard.terminal_mut(), event_rx, user_tx)
-        .await?;
-    Ok(())
+    let mut app = App::new(model, model_setting, permission_mode, git_branch, theme);
+    let run_result = app.run(terminal_guard.terminal_mut(), event_rx, user_tx).await;
+    if let Some(runner) = &hook_runner {
+        let session_id = { app_state.lock().await.session.id.clone() };
+        let reason = if run_result.is_ok() {
+            "tui_exit"
+        } else {
+            "error"
+        };
+        runner.run_session_end(reason, &session_id).await;
+    }
+    Ok(run_result?)
 }
 
 #[cfg(test)]
@@ -2861,6 +2994,26 @@ mod tests {
         assert!(snapshot.message_tokens > 0);
         assert!(snapshot.tool_result_tokens > 0);
         assert_eq!(snapshot.remaining_tokens, Some(199_885));
+    }
+
+    #[test]
+    fn format_custom_agents_lists_agents_and_empty_state() {
+        let empty = CustomAgentRegistry::empty();
+        assert_eq!(format_custom_agents(&empty), "No custom agents configured");
+
+        let registry = CustomAgentRegistry::from_agents(vec![
+            rust_claude_core::custom_agents::CustomAgentDefinition {
+                name: "reviewer".into(),
+                description: "Reviews code".into(),
+                system_prompt: "Review carefully".into(),
+                tools: vec![],
+                model: None,
+                path: PathBuf::from("reviewer.md"),
+            },
+        ]);
+        let output = format_custom_agents(&registry);
+        assert!(output.contains("Custom agents:"));
+        assert!(output.contains("reviewer - Reviews code"));
     }
 
     #[test]

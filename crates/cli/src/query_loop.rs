@@ -107,10 +107,11 @@ where
         user_input: impl Into<String>,
     ) -> Result<Message, QueryLoopError> {
         let user_input_str = user_input.into();
+        let session_id = { app_state.lock().await.session.id.clone() };
 
         // Fire UserPromptSubmit hooks
         if let Some(runner) = &self.hook_runner {
-            runner.run_user_prompt_submit(&user_input_str, "").await;
+            runner.run_user_prompt_submit(&user_input_str, &session_id).await;
         }
 
         // Discover & scan the memory store once at the start rather than on
@@ -222,7 +223,7 @@ where
 
                 // Exhausted recovery attempts, return truncated result
                 if let Some(runner) = &self.hook_runner {
-                    runner.run_stop("max_tokens", "").await;
+                    runner.run_stop("max_tokens", &session_id).await;
                 }
                 return Ok(assistant_message);
             }
@@ -232,7 +233,7 @@ where
 
             if stop_reason != Some(StopReason::ToolUse) {
                 if let Some(runner) = &self.hook_runner {
-                    runner.run_stop("end_turn", "").await;
+                    runner.run_stop("end_turn", &session_id).await;
                 }
                 return Ok(assistant_message);
             }
@@ -242,7 +243,7 @@ where
         }
 
         if let Some(runner) = &self.hook_runner {
-            runner.run_stop("max_rounds", "").await;
+            runner.run_stop("max_rounds", &session_id).await;
         }
         Err(QueryLoopError::MaxRoundsExceeded)
     }
@@ -639,6 +640,7 @@ where
         assistant_message: &Message,
     ) -> Result<(), QueryLoopError> {
         let tool_uses = assistant_message.tool_uses();
+        let session_id = { app_state.lock().await.session.id.clone() };
 
         let mut concurrent = Vec::new();
         let mut serial = Vec::new();
@@ -674,20 +676,28 @@ where
                 state.record_mcp_tool_usage(name, SESSION_MCP_TOOL_LIMIT);
             }
 
+            let mut scheduled_input = input.clone();
+
             // Run PreToolUse hooks after permission check passes
             if let Some(runner) = &self.hook_runner {
                 let cwd = { app_state.lock().await.cwd.clone() };
                 let hook_result = runner
-                    .run_pre_tool_use_with_cwd(name, input, "", &cwd)
+                    .run_pre_tool_use_with_cwd(name, &scheduled_input, &session_id, &cwd)
                     .await;
-                if let rust_claude_core::hooks::HookResult::Block { reason } = hook_result {
-                    let msg = format!("Hook blocked: {}", reason);
-                    if let Some(bridge) = &self.bridge {
-                        bridge.send_hook_blocked(name, &reason).await;
-                        bridge.send_tool_result(name, &msg, true).await;
+                match hook_result {
+                    rust_claude_core::hooks::HookResult::Continue => {}
+                    rust_claude_core::hooks::HookResult::ContinueWithInput { updated_input } => {
+                        scheduled_input = updated_input;
                     }
-                    tool_results.push((index, tool_use_id.to_string(), msg, true));
-                    continue;
+                    rust_claude_core::hooks::HookResult::Block { reason } => {
+                        let msg = format!("Hook blocked: {}", reason);
+                        if let Some(bridge) = &self.bridge {
+                            bridge.send_hook_blocked(name, &reason).await;
+                            bridge.send_tool_result(name, &msg, true).await;
+                        }
+                        tool_results.push((index, tool_use_id.to_string(), msg, true));
+                        continue;
+                    }
                 }
             }
 
@@ -695,7 +705,7 @@ where
                 index,
                 tool_use_id.to_string(),
                 name.to_string(),
-                input.clone(),
+                scheduled_input,
             );
             if self.tools.is_concurrency_safe(name) {
                 concurrent.push(entry);
@@ -743,7 +753,7 @@ where
                         &input,
                         &result.content,
                         result.is_error,
-                        "",
+                        &session_id,
                         &cwd,
                     )
                     .await;
@@ -781,7 +791,7 @@ where
                         &input,
                         &result.content,
                         result.is_error,
-                        "",
+                        &session_id,
                         &cwd,
                     )
                     .await;
@@ -813,12 +823,14 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use rust_claude_api::MessageStream;
+    use rust_claude_core::hooks::{HookConfig, HookEventGroup};
     use rust_claude_core::message::{ContentBlock, Message};
     use rust_claude_tools::{
         AskUserQuestionResponse, AskUserQuestionTool, BashTool, EnterPlanModeTool, FileReadTool,
         MonitorTool, Tool, ToolContext, ToolError,
     };
     use std::collections::{HashMap, VecDeque};
+    use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
     struct MockClient {
@@ -1252,6 +1264,7 @@ mod tests {
                         hook_log.display()
                     )),
                     timeout: None,
+                    once: false,
                 }],
             }],
         );
@@ -1936,5 +1949,55 @@ mod tests {
 
         let request = loop_runner.build_request(&app_state, None).await;
         assert_eq!(request.model, "claude-sonnet-4-6");
+    }
+
+    #[tokio::test]
+    async fn test_query_loop_passes_real_session_id_to_hooks() {
+        let path = std::env::temp_dir().join(format!(
+            "rust-claude-query-hook-{}-{}.log",
+            std::process::id(),
+            chrono::Local::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+        ));
+
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::from(vec![CreateMessageResponse {
+                id: "msg_1".to_string(),
+                response_type: "message".to_string(),
+                role: rust_claude_core::message::Role::Assistant,
+                content: vec![ContentBlock::text("ok")],
+                model: "claude-test".to_string(),
+                stop_reason: Some(StopReason::EndTurn),
+                stop_sequence: None,
+                usage: usage(),
+            }])),
+        };
+        let tools = ToolRegistry::new();
+        let mut hooks = std::collections::HashMap::new();
+        hooks.insert(
+            "UserPromptSubmit".to_string(),
+            vec![HookEventGroup {
+                matcher: None,
+                hooks: vec![HookConfig {
+                    type_: "command".to_string(),
+                    command: Some(format!("cat > {}", path.display())),
+                    timeout: None,
+                    once: false,
+                }],
+            }],
+        );
+        let runner = Arc::new(crate::hooks::HookRunner::new(hooks, PathBuf::from("/tmp")));
+        let loop_runner = QueryLoop::new(client, tools).with_hook_runner(runner);
+
+        let mut state = AppState::new(PathBuf::from("/tmp"));
+        state.session.id = "session-xyz".into();
+        let app_state = Arc::new(Mutex::new(state));
+
+        let _ = loop_runner.run(app_state, "hello").await.unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("\"session_id\":\"session-xyz\""));
+        let _ = std::fs::remove_file(path);
     }
 }

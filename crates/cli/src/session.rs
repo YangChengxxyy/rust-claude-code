@@ -145,6 +145,7 @@ fn summarize_text(text: &str) -> String {
 
 pub fn restore_app_state_from_session(state: &mut AppState, prev: &SessionFile) {
     state.messages = prev.messages.clone();
+    state.session.id = prev.id.clone();
     if !prev.model_setting.is_empty() {
         state.session.model_setting = prev.model_setting.clone();
     } else {
@@ -263,6 +264,17 @@ mod tests {
         assert!(session.messages.is_empty());
         assert!(!session.id.is_empty());
         assert!(!session.created_at.is_empty());
+    }
+
+    #[test]
+    fn test_restore_app_state_preserves_session_id() {
+        let mut state = AppState::new(PathBuf::from("/tmp/test"));
+        let mut session = SessionFile::new("claude-test", "opusplan", Path::new("/tmp/test"));
+        session.id = "20260428_123456".into();
+
+        restore_app_state_from_session(&mut state, &session);
+
+        assert_eq!(state.session.id, "20260428_123456");
     }
 
     #[test]

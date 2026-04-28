@@ -4,7 +4,7 @@ use rust_claude_core::tool_types::{ToolInfo, ToolResult};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::tool::{Tool, ToolContext, ToolError};
+use crate::tool::{AgentRunOptions, Tool, ToolContext, ToolError};
 
 #[derive(Debug, Clone, Default)]
 pub struct AgentTool;
@@ -14,6 +14,8 @@ struct AgentToolInput {
     prompt: String,
     #[serde(default)]
     allowed_tools: Vec<String>,
+    #[serde(default)]
+    agent: Option<String>,
 }
 
 impl AgentTool {
@@ -37,7 +39,8 @@ impl Tool for AgentTool {
                     "allowed_tools": {
                         "type": "array",
                         "items": { "type": "string" }
-                    }
+                    },
+                    "agent": { "type": "string" }
                 },
                 "required": ["prompt"]
             }),
@@ -93,10 +96,29 @@ impl Tool for AgentTool {
             Arc::new(Mutex::new(sub))
         };
 
-        let allowed_tools = input.allowed_tools;
+        let mut allowed_tools = input.allowed_tools;
+        let mut options = AgentRunOptions::default();
+        if let Some(agent_name) = input
+            .agent
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+        {
+            let Some(agent) = agent_context.custom_agents.get(agent_name) else {
+                return Ok(ToolResult::error(
+                    context.tool_use_id,
+                    format!("Custom agent not found: {agent_name}"),
+                ));
+            };
+
+            options.system_prompt = Some(agent.system_prompt.clone());
+            options.model = agent.model.clone();
+            allowed_tools = intersect_allowed_tools(&agent.tools, &allowed_tools);
+        }
+
         let output = (agent_context.run_subagent)(
             input.prompt,
             allowed_tools,
+            options,
             sub_state,
             agent_context.current_depth + 1,
             agent_context.max_depth,
@@ -117,6 +139,21 @@ impl Tool for AgentTool {
             )),
         }
     }
+}
+
+fn intersect_allowed_tools(agent_tools: &[String], explicit_tools: &[String]) -> Vec<String> {
+    if agent_tools.is_empty() {
+        return explicit_tools.to_vec();
+    }
+    if explicit_tools.is_empty() {
+        return agent_tools.to_vec();
+    }
+
+    agent_tools
+        .iter()
+        .filter(|tool| explicit_tools.contains(tool))
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -185,10 +222,11 @@ mod tests {
                     app_state: Some(app_state()),
                     agent_context: Some(AgentContext {
                         run_subagent: Arc::new(
-                            |prompt, allowed_tools, _state, depth, max_depth| {
+                            |prompt, allowed_tools, options, _state, depth, max_depth| {
                                 Box::pin(async move {
                                     assert_eq!(prompt, "summarize file");
                                     assert_eq!(allowed_tools, vec!["FileRead"]);
+                                    assert_eq!(options, AgentRunOptions::default());
                                     assert_eq!(depth, 1);
                                     assert_eq!(max_depth, 3);
                                     Ok(crate::tool::AgentRunOutput {
@@ -210,5 +248,125 @@ mod tests {
         assert!(!result.is_error);
         assert!(result.content.contains("done"));
         assert!(result.content.contains("input_tokens: 10"));
+    }
+
+    #[tokio::test]
+    async fn test_missing_custom_agent_returns_error() {
+        let result = AgentTool::new()
+            .execute(
+                serde_json::json!({"prompt": "review", "agent": "missing-agent"}),
+                ToolContext {
+                    tool_use_id: "tool_1".into(),
+                    app_state: Some(app_state()),
+                    agent_context: Some(AgentContext::default()),
+                    user_question_callback: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(result.is_error);
+        assert!(result.content.contains("Custom agent not found"));
+    }
+
+    #[tokio::test]
+    async fn test_custom_agent_applies_options_and_tool_intersection() {
+        let registry = rust_claude_core::custom_agents::CustomAgentRegistry::from_agents(vec![
+            rust_claude_core::custom_agents::CustomAgentDefinition {
+                name: "reviewer".into(),
+                description: "Reviews code".into(),
+                system_prompt: "Review carefully".into(),
+                tools: vec!["FileRead".into(), "Bash".into()],
+                model: Some("model-x".into()),
+                path: std::path::PathBuf::from("reviewer.md"),
+            },
+        ]);
+
+        let result = AgentTool::new()
+            .execute(
+                serde_json::json!({
+                    "prompt": "review",
+                    "agent": "reviewer",
+                    "allowed_tools": ["FileRead"]
+                }),
+                ToolContext {
+                    tool_use_id: "tool_1".into(),
+                    app_state: Some(app_state()),
+                    agent_context: Some(AgentContext {
+                        custom_agents: Arc::new(registry),
+                        run_subagent: Arc::new(
+                            |prompt, allowed_tools, options, _state, _depth, _max_depth| {
+                                Box::pin(async move {
+                                    assert_eq!(prompt, "review");
+                                    assert_eq!(allowed_tools, vec!["FileRead"]);
+                                    assert_eq!(
+                                        options.system_prompt.as_deref(),
+                                        Some("Review carefully")
+                                    );
+                                    assert_eq!(options.model.as_deref(), Some("model-x"));
+                                    Ok(crate::tool::AgentRunOutput {
+                                        text: "done".into(),
+                                        input_tokens: 1,
+                                        output_tokens: 2,
+                                    })
+                                })
+                            },
+                        ),
+                        ..Default::default()
+                    }),
+                    user_question_callback: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("done"));
+    }
+
+    #[tokio::test]
+    async fn test_nested_agent_uses_incremented_depth() {
+        let result = AgentTool::new()
+            .execute(
+                serde_json::json!({"prompt": "delegate"}),
+                ToolContext {
+                    tool_use_id: "tool_1".into(),
+                    app_state: Some(app_state()),
+                    agent_context: Some(AgentContext {
+                        current_depth: 1,
+                        max_depth: 3,
+                        run_subagent: Arc::new(
+                            |_prompt, _allowed_tools, _options, _state, depth, max_depth| {
+                                Box::pin(async move {
+                                    assert_eq!(depth, 2);
+                                    assert_eq!(max_depth, 3);
+                                    Ok(crate::tool::AgentRunOutput {
+                                        text: "nested".into(),
+                                        input_tokens: 1,
+                                        output_tokens: 1,
+                                    })
+                                })
+                            },
+                        ),
+                        ..Default::default()
+                    }),
+                    user_question_callback: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        assert!(result.content.contains("nested"));
+    }
+
+    #[test]
+    fn test_custom_agent_tool_allowlist_cannot_be_broadened() {
+        let agent_tools = vec!["FileRead".to_string()];
+        let explicit = vec!["FileRead".to_string(), "Bash".to_string()];
+        assert_eq!(
+            intersect_allowed_tools(&agent_tools, &explicit),
+            vec!["FileRead"]
+        );
     }
 }

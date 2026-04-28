@@ -1,6 +1,7 @@
 pub mod claude_md;
 pub mod compaction;
 pub mod config;
+pub mod custom_agents;
 pub mod git;
 pub mod hooks;
 pub mod mcp_config;

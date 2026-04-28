@@ -14,6 +14,8 @@ pub enum HookEvent {
     UserPromptSubmit,
     Stop,
     Notification,
+    SessionStart,
+    SessionEnd,
 }
 
 impl fmt::Display for HookEvent {
@@ -30,6 +32,8 @@ impl HookEvent {
             HookEvent::UserPromptSubmit => "UserPromptSubmit",
             HookEvent::Stop => "Stop",
             HookEvent::Notification => "Notification",
+            HookEvent::SessionStart => "SessionStart",
+            HookEvent::SessionEnd => "SessionEnd",
         }
     }
 
@@ -40,9 +44,15 @@ impl HookEvent {
             "UserPromptSubmit" => Some(HookEvent::UserPromptSubmit),
             "Stop" => Some(HookEvent::Stop),
             "Notification" => Some(HookEvent::Notification),
+            "SessionStart" => Some(HookEvent::SessionStart),
+            "SessionEnd" => Some(HookEvent::SessionEnd),
             _ => None,
         }
     }
+}
+
+fn default_false() -> bool {
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +73,10 @@ pub struct HookConfig {
     /// Execution timeout in seconds. Defaults to 10.
     #[serde(default)]
     pub timeout: Option<u64>,
+
+    /// Whether this hook should run at most once per session.
+    #[serde(default = "default_false")]
+    pub once: bool,
 }
 
 /// A group of hooks sharing the same matcher within an event.
@@ -90,8 +104,19 @@ pub type HooksConfig = HashMap<String, Vec<HookEventGroup>>;
 pub enum HookResult {
     /// Execution should continue (tool is approved).
     Continue,
+    /// Execution should continue with replacement tool input.
+    ContinueWithInput { updated_input: serde_json::Value },
     /// Execution should be blocked.
     Block { reason: String },
+}
+
+impl HookResult {
+    pub fn updated_input(&self) -> Option<&serde_json::Value> {
+        match self {
+            HookResult::ContinueWithInput { updated_input } => Some(updated_input),
+            HookResult::Continue | HookResult::Block { .. } => None,
+        }
+    }
 }
 
 /// JSON structure expected on stdout from a PreToolUse command hook.
@@ -101,6 +126,8 @@ pub struct HookCommandResponse {
     pub decision: Option<String>,
     #[serde(default)]
     pub reason: Option<String>,
+    #[serde(default, rename = "updatedInput")]
+    pub updated_input: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +179,21 @@ pub struct NotificationInput {
     pub message: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SessionStartInput {
+    #[serde(flatten)]
+    pub base: BaseHookInput,
+    pub event: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionEndInput {
+    #[serde(flatten)]
+    pub base: BaseHookInput,
+    pub event: String,
+    pub reason: String,
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -167,6 +209,8 @@ mod tests {
         assert_eq!(HookEvent::UserPromptSubmit.to_string(), "UserPromptSubmit");
         assert_eq!(HookEvent::Stop.to_string(), "Stop");
         assert_eq!(HookEvent::Notification.to_string(), "Notification");
+        assert_eq!(HookEvent::SessionStart.to_string(), "SessionStart");
+        assert_eq!(HookEvent::SessionEnd.to_string(), "SessionEnd");
     }
 
     #[test]
@@ -188,6 +232,14 @@ mod tests {
             HookEvent::from_str("Notification"),
             Some(HookEvent::Notification)
         );
+        assert_eq!(
+            HookEvent::from_str("SessionStart"),
+            Some(HookEvent::SessionStart)
+        );
+        assert_eq!(
+            HookEvent::from_str("SessionEnd"),
+            Some(HookEvent::SessionEnd)
+        );
         assert_eq!(HookEvent::from_str("SubagentStart"), None);
         assert_eq!(HookEvent::from_str("unknown"), None);
     }
@@ -199,15 +251,17 @@ mod tests {
         assert_eq!(config.type_, "command");
         assert_eq!(config.command.as_deref(), Some("echo ok"));
         assert_eq!(config.timeout, None);
+        assert!(!config.once);
     }
 
     #[test]
     fn test_hook_config_deserialize_full() {
-        let json = r#"{"type": "command", "command": "/usr/local/bin/check.sh", "timeout": 30}"#;
+        let json = r#"{"type": "command", "command": "/usr/local/bin/check.sh", "timeout": 30, "once": true}"#;
         let config: HookConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.type_, "command");
         assert_eq!(config.command.as_deref(), Some("/usr/local/bin/check.sh"));
         assert_eq!(config.timeout, Some(30));
+        assert!(config.once);
     }
 
     #[test]
@@ -260,6 +314,13 @@ mod tests {
             HookResult::Continue,
             HookResult::Block { reason: "x".into() }
         );
+        assert_eq!(
+            HookResult::ContinueWithInput {
+                updated_input: serde_json::json!({"command": "pwd"})
+            }
+            .updated_input(),
+            Some(&serde_json::json!({"command": "pwd"}))
+        );
     }
 
     #[test]
@@ -268,6 +329,18 @@ mod tests {
         let resp: HookCommandResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.decision.as_deref(), Some("block"));
         assert_eq!(resp.reason.as_deref(), Some("unsafe"));
+        assert_eq!(resp.updated_input, None);
+    }
+
+    #[test]
+    fn test_hook_command_response_updated_input() {
+        let json = r#"{"decision":"approve","updatedInput":{"command":"pwd"}}"#;
+        let resp: HookCommandResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.decision.as_deref(), Some("approve"));
+        assert_eq!(
+            resp.updated_input,
+            Some(serde_json::json!({"command": "pwd"}))
+        );
     }
 
     #[test]
@@ -336,5 +409,32 @@ mod tests {
         };
         let json = serde_json::to_value(&input).unwrap();
         assert_eq!(json["stop_reason"], "end_turn");
+    }
+
+    #[test]
+    fn test_session_lifecycle_input_serialize() {
+        let start = SessionStartInput {
+            base: BaseHookInput {
+                session_id: "s".into(),
+                cwd: "/repo".into(),
+            },
+            event: HookEvent::SessionStart.to_string(),
+        };
+        let json = serde_json::to_value(&start).unwrap();
+        assert_eq!(json["session_id"], "s");
+        assert_eq!(json["cwd"], "/repo");
+        assert_eq!(json["event"], "SessionStart");
+
+        let end = SessionEndInput {
+            base: BaseHookInput {
+                session_id: "s".into(),
+                cwd: "/repo".into(),
+            },
+            event: HookEvent::SessionEnd.to_string(),
+            reason: "completed".into(),
+        };
+        let json = serde_json::to_value(&end).unwrap();
+        assert_eq!(json["event"], "SessionEnd");
+        assert_eq!(json["reason"], "completed");
     }
 }

@@ -1,12 +1,15 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use rust_claude_core::hooks::{
     BaseHookInput, HookCommandResponse, HookConfig, HookEvent, HookResult, HooksConfig,
-    PostToolUseInput, PreToolUseInput, StopInput, UserPromptSubmitInput,
+    PostToolUseInput, PreToolUseInput, SessionEndInput, SessionStartInput, StopInput,
+    UserPromptSubmitInput,
 };
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
 const DEFAULT_TIMEOUT_SECS: u64 = 10;
 
@@ -14,11 +17,16 @@ const DEFAULT_TIMEOUT_SECS: u64 = 10;
 pub struct HookRunner {
     hooks: HooksConfig,
     cwd: PathBuf,
+    once_executed: Mutex<HashSet<String>>,
 }
 
 impl HookRunner {
     pub fn new(hooks: HooksConfig, cwd: PathBuf) -> Self {
-        Self { hooks, cwd }
+        Self {
+            hooks,
+            cwd,
+            once_executed: Mutex::new(HashSet::new()),
+        }
     }
 
     /// Returns `true` if no hooks are configured at all.
@@ -52,31 +60,44 @@ impl HookRunner {
         session_id: &str,
         cwd: &Path,
     ) -> HookResult {
-        let matching = self.get_matching_hooks(&HookEvent::PreToolUse, Some(tool_name));
+        let matching = self.get_matching_hook_entries(&HookEvent::PreToolUse, Some(tool_name));
         if matching.is_empty() {
             return HookResult::Continue;
         }
 
-        let input_json = serde_json::to_string(&PreToolUseInput {
-            base: BaseHookInput {
-                session_id: session_id.to_string(),
-                cwd: cwd.to_string_lossy().to_string(),
-            },
-            tool_name: tool_name.to_string(),
-            tool_input: tool_input.clone(),
-        })
-        .unwrap_or_default();
+        let mut current_input = tool_input.clone();
+        let mut mutated = false;
 
-        for config in &matching {
+        for entry in &matching {
+            let input_json = serde_json::to_string(&PreToolUseInput {
+                base: BaseHookInput {
+                    session_id: session_id.to_string(),
+                    cwd: cwd.to_string_lossy().to_string(),
+                },
+                tool_name: tool_name.to_string(),
+                tool_input: current_input.clone(),
+            })
+            .unwrap_or_default();
             let result = self
-                .execute_and_parse_pre_tool_use(config, &input_json, cwd)
+                .execute_and_parse_pre_tool_use(entry, &input_json, cwd)
                 .await;
-            if let HookResult::Block { .. } = &result {
-                return result;
+            match result {
+                HookResult::Continue => {}
+                HookResult::ContinueWithInput { updated_input } => {
+                    current_input = updated_input;
+                    mutated = true;
+                }
+                HookResult::Block { reason } => return HookResult::Block { reason },
             }
         }
 
-        HookResult::Continue
+        if mutated {
+            HookResult::ContinueWithInput {
+                updated_input: current_input,
+            }
+        } else {
+            HookResult::Continue
+        }
     }
 
     pub async fn run_post_tool_use(
@@ -107,7 +128,7 @@ impl HookRunner {
         session_id: &str,
         cwd: &Path,
     ) {
-        let matching = self.get_matching_hooks(&HookEvent::PostToolUse, Some(tool_name));
+        let matching = self.get_matching_hook_entries(&HookEvent::PostToolUse, Some(tool_name));
         if matching.is_empty() {
             return;
         }
@@ -124,15 +145,15 @@ impl HookRunner {
         })
         .unwrap_or_default();
 
-        for config in &matching {
+        for entry in &matching {
             let _ = self
-                .execute_command_hook(config, &input_json, &HookEvent::PostToolUse, cwd)
+                .execute_command_hook_entry(entry, &input_json, &HookEvent::PostToolUse, cwd)
                 .await;
         }
     }
 
     pub async fn run_user_prompt_submit(&self, user_message: &str, session_id: &str) {
-        let matching = self.get_matching_hooks(&HookEvent::UserPromptSubmit, None);
+        let matching = self.get_matching_hook_entries(&HookEvent::UserPromptSubmit, None);
         if matching.is_empty() {
             return;
         }
@@ -146,15 +167,20 @@ impl HookRunner {
         })
         .unwrap_or_default();
 
-        for config in &matching {
+        for entry in &matching {
             let _ = self
-                .execute_command_hook(config, &input_json, &HookEvent::UserPromptSubmit, &self.cwd)
+                .execute_command_hook_entry(
+                    entry,
+                    &input_json,
+                    &HookEvent::UserPromptSubmit,
+                    &self.cwd,
+                )
                 .await;
         }
     }
 
     pub async fn run_stop(&self, stop_reason: &str, session_id: &str) {
-        let matching = self.get_matching_hooks(&HookEvent::Stop, None);
+        let matching = self.get_matching_hook_entries(&HookEvent::Stop, None);
         if matching.is_empty() {
             return;
         }
@@ -168,9 +194,54 @@ impl HookRunner {
         })
         .unwrap_or_default();
 
-        for config in &matching {
+        for entry in &matching {
             let _ = self
-                .execute_command_hook(config, &input_json, &HookEvent::Stop, &self.cwd)
+                .execute_command_hook_entry(entry, &input_json, &HookEvent::Stop, &self.cwd)
+                .await;
+        }
+    }
+
+    pub async fn run_session_start(&self, session_id: &str) {
+        let matching = self.get_matching_hook_entries(&HookEvent::SessionStart, None);
+        if matching.is_empty() {
+            return;
+        }
+
+        let input_json = serde_json::to_string(&SessionStartInput {
+            base: BaseHookInput {
+                session_id: session_id.to_string(),
+                cwd: self.cwd.to_string_lossy().to_string(),
+            },
+            event: HookEvent::SessionStart.to_string(),
+        })
+        .unwrap_or_default();
+
+        for entry in &matching {
+            let _ = self
+                .execute_command_hook_entry(entry, &input_json, &HookEvent::SessionStart, &self.cwd)
+                .await;
+        }
+    }
+
+    pub async fn run_session_end(&self, reason: &str, session_id: &str) {
+        let matching = self.get_matching_hook_entries(&HookEvent::SessionEnd, None);
+        if matching.is_empty() {
+            return;
+        }
+
+        let input_json = serde_json::to_string(&SessionEndInput {
+            base: BaseHookInput {
+                session_id: session_id.to_string(),
+                cwd: self.cwd.to_string_lossy().to_string(),
+            },
+            event: HookEvent::SessionEnd.to_string(),
+            reason: reason.to_string(),
+        })
+        .unwrap_or_default();
+
+        for entry in &matching {
+            let _ = self
+                .execute_command_hook_entry(entry, &input_json, &HookEvent::SessionEnd, &self.cwd)
                 .await;
         }
     }
@@ -179,9 +250,11 @@ impl HookRunner {
     // Internal: matching & execution
     // -----------------------------------------------------------------------
 
-    /// Collect all `HookConfig` entries that match the given event and optional tool name.
-    /// Returns configs in configuration order (user hooks first, project hooks after).
-    fn get_matching_hooks(&self, event: &HookEvent, tool_name: Option<&str>) -> Vec<&HookConfig> {
+    fn get_matching_hook_entries(
+        &self,
+        event: &HookEvent,
+        tool_name: Option<&str>,
+    ) -> Vec<HookEntry<'_>> {
         let event_key = event.as_str();
         let groups = match self.hooks.get(event_key) {
             Some(groups) => groups,
@@ -191,7 +264,7 @@ impl HookRunner {
         let is_tool_event = matches!(event, HookEvent::PreToolUse | HookEvent::PostToolUse);
 
         let mut result = Vec::new();
-        for group in groups {
+        for (group_index, group) in groups.iter().enumerate() {
             // For tool events, check the matcher against tool_name.
             if is_tool_event {
                 if let Some(matcher) = &group.matcher {
@@ -207,7 +280,7 @@ impl HookRunner {
             }
             // For non-tool events, matcher is ignored.
 
-            for hook in &group.hooks {
+            for (hook_index, hook) in group.hooks.iter().enumerate() {
                 if hook.type_ != "command" {
                     eprintln!("Warning: unsupported hook type '{}', skipping", hook.type_);
                     continue;
@@ -215,22 +288,57 @@ impl HookRunner {
                 if hook.command.is_none() {
                     continue;
                 }
-                result.push(hook);
+                result.push(HookEntry {
+                    event: event_key,
+                    group_index,
+                    hook_index,
+                    config: hook,
+                });
             }
         }
 
         result
     }
 
-    /// Execute a single command hook and return (stdout, exit_code).
-    async fn execute_command_hook(
+    async fn should_skip_once(&self, entry: &HookEntry<'_>) -> bool {
+        if !entry.config.once {
+            return false;
+        }
+
+        let key = entry.once_key();
+        let mut executed = self.once_executed.lock().await;
+        if executed.contains(&key) {
+            true
+        } else {
+            executed.insert(key);
+            false
+        }
+    }
+
+    async fn execute_command_hook_entry(
         &self,
+        entry: &HookEntry<'_>,
+        input_json: &str,
+        event: &HookEvent,
+        cwd: &Path,
+    ) -> Option<(String, i32)> {
+        let command = entry.config.command.as_deref()?;
+        if self.should_skip_once(entry).await {
+            return None;
+        }
+
+        self.execute_command_hook_untracked(command, entry.config, input_json, event, cwd)
+            .await
+    }
+
+    async fn execute_command_hook_untracked(
+        &self,
+        command: &str,
         config: &HookConfig,
         input_json: &str,
         event: &HookEvent,
         cwd: &Path,
     ) -> Option<(String, i32)> {
-        let command = config.command.as_deref()?;
         let timeout_secs = config.timeout.unwrap_or(DEFAULT_TIMEOUT_SECS);
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
@@ -288,12 +396,12 @@ impl HookRunner {
     /// Execute a PreToolUse hook and parse its result.
     async fn execute_and_parse_pre_tool_use(
         &self,
-        config: &HookConfig,
+        entry: &HookEntry<'_>,
         input_json: &str,
         cwd: &Path,
     ) -> HookResult {
         let (stdout, exit_code) = match self
-            .execute_command_hook(config, input_json, &HookEvent::PreToolUse, cwd)
+            .execute_command_hook_entry(entry, input_json, &HookEvent::PreToolUse, cwd)
             .await
         {
             Some(result) => result,
@@ -344,7 +452,16 @@ impl HookRunner {
                         reason: resp.reason.unwrap_or_else(|| "Blocked by hook".to_string()),
                     }
                 } else {
-                    HookResult::Continue
+                    match resp.updated_input {
+                        Some(value) if value.is_object() => HookResult::ContinueWithInput {
+                            updated_input: value,
+                        },
+                        Some(_) => {
+                            eprintln!("Warning: hook updatedInput is not an object, ignoring");
+                            HookResult::Continue
+                        }
+                        None => HookResult::Continue,
+                    }
                 }
             }
             Err(_) => {
@@ -353,6 +470,25 @@ impl HookRunner {
                 HookResult::Continue
             }
         }
+    }
+}
+
+struct HookEntry<'a> {
+    event: &'a str,
+    group_index: usize,
+    hook_index: usize,
+    config: &'a HookConfig,
+}
+
+impl HookEntry<'_> {
+    fn once_key(&self) -> String {
+        format!(
+            "{}:{}:{}:{}",
+            self.event,
+            self.group_index,
+            self.hook_index,
+            self.config.command.as_deref().unwrap_or("")
+        )
     }
 }
 
@@ -372,6 +508,7 @@ mod tests {
                     type_: "command".to_string(),
                     command: Some(command.to_string()),
                     timeout: None,
+                    once: false,
                 }],
             }],
         );
@@ -386,7 +523,7 @@ mod tests {
     fn test_matcher_matches_tool_name() {
         let hooks = make_hooks_config("PreToolUse", Some("Bash"), "check.sh");
         let runner = HookRunner::new(hooks, PathBuf::from("/tmp"));
-        let matched = runner.get_matching_hooks(&HookEvent::PreToolUse, Some("Bash"));
+        let matched = runner.get_matching_hook_entries(&HookEvent::PreToolUse, Some("Bash"));
         assert_eq!(matched.len(), 1);
     }
 
@@ -394,7 +531,7 @@ mod tests {
     fn test_matcher_does_not_match_different_tool() {
         let hooks = make_hooks_config("PreToolUse", Some("Bash"), "check.sh");
         let runner = HookRunner::new(hooks, PathBuf::from("/tmp"));
-        let matched = runner.get_matching_hooks(&HookEvent::PreToolUse, Some("FileRead"));
+        let matched = runner.get_matching_hook_entries(&HookEvent::PreToolUse, Some("FileRead"));
         assert_eq!(matched.len(), 0);
     }
 
@@ -402,7 +539,7 @@ mod tests {
     fn test_empty_matcher_matches_all() {
         let hooks = make_hooks_config("PreToolUse", Some(""), "check.sh");
         let runner = HookRunner::new(hooks, PathBuf::from("/tmp"));
-        let matched = runner.get_matching_hooks(&HookEvent::PreToolUse, Some("Bash"));
+        let matched = runner.get_matching_hook_entries(&HookEvent::PreToolUse, Some("Bash"));
         assert_eq!(matched.len(), 1);
     }
 
@@ -410,7 +547,7 @@ mod tests {
     fn test_no_matcher_matches_all() {
         let hooks = make_hooks_config("PreToolUse", None, "check.sh");
         let runner = HookRunner::new(hooks, PathBuf::from("/tmp"));
-        let matched = runner.get_matching_hooks(&HookEvent::PreToolUse, Some("FileWrite"));
+        let matched = runner.get_matching_hook_entries(&HookEvent::PreToolUse, Some("FileWrite"));
         assert_eq!(matched.len(), 1);
     }
 
@@ -418,7 +555,7 @@ mod tests {
     fn test_matcher_ignored_for_non_tool_events() {
         let hooks = make_hooks_config("UserPromptSubmit", Some("Bash"), "log.sh");
         let runner = HookRunner::new(hooks, PathBuf::from("/tmp"));
-        let matched = runner.get_matching_hooks(&HookEvent::UserPromptSubmit, None);
+        let matched = runner.get_matching_hook_entries(&HookEvent::UserPromptSubmit, None);
         assert_eq!(matched.len(), 1);
     }
 
@@ -433,18 +570,19 @@ mod tests {
                     type_: "prompt".to_string(),
                     command: Some("check $ARGUMENTS".to_string()),
                     timeout: None,
+                    once: false,
                 }],
             }],
         );
         let runner = HookRunner::new(config, PathBuf::from("/tmp"));
-        let matched = runner.get_matching_hooks(&HookEvent::PreToolUse, Some("Bash"));
+        let matched = runner.get_matching_hook_entries(&HookEvent::PreToolUse, Some("Bash"));
         assert_eq!(matched.len(), 0);
     }
 
     #[test]
     fn test_no_event_configured() {
         let runner = HookRunner::new(HashMap::new(), PathBuf::from("/tmp"));
-        let matched = runner.get_matching_hooks(&HookEvent::PreToolUse, Some("Bash"));
+        let matched = runner.get_matching_hook_entries(&HookEvent::PreToolUse, Some("Bash"));
         assert_eq!(matched.len(), 0);
     }
 
@@ -540,6 +678,29 @@ mod tests {
         assert_eq!(result, HookResult::Continue);
     }
 
+    #[test]
+    fn test_parse_updated_input_json() {
+        let result = HookRunner::parse_pre_tool_use_result(
+            r#"{"decision":"approve","updatedInput":{"command":"pwd"}}"#,
+            0,
+        );
+        assert_eq!(
+            result,
+            HookResult::ContinueWithInput {
+                updated_input: serde_json::json!({"command": "pwd"})
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_non_object_updated_input_ignores_mutation() {
+        let result = HookRunner::parse_pre_tool_use_result(
+            r#"{"decision":"approve","updatedInput":"invalid"}"#,
+            0,
+        );
+        assert_eq!(result, HookResult::Continue);
+    }
+
     // -----------------------------------------------------------------------
     // Integration tests (actually spawn processes)
     // -----------------------------------------------------------------------
@@ -623,6 +784,7 @@ mod tests {
                             r#"echo '{"decision":"block","reason":"first"}'"#.to_string(),
                         ),
                         timeout: None,
+                        once: false,
                     }],
                 },
                 HookEventGroup {
@@ -634,6 +796,7 @@ mod tests {
                             "touch /tmp/rust-claude-hook-test-should-not-exist".to_string(),
                         ),
                         timeout: None,
+                        once: false,
                     }],
                 },
             ],
@@ -650,6 +813,117 @@ mod tests {
         );
         // Verify second hook didn't run
         assert!(!std::path::Path::new("/tmp/rust-claude-hook-test-should-not-exist").exists());
+    }
+
+    #[tokio::test]
+    async fn test_run_pre_tool_use_updates_input_sequentially() {
+        let mut config: HooksConfig = HashMap::new();
+        config.insert(
+            "PreToolUse".to_string(),
+            vec![
+                HookEventGroup {
+                    matcher: None,
+                    hooks: vec![HookConfig {
+                        type_: "command".to_string(),
+                        command: Some(
+                            r#"echo '{"decision":"approve","updatedInput":{"command":"pwd"}}'"#
+                                .to_string(),
+                        ),
+                        timeout: None,
+                        once: false,
+                    }],
+                },
+                HookEventGroup {
+                    matcher: None,
+                    hooks: vec![HookConfig {
+                        type_: "command".to_string(),
+                        command: Some(
+                            r#"echo '{"decision":"approve","updatedInput":{"command":"whoami"}}'"#
+                                .to_string(),
+                        ),
+                        timeout: None,
+                        once: false,
+                    }],
+                },
+            ],
+        );
+        let runner = HookRunner::new(config, PathBuf::from("/tmp"));
+        let result = runner
+            .run_pre_tool_use("Bash", &serde_json::json!({"command": "ls"}), "")
+            .await;
+        assert_eq!(
+            result,
+            HookResult::ContinueWithInput {
+                updated_input: serde_json::json!({"command": "whoami"})
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_once_hook_runs_only_once() {
+        let path = std::env::temp_dir().join(format!(
+            "rust-claude-once-{}-{}.log",
+            std::process::id(),
+            chrono::Local::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+        ));
+        let mut hooks = make_hooks_config(
+            "SessionStart",
+            None,
+            &format!("printf run >> {}", path.display()),
+        );
+        hooks.get_mut("SessionStart").unwrap()[0].hooks[0].once = true;
+        let runner = HookRunner::new(hooks, PathBuf::from("/tmp"));
+        runner.run_session_start("").await;
+        runner.run_session_start("").await;
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "run");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn test_session_lifecycle_hooks_run() {
+        let path = std::env::temp_dir().join(format!(
+            "rust-claude-session-{}-{}.log",
+            std::process::id(),
+            chrono::Local::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+        ));
+        let mut hooks = HashMap::new();
+        hooks.insert(
+            "SessionStart".to_string(),
+            vec![HookEventGroup {
+                matcher: None,
+                hooks: vec![HookConfig {
+                    type_: "command".to_string(),
+                    command: Some(format!("printf start >> {}", path.display())),
+                    timeout: None,
+                    once: false,
+                }],
+            }],
+        );
+        hooks.insert(
+            "SessionEnd".to_string(),
+            vec![HookEventGroup {
+                matcher: None,
+                hooks: vec![HookConfig {
+                    type_: "command".to_string(),
+                    command: Some(format!("printf end >> {}", path.display())),
+                    timeout: None,
+                    once: false,
+                }],
+            }],
+        );
+        let runner = HookRunner::new(hooks, PathBuf::from("/tmp"));
+        runner.run_session_start("session-123").await;
+        runner.run_session_end("completed", "session-123").await;
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "startend");
+        let _ = std::fs::remove_file(path);
     }
 
     #[tokio::test]

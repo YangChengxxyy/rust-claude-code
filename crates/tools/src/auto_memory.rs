@@ -34,7 +34,8 @@ impl Tool for AutoMemoryTool {
     fn info(&self) -> ToolInfo {
         ToolInfo {
             name: "AutoMemory".to_string(),
-            description: "Save a durable automatic memory candidate when policy allows it".to_string(),
+            description: "Save a durable automatic memory candidate when policy allows it"
+                .to_string(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -132,7 +133,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(candidate.request.relative_path, "feedback/testing.md");
-        assert_eq!(candidate.request.frontmatter.memory_type, Some(MemoryType::Feedback));
+        assert_eq!(
+            candidate.request.frontmatter.memory_type,
+            Some(MemoryType::Feedback)
+        );
         assert_eq!(candidate.trigger, AutoMemoryTrigger::UserCorrection);
     }
 

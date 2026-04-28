@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use rust_claude_core::custom_agents::CustomAgentRegistry;
 use rust_claude_core::state::AppState;
 use rust_claude_core::tool_types::{ToolInfo, ToolResult};
 use std::future::Future;
@@ -10,6 +11,18 @@ use crate::ToolRegistry;
 
 pub type AgentRunFuture = Pin<Box<dyn Future<Output = Result<AgentRunOutput, ToolError>> + Send>>;
 pub type UserQuestionFuture = Pin<Box<dyn Future<Output = Option<AskUserQuestionResponse>> + Send>>;
+pub type AgentContextRunSubagent = Arc<
+    dyn Fn(
+            String,
+            Vec<String>,
+            AgentRunOptions,
+            Arc<Mutex<AppState>>,
+            u32,
+            u32,
+        ) -> AgentRunFuture
+        + Send
+        + Sync,
+>;
 pub type UserQuestionCallback =
     Arc<dyn Fn(AskUserQuestionRequest) -> UserQuestionFuture + Send + Sync>;
 
@@ -18,6 +31,12 @@ pub struct AgentRunOutput {
     pub text: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentRunOptions {
+    pub system_prompt: Option<String>,
+    pub model: Option<String>,
 }
 
 /// Context for spawning sub-agent QueryLoops from within a tool.
@@ -29,9 +48,8 @@ pub struct AgentContext {
     /// Factory that produces a fresh ToolRegistry for the sub-agent.
     pub tool_registry_factory: Arc<dyn Fn() -> ToolRegistry + Send + Sync>,
     /// CLI-provided callback that runs a sub-agent and returns its final output.
-    pub run_subagent: Arc<
-        dyn Fn(String, Vec<String>, Arc<Mutex<AppState>>, u32, u32) -> AgentRunFuture + Send + Sync,
-    >,
+    pub run_subagent: AgentContextRunSubagent,
+    pub custom_agents: Arc<CustomAgentRegistry>,
     /// Current nesting depth (0 = top-level).
     pub current_depth: u32,
     /// Maximum allowed nesting depth.
@@ -51,13 +69,14 @@ impl Default for AgentContext {
     fn default() -> Self {
         AgentContext {
             tool_registry_factory: Arc::new(|| ToolRegistry::new()),
-            run_subagent: Arc::new(|_, _, _, _, _| {
+            run_subagent: Arc::new(|_, _, _, _, _, _| {
                 Box::pin(async {
                     Err(ToolError::Execution(
                         "sub-agent runner not available".into(),
                     ))
                 })
             }),
+            custom_agents: Arc::new(CustomAgentRegistry::empty()),
             current_depth: 0,
             max_depth: 3,
         }

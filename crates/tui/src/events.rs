@@ -53,6 +53,7 @@ pub enum UserCommand {
         target: Option<String>,
     },
     ShowHooks,
+    ShowAgents,
     ShowMemory,
     RememberMemory {
         memory_type: String,

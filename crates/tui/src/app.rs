@@ -112,6 +112,11 @@ struct SkillSuggestionSpec {
 
 const SLASH_COMMANDS: &[SlashCommandSpec] = &[
     SlashCommandSpec {
+        name: "/agents",
+        usage: "/agents",
+        description: "List discovered custom agents",
+    },
+    SlashCommandSpec {
         name: "/clear",
         usage: "/clear [keep-context]",
         description: "Clear transcript (optionally preserve context)",
@@ -2070,6 +2075,9 @@ impl App {
             "/hooks" => {
                 let _ = user_tx.send(UserCommand::ShowHooks).await;
             }
+            "/agents" => {
+                let _ = user_tx.send(UserCommand::ShowAgents).await;
+            }
             "/mcp" => {
                 let _ = user_tx.send(UserCommand::ShowMcp).await;
             }
@@ -2808,6 +2816,8 @@ mod tests {
         assert!(help.contains("/copy"));
         assert!(help.contains("/theme [dark|light|custom]"));
         assert!(help.contains("/compact [default|aggressive|preserve-recent]"));
+        assert!(help.contains("/agents"));
+        assert!(has_slash_command("/agents"));
         assert!(has_slash_command("/resume"));
         assert!(has_slash_command("/doctor"));
         assert!(has_slash_command("/review"));
@@ -2900,6 +2910,22 @@ mod tests {
 
             assert_eq!(rx.recv().await, Some(expected));
         }
+    }
+
+    #[tokio::test]
+    async fn test_agents_command_sends_show_agents() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text("/agents");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        assert_eq!(rx.recv().await, Some(UserCommand::ShowAgents));
     }
 
     #[tokio::test]

@@ -109,9 +109,16 @@ pub enum AutoMemoryTrigger {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MemorySaveOutcome {
-    Created { path: PathBuf },
-    Updated { path: PathBuf, previous_path: String },
-    Skipped { reason: MemorySaveSkipReason },
+    Created {
+        path: PathBuf,
+    },
+    Updated {
+        path: PathBuf,
+        previous_path: String,
+    },
+    Skipped {
+        reason: MemorySaveSkipReason,
+    },
 }
 
 impl MemorySaveOutcome {

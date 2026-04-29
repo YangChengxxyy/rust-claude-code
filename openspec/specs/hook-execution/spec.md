@@ -69,6 +69,13 @@ For `Stop`, the input SHALL additionally include:
 For `Notification`, the input SHALL additionally include:
 - `message` (string): notification text
 
+For `SessionStart`, the input SHALL include:
+- `event` (string): `"SessionStart"`
+
+For `SessionEnd`, the input SHALL include:
+- `event` (string): `"SessionEnd"`
+- session end reason
+
 #### Scenario: PreToolUse input format
 - **WHEN** a PreToolUse hook fires for tool "Bash" with input `{"command": "ls"}`
 - **THEN** stdin SHALL contain a JSON object with `tool_name: "Bash"`, `tool_input: {"command": "ls"}`, `cwd`, and `session_id`
@@ -76,6 +83,14 @@ For `Notification`, the input SHALL additionally include:
 #### Scenario: PostToolUse input format
 - **WHEN** a PostToolUse hook fires for tool "Bash" with output "file1.txt\nfile2.txt"
 - **THEN** stdin SHALL contain a JSON object with `tool_name`, `tool_input`, `tool_output`, `tool_is_error`, `cwd`, and `session_id`
+
+#### Scenario: SessionStart hook input format
+- **WHEN** a SessionStart hook fires for a session in `/workspace`
+- **THEN** stdin SHALL contain a JSON object with `cwd`, `session_id`, and `event: "SessionStart"`
+
+#### Scenario: SessionEnd hook input format
+- **WHEN** a SessionEnd hook fires because a session completed normally
+- **THEN** stdin SHALL contain a JSON object with `cwd`, `session_id`, `event: "SessionEnd"`, and a session end reason
 
 ### Requirement: Hook timeout enforcement
 The system SHALL enforce a timeout on hook command execution. The default timeout SHALL be 10 seconds. If a hook config specifies a `timeout` field, that value (in seconds) SHALL be used instead. When a hook exceeds its timeout, the process SHALL be killed and the hook SHALL be treated as a non-blocking failure.
@@ -137,3 +152,32 @@ When multiple hooks match the same event, the system SHALL execute them sequenti
 #### Scenario: Sequential execution order
 - **WHEN** user settings has hook A and project settings has hook B for the same event
 - **THEN** hook A SHALL execute before hook B
+
+### Requirement: Session lifecycle hook execution
+The `HookRunner` SHALL execute `SessionStart` and `SessionEnd` hooks using the same command execution, timeout, environment, and JSON stdin mechanisms as other hook events.
+
+### Requirement: Once hook execution
+When a matching hook has `once: true`, the `HookRunner` SHALL execute that hook at most once per session. Subsequent matching events in the same session SHALL skip that hook.
+
+#### Scenario: Once hook runs once
+- **WHEN** a `SessionStart` hook with `once: true` matches twice in the same session
+- **THEN** the hook command SHALL execute only for the first matching event
+
+#### Scenario: Non-once hook runs repeatedly
+- **WHEN** a `PreToolUse` hook has `once: false` and matches two tool calls
+- **THEN** the hook command SHALL execute for both tool calls
+
+### Requirement: PreToolUse updated input application
+For `PreToolUse` hooks, if an approving hook response includes a valid `updatedInput` object, the hook runner result SHALL carry the replacement input to the caller. If multiple matching hooks approve with `updatedInput`, later hooks SHALL receive the most recently updated input and may replace it again.
+
+#### Scenario: Single hook updates input
+- **WHEN** a PreToolUse hook for Bash returns `{"decision": "approve", "updatedInput": {"command": "pwd"}}`
+- **THEN** the hook result SHALL approve execution with replacement input `{"command": "pwd"}`
+
+#### Scenario: Multiple hooks update input sequentially
+- **WHEN** two PreToolUse hooks both approve and return `updatedInput`
+- **THEN** the second hook SHALL receive the first hook's updated input and the final hook result SHALL contain the second hook's replacement input
+
+#### Scenario: Blocking hook after update
+- **WHEN** a PreToolUse hook updates input and a later PreToolUse hook blocks execution
+- **THEN** the final hook result SHALL block execution and no updated input SHALL be applied to tool execution

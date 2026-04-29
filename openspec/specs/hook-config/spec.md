@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Hook event type enumeration
-The system SHALL define a `HookEvent` enumeration with the following variants: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `Notification`. Each variant SHALL have a string representation matching the TS version's event names (PascalCase).
+The system SHALL define a `HookEvent` enumeration with the following variants: `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `Notification`, `SessionStart`, and `SessionEnd`. Each variant SHALL have a string representation matching the TS version's event names (PascalCase).
 
 #### Scenario: Serialize hook event to string
 - **WHEN** a `HookEvent::PreToolUse` variant is converted to string
@@ -10,6 +10,14 @@ The system SHALL define a `HookEvent` enumeration with the following variants: `
 #### Scenario: Deserialize hook event from settings
 - **WHEN** settings.json contains a `hooks` field with key `"PostToolUse"`
 - **THEN** the system SHALL parse it as `HookEvent::PostToolUse`
+
+#### Scenario: Deserialize SessionStart hook event
+- **WHEN** settings.json contains a `hooks` field with key `"SessionStart"`
+- **THEN** the system SHALL parse it as `HookEvent::SessionStart`
+
+#### Scenario: Deserialize SessionEnd hook event
+- **WHEN** settings.json contains a `hooks` field with key `"SessionEnd"`
+- **THEN** the system SHALL parse it as `HookEvent::SessionEnd`
 
 #### Scenario: Unknown event name in settings
 - **WHEN** settings.json contains a `hooks` field with an unrecognized event key (e.g., `"SubagentStart"`)
@@ -21,6 +29,7 @@ The system SHALL define a `HookConfig` structure that captures a single hook def
 - `command` (string): shell command to execute
 - `matcher` (optional string): tool name pattern for filtering (used by PreToolUse/PostToolUse)
 - `timeout` (optional u64): execution timeout in seconds, defaults to 10
+- `once` (optional bool): whether a matching command hook executes at most once per session, defaults to false
 
 #### Scenario: Parse minimal hook config
 - **WHEN** settings.json contains `{"type": "command", "command": "echo ok"}`
@@ -29,6 +38,14 @@ The system SHALL define a `HookConfig` structure that captures a single hook def
 #### Scenario: Parse full hook config
 - **WHEN** settings.json contains `{"type": "command", "command": "/usr/local/bin/check.sh", "matcher": "Bash", "timeout": 30}`
 - **THEN** the system SHALL parse all fields correctly
+
+#### Scenario: Parse once hook config
+- **WHEN** settings.json contains `{"type": "command", "command": "init.sh", "once": true}`
+- **THEN** the system SHALL parse the hook config with `once` set to true
+
+#### Scenario: Omitted once defaults false
+- **WHEN** settings.json contains `{"type": "command", "command": "log.sh"}`
+- **THEN** the system SHALL parse the hook config with `once` set to false
 
 #### Scenario: Unsupported hook type
 - **WHEN** settings.json contains a hook with `"type": "prompt"`
@@ -70,3 +87,14 @@ When merging user-level and project-level settings, hooks for the same event SHA
 #### Scenario: Merge when one layer has no hooks
 - **WHEN** user settings has hooks and project settings has no hooks field
 - **THEN** the merged result SHALL contain only the user hooks
+
+### Requirement: PreToolUse updated input response shape
+The system SHALL recognize an optional `updatedInput` object in a `PreToolUse` hook JSON response. `updatedInput` SHALL represent the full replacement input object for the pending tool call.
+
+#### Scenario: Parse hook response with updatedInput
+- **WHEN** a PreToolUse hook outputs `{"decision": "approve", "updatedInput": {"command": "ls -la"}}`
+- **THEN** the system SHALL parse the hook response as approved with replacement tool input `{"command": "ls -la"}`
+
+#### Scenario: Ignore non-object updatedInput
+- **WHEN** a PreToolUse hook outputs `{"decision": "approve", "updatedInput": "invalid"}`
+- **THEN** the system SHALL ignore `updatedInput` and treat the hook response as approved without input mutation

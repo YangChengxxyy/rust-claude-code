@@ -487,6 +487,7 @@ mod tests {
     #[test]
     fn test_session_settings_serde() {
         let settings = SessionSettings {
+            id: "test-session".to_string(),
             model: "claude-test".to_string(),
             model_setting: "claude-test".to_string(),
             system_prompt: Some("Be concise".to_string()),
@@ -499,6 +500,7 @@ mod tests {
         let json = serde_json::to_string(&settings).unwrap();
         let parsed: SessionSettings = serde_json::from_str(&json).unwrap();
 
+        assert_eq!(parsed.id, "test-session");
         assert_eq!(parsed.model, "claude-test");
         assert_eq!(parsed.model_setting, "claude-test");
         assert_eq!(parsed.system_prompt.as_deref(), Some("Be concise"));

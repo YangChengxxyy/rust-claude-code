@@ -35,4 +35,4 @@
 - [x] 5.1 Run `cargo test -p rust-claude-tui` and fix any TUI regressions.
 - [x] 5.2 Run `cargo test -p rust-claude-cli` and fix any worker/session command regressions.
 - [x] 5.3 Run `cargo test --workspace` and fix any workspace regressions.
-- [ ] 5.4 Manually smoke-test the new commands in the TUI enough to confirm `/help`, suggestions, and command output are coherent.
+- [x] 5.4 Manually smoke-test the new commands in the TUI enough to confirm `/help`, suggestions, and command output are coherent.

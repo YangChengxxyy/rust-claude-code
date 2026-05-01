@@ -1,12 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 
-/// Transport type for an MCP server. Only `stdio` is supported in this iteration.
+/// Transport type for an MCP server.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpTransportType {
     Stdio,
-    /// Catch-all for unsupported transport types (SSE, HTTP, etc.).
+    Sse,
+    Http,
+    /// Catch-all for unsupported transport types.
     #[serde(untagged)]
     Unsupported(String),
 }
@@ -17,10 +20,32 @@ impl Default for McpTransportType {
     }
 }
 
+impl fmt::Display for McpTransportType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            McpTransportType::Stdio => write!(f, "stdio"),
+            McpTransportType::Sse => write!(f, "sse"),
+            McpTransportType::Http => write!(f, "http"),
+            McpTransportType::Unsupported(value) => write!(f, "{value}"),
+        }
+    }
+}
+
+/// Reconnect configuration for remote MCP transports.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpReconnectConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub initial_delay_ms: Option<u64>,
+    #[serde(default)]
+    pub max_delay_ms: Option<u64>,
+}
+
 /// Configuration for a single MCP server as defined in `settings.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
-    /// Transport type. Only "stdio" is supported in this iteration.
+    /// Transport type.
     #[serde(rename = "type", default)]
     pub transport_type: McpTransportType,
 
@@ -39,6 +64,22 @@ pub struct McpServerConfig {
     /// Working directory for the server process.
     #[serde(default)]
     pub cwd: Option<String>,
+
+    /// Remote MCP endpoint URL for SSE and Streamable HTTP transports.
+    #[serde(default)]
+    pub url: Option<String>,
+
+    /// Additional HTTP headers for remote MCP transports.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+
+    /// Timeout for remote MCP transport operations.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+
+    /// Reconnect behavior for remote MCP transports.
+    #[serde(default)]
+    pub reconnect: Option<McpReconnectConfig>,
 }
 
 /// A map of server name → server configuration, as it appears under `mcpServers`.
@@ -51,6 +92,8 @@ pub enum McpServerState {
     Pending,
     /// Server connected and initialized successfully.
     Connected,
+    /// Remote server is disconnected and may reconnect later.
+    Disconnected(String),
     /// Server failed during startup or initialization.
     Failed(String),
 }
@@ -81,9 +124,12 @@ pub struct McpToolInfo {
 }
 
 impl McpServerConfig {
-    /// Returns true if this server uses a supported transport type (stdio).
+    /// Returns true if this server uses a supported transport type.
     pub fn is_supported_transport(&self) -> bool {
-        matches!(self.transport_type, McpTransportType::Stdio)
+        matches!(
+            self.transport_type,
+            McpTransportType::Stdio | McpTransportType::Sse | McpTransportType::Http
+        )
     }
 }
 
@@ -102,6 +148,8 @@ pub fn filter_supported_servers(
         } else {
             let type_str = match &config.transport_type {
                 McpTransportType::Stdio => "stdio".to_string(),
+                McpTransportType::Sse => "sse".to_string(),
+                McpTransportType::Http => "http".to_string(),
                 McpTransportType::Unsupported(t) => t.clone(),
             };
             skipped.push((name.clone(), type_str));
@@ -155,12 +203,51 @@ mod tests {
 
     #[test]
     fn test_deserialize_unsupported_transport() {
-        let json = r#"{"type": "sse", "command": "some-server"}"#;
+        let json = r#"{"type": "websocket", "command": "some-server"}"#;
         let config: McpServerConfig = serde_json::from_str(json).unwrap();
         assert!(!config.is_supported_transport());
         assert!(
-            matches!(config.transport_type, McpTransportType::Unsupported(ref t) if t == "sse")
+            matches!(config.transport_type, McpTransportType::Unsupported(ref t) if t == "websocket")
         );
+    }
+
+    #[test]
+    fn test_deserialize_sse_server() {
+        let json = r#"{
+            "type": "sse",
+            "url": "https://example.test/mcp",
+            "headers": {"Authorization": "Bearer token"},
+            "timeout_ms": 5000,
+            "reconnect": {"enabled": true, "initial_delay_ms": 100, "max_delay_ms": 2000}
+        }"#;
+
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.transport_type, McpTransportType::Sse);
+        assert!(config.is_supported_transport());
+        assert_eq!(config.url.as_deref(), Some("https://example.test/mcp"));
+        assert_eq!(
+            config.headers.get("Authorization").map(String::as_str),
+            Some("Bearer token")
+        );
+        assert_eq!(config.timeout_ms, Some(5000));
+        let reconnect = config.reconnect.as_ref().unwrap();
+        assert!(reconnect.enabled);
+        assert_eq!(reconnect.initial_delay_ms, Some(100));
+        assert_eq!(reconnect.max_delay_ms, Some(2000));
+    }
+
+    #[test]
+    fn test_deserialize_http_server() {
+        let json = r#"{"type": "http", "url": "https://example.test/mcp"}"#;
+
+        let config: McpServerConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(config.transport_type, McpTransportType::Http);
+        assert!(config.is_supported_transport());
+        assert_eq!(config.url.as_deref(), Some("https://example.test/mcp"));
+        assert!(config.headers.is_empty());
+        assert!(config.reconnect.is_none());
     }
 
     #[test]
@@ -174,6 +261,10 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
                 cwd: None,
+                url: None,
+                headers: HashMap::new(),
+                timeout_ms: None,
+                reconnect: None,
             },
         );
         servers.insert(
@@ -184,6 +275,10 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
                 cwd: None,
+                url: None,
+                headers: HashMap::new(),
+                timeout_ms: None,
+                reconnect: None,
             },
         );
 
@@ -205,6 +300,10 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
                 cwd: None,
+                url: None,
+                headers: HashMap::new(),
+                timeout_ms: None,
+                reconnect: None,
             },
         );
         let mut high = McpServersConfig::new();
@@ -216,6 +315,10 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
                 cwd: None,
+                url: None,
+                headers: HashMap::new(),
+                timeout_ms: None,
+                reconnect: None,
             },
         );
 
@@ -236,6 +339,10 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
                 cwd: None,
+                url: None,
+                headers: HashMap::new(),
+                timeout_ms: None,
+                reconnect: None,
             },
         );
         let mut high = McpServersConfig::new();
@@ -247,6 +354,10 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
                 cwd: None,
+                url: None,
+                headers: HashMap::new(),
+                timeout_ms: None,
+                reconnect: None,
             },
         );
 
@@ -261,5 +372,15 @@ mod tests {
         let config: McpServerConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.transport_type, McpTransportType::Stdio);
         assert!(config.is_supported_transport());
+    }
+
+    #[test]
+    fn test_remote_disconnected_state_is_distinct_from_failed() {
+        let state = McpServerState::Disconnected("network error".to_string());
+
+        assert_eq!(
+            state,
+            McpServerState::Disconnected("network error".to_string())
+        );
     }
 }

@@ -1,7 +1,5 @@
-## Purpose
+## MODIFIED Requirements
 
-Define how MCP servers are configured, merged across settings layers, and exposed through runtime metadata.
-## Requirements
 ### Requirement: MCP server configuration model
 The system SHALL support an `mcpServers` field in `settings.json`. The field SHALL be a map keyed by server name. Each server definition MUST use a supported `type` value and SHALL preserve the fields for that transport. Stdio server definitions SHALL support `command`, optional `args`, optional `env`, and optional `cwd`. SSE and HTTP server definitions SHALL support `url`, optional `headers`, and optional timeout or reconnect configuration.
 
@@ -52,4 +50,3 @@ The system SHALL preserve MCP server metadata at runtime, including server name,
 #### Scenario: Remote disconnected metadata is available
 - **WHEN** a remote MCP server disconnects after startup
 - **THEN** the runtime metadata SHALL record the server as disconnected or reconnecting with an error summary
-

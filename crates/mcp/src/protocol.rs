@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::McpError;
 use crate::jsonrpc::JsonRpcRequest;
-use crate::transport::StdioTransport;
+use crate::transport::{McpTransport, StdioTransport};
 
 /// Client capabilities sent during initialization.
 #[derive(Debug, Clone, Serialize)]
@@ -87,13 +87,21 @@ pub struct ToolsCallResult {
 
 /// A connected MCP client wrapping a stdio transport.
 pub struct McpClient {
-    transport: StdioTransport,
+    transport: Box<dyn McpTransport>,
     server_name: String,
     #[allow(dead_code)]
     initialize_result: Option<InitializeResult>,
 }
 
 impl McpClient {
+    pub fn from_transport(server_name: &str, transport: Box<dyn McpTransport>) -> Self {
+        McpClient {
+            transport,
+            server_name: server_name.to_string(),
+            initialize_result: None,
+        }
+    }
+
     /// Connect to an MCP server using the given config.
     /// This starts the process and performs the `initialize` handshake.
     pub async fn connect(server_name: &str, config: &McpServerConfig) -> Result<Self, McpError> {
@@ -104,11 +112,7 @@ impl McpClient {
             config.cwd.as_deref(),
         )?;
 
-        let mut client = McpClient {
-            transport,
-            server_name: server_name.to_string(),
-            initialize_result: None,
-        };
+        let mut client = McpClient::from_transport(server_name, Box::new(transport));
 
         client.initialize().await?;
         Ok(client)
@@ -128,11 +132,7 @@ impl McpClient {
         )?
         .with_timeout_ms(timeout_ms);
 
-        let mut client = McpClient {
-            transport,
-            server_name: server_name.to_string(),
-            initialize_result: None,
-        };
+        let mut client = McpClient::from_transport(server_name, Box::new(transport));
 
         client.initialize().await?;
         Ok(client)
@@ -172,8 +172,9 @@ impl McpClient {
             McpError::InvalidJson(format!("failed to serialize initialized notification: {e}"))
         })?;
         {
-            let mut stdin = self.transport.stdin.lock().await;
-            crate::jsonrpc::write_message(&mut *stdin, &json).await?;
+            self.transport
+                .send_notification(&json)
+                .await?;
         }
 
         Ok(())
@@ -260,6 +261,9 @@ pub struct ToolCallResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::McpTransport;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     #[test]
     fn test_tool_definition_deserialize() {
@@ -357,5 +361,56 @@ mod tests {
         assert_eq!(result.protocol_version, "2024-11-05");
         let info = result.server_info.unwrap();
         assert_eq!(info.name, "test-server");
+    }
+
+    struct FakeTransport {
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl McpTransport for FakeTransport {
+        async fn send_request(
+            &self,
+            request: &JsonRpcRequest,
+        ) -> Result<serde_json::Value, McpError> {
+            self.requests.lock().await.push(request.method.clone());
+            Ok(match request.method.as_str() {
+                "tools/list" => serde_json::json!({
+                    "tools": [{"name": "lookup", "description": "Lookup", "inputSchema": {"type": "object"}}]
+                }),
+                "tools/call" => serde_json::json!({
+                    "content": [{"type": "text", "text": "ok"}],
+                    "isError": false
+                }),
+                method => panic!("unexpected method: {method}"),
+            })
+        }
+
+        async fn send_notification(&self, _json: &[u8]) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn test_client_uses_transport_trait_for_tools() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let client = McpClient::from_transport(
+            "fake",
+            Box::new(FakeTransport {
+                requests: requests.clone(),
+            }),
+        );
+
+        let tools = client.list_tools().await.unwrap();
+        let result = client.call_tool("lookup", serde_json::json!({})).await.unwrap();
+
+        assert_eq!(tools[0].name, "lookup");
+        assert_eq!(result.content, "ok");
+        assert_eq!(
+            *requests.lock().await,
+            vec!["tools/list".to_string(), "tools/call".to_string()]
+        );
     }
 }

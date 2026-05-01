@@ -189,4 +189,39 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn test_apply_tool_filters_matches_mcp_tool_names_exactly() {
+        let mut registry = ToolRegistry::new();
+        registry.tools.insert(
+            "mcp__remote__lookup".to_string(),
+            RegisteredTool {
+                info: ToolInfo {
+                    name: "mcp__remote__lookup".to_string(),
+                    description: "Remote lookup".to_string(),
+                    input_schema: serde_json::json!({}),
+                },
+                is_read_only: false,
+                is_concurrency_safe: false,
+                tool: Box::new(BashTool::new()),
+            },
+        );
+        registry.tools.insert(
+            "mcp__other__lookup".to_string(),
+            RegisteredTool {
+                info: ToolInfo {
+                    name: "mcp__other__lookup".to_string(),
+                    description: "Other lookup".to_string(),
+                    input_schema: serde_json::json!({}),
+                },
+                is_read_only: false,
+                is_concurrency_safe: false,
+                tool: Box::new(BashTool::new()),
+            },
+        );
+
+        registry.apply_tool_filters(&["mcp__remote__lookup".to_string()], &[]);
+
+        assert_eq!(registry.names(), vec!["mcp__remote__lookup"]);
+    }
 }

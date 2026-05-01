@@ -23,9 +23,71 @@ enum AuthMode {
 pub struct AnthropicClient {
     http_client: Client,
     api_key: String,
-    base_url: String,
+    provider: ProviderAdapter,
     anthropic_version: String,
     auth_mode: AuthMode,
+}
+
+#[derive(Debug, Clone)]
+pub enum ProviderAdapter {
+    Anthropic { base_url: String },
+    Bedrock { region: String, model_id: String },
+    Vertex {
+        project: String,
+        location: String,
+        model_id: String,
+    },
+}
+
+impl ProviderAdapter {
+    pub fn anthropic(base_url: impl Into<String>) -> Self {
+        Self::Anthropic {
+            base_url: normalize_base_url(base_url.into()),
+        }
+    }
+
+    pub fn bedrock(region: impl Into<String>, model_id: impl Into<String>) -> Self {
+        Self::Bedrock {
+            region: region.into(),
+            model_id: model_id.into(),
+        }
+    }
+
+    pub fn bedrock_missing_credentials_error() -> ApiError {
+        ApiError::Auth("AWS credentials are required for Bedrock provider".to_string())
+    }
+
+    pub fn vertex(
+        project: impl Into<String>,
+        location: impl Into<String>,
+        model_id: impl Into<String>,
+    ) -> Self {
+        Self::Vertex {
+            project: project.into(),
+            location: location.into(),
+            model_id: model_id.into(),
+        }
+    }
+
+    pub fn vertex_missing_credentials_error() -> ApiError {
+        ApiError::Auth("GCP credentials are required for Vertex provider".to_string())
+    }
+
+    pub fn messages_endpoint(&self) -> String {
+        match self {
+            ProviderAdapter::Anthropic { base_url } => format!("{}/v1/messages", base_url),
+            ProviderAdapter::Bedrock { region, model_id } => format!(
+                "https://bedrock-runtime.{region}.amazonaws.com/model/{model_id}/invoke-with-response-stream"
+            ),
+            ProviderAdapter::Vertex {
+                project,
+                location,
+                model_id,
+            } => format!(
+                "https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/{model_id}:streamRawPredict"
+            ),
+        }
+    }
 }
 
 impl AnthropicClient {
@@ -39,7 +101,7 @@ impl AnthropicClient {
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
-        self.base_url = normalize_base_url(base_url.into());
+        self.provider = ProviderAdapter::anthropic(base_url);
         self
     }
 
@@ -60,7 +122,7 @@ impl AnthropicClient {
         Ok(Self {
             http_client,
             api_key,
-            base_url: DEFAULT_BASE_URL.to_string(),
+            provider: ProviderAdapter::anthropic(DEFAULT_BASE_URL),
             anthropic_version: DEFAULT_VERSION.to_string(),
             auth_mode: AuthMode::Anthropic,
         })
@@ -101,7 +163,7 @@ impl AnthropicClient {
     }
 
     fn messages_endpoint(&self) -> String {
-        format!("{}/v1/messages", self.base_url)
+        self.provider.messages_endpoint()
     }
 
     fn request(&self, method: Method, url: String) -> Result<RequestBuilder, ApiError> {
@@ -295,6 +357,47 @@ mod tests {
 
         assert_eq!(request.method(), Method::POST);
         assert_eq!(request.url().as_str(), "https://example.com/v1/messages");
+    }
+
+    #[test]
+    fn test_provider_adapter_default_preserves_anthropic_endpoint() {
+        let adapter = ProviderAdapter::anthropic("https://api.example.com");
+
+        assert_eq!(adapter.messages_endpoint(), "https://api.example.com/v1/messages");
+    }
+
+    #[test]
+    fn test_bedrock_provider_constructs_messages_endpoint() {
+        let adapter = ProviderAdapter::bedrock("us-east-1", "anthropic.claude-3-5-sonnet");
+
+        assert_eq!(
+            adapter.messages_endpoint(),
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-5-sonnet/invoke-with-response-stream"
+        );
+    }
+
+    #[test]
+    fn test_bedrock_provider_reports_missing_credentials() {
+        let error = ProviderAdapter::bedrock_missing_credentials_error();
+
+        assert!(matches!(error, ApiError::Auth(message) if message.contains("AWS credentials")));
+    }
+
+    #[test]
+    fn test_vertex_provider_constructs_messages_endpoint() {
+        let adapter = ProviderAdapter::vertex("test-project", "us-central1", "claude-3-5-sonnet");
+
+        assert_eq!(
+            adapter.messages_endpoint(),
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/anthropic/models/claude-3-5-sonnet:streamRawPredict"
+        );
+    }
+
+    #[test]
+    fn test_vertex_provider_reports_missing_credentials() {
+        let error = ProviderAdapter::vertex_missing_credentials_error();
+
+        assert!(matches!(error, ApiError::Auth(message) if message.contains("GCP credentials")));
     }
 
     #[test]

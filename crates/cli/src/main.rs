@@ -7,7 +7,7 @@ use clap::Parser;
 use rust_claude_api::AnthropicClient;
 use rust_claude_core::{
     claude_md,
-    config::{Config, ConfigError, ConfigOverrides, ConfigSource, Theme},
+    config::{Config, ConfigError, ConfigOverrides, ConfigSource, Provider, Theme},
     custom_agents::CustomAgentRegistry,
     git::collect_git_context,
     hooks::HooksConfig,
@@ -107,6 +107,9 @@ struct Cli {
     #[arg(long = "theme", value_parser = ["dark", "light"])]
     theme: Option<String>,
 
+    #[arg(long = "provider", value_parser = ["anthropic", "bedrock", "vertex"])]
+    provider: Option<String>,
+
     #[arg(long = "thinking", conflicts_with = "no_thinking")]
     thinking: bool,
 
@@ -147,6 +150,7 @@ struct ResolvedConfig {
     always_deny: Vec<rust_claude_core::permission::PermissionRule>,
     hooks_config: HooksConfig,
     mcp_servers: McpServersConfig,
+    provider: Provider,
     config: Config,
     project_settings: Option<SettingsLayer>,
 }
@@ -156,6 +160,15 @@ fn parse_bool_env(value: &str) -> Option<bool> {
         "1" | "true" => Some(true),
         "0" | "false" => Some(false),
         _ => None,
+    }
+}
+
+fn parse_provider(value: &str) -> Provider {
+    match value {
+        "anthropic" => Provider::Anthropic,
+        "bedrock" => Provider::Bedrock,
+        "vertex" => Provider::Vertex,
+        _ => unreachable!("clap restricts provider values"),
     }
 }
 
@@ -356,6 +369,10 @@ fn resolve_config(
     let output_json = cli.output_format.as_deref() == Some("json");
     let allowed_tools = cli.allowed_tools.clone().unwrap_or_default();
     let disallowed_tools = cli.disallowed_tools.clone().unwrap_or_default();
+    let (provider, _) = Config::resolve_provider(
+        cli.provider.as_deref().map(parse_provider),
+        Some(config.provider),
+    )?;
 
     Ok(ResolvedConfig {
         api_key: config.api_key.clone(),
@@ -377,6 +394,7 @@ fn resolve_config(
         always_deny: config.always_deny.clone(),
         hooks_config: merged_settings.hooks.clone(),
         mcp_servers: merged_settings.mcp_servers.clone(),
+        provider,
         config,
         project_settings,
     })
@@ -566,6 +584,9 @@ async fn main() -> Result<()> {
                     rust_claude_core::mcp_config::McpServerState::Failed(msg) => {
                         println!("  {} (failed: {})", status.name, msg);
                     }
+                    rust_claude_core::mcp_config::McpServerState::Disconnected(msg) => {
+                        println!("  {} (disconnected: {})", status.name, msg);
+                    }
                     rust_claude_core::mcp_config::McpServerState::Pending => {
                         println!("  {} (pending)", status.name);
                     }
@@ -603,6 +624,7 @@ async fn main() -> Result<()> {
             &resolved.api_key,
             resolved.base_url.clone(),
             resolved.bearer_auth,
+            resolved.provider,
         )?;
         let mut tools = build_tools();
         register_mcp_tools(&mut tools, &mcp_manager);
@@ -782,8 +804,10 @@ fn build_client(
     api_key: &str,
     base_url_override: Option<String>,
     bearer_auth: bool,
+    provider: Provider,
 ) -> Result<AnthropicClient> {
     let mut client = AnthropicClient::new(api_key.to_string())?;
+    let _ = provider;
     if let Some(base_url) = base_url_override {
         client = client.with_base_url(base_url);
     }
@@ -928,11 +952,17 @@ fn format_mcp_status(manager: &McpManager) -> String {
     for status in statuses {
         let state_str = match &status.state {
             rust_claude_core::mcp_config::McpServerState::Connected => "connected".to_string(),
+            rust_claude_core::mcp_config::McpServerState::Disconnected(msg) => {
+                format!("disconnected: {}", msg)
+            }
             rust_claude_core::mcp_config::McpServerState::Failed(msg) => format!("failed: {}", msg),
             rust_claude_core::mcp_config::McpServerState::Pending => "pending".to_string(),
         };
 
-        text.push_str(&format!("\n  {} ({})\n", status.name, state_str));
+        text.push_str(&format!(
+            "\n  {} [{}] ({})\n",
+            status.name, status.transport_type, state_str
+        ));
 
         if !status.tools.is_empty() {
             text.push_str("    Tools:\n");
@@ -1719,7 +1749,7 @@ async fn run_tui(
             match command {
                 UserCommand::Compact(strategy) => {
                     let client =
-                        match build_client(&worker_config.api_key, base_url.clone(), bearer_auth) {
+                        match build_client(&worker_config.api_key, base_url.clone(), bearer_auth, Provider::Anthropic) {
                             Ok(client) => client,
                             Err(error) => {
                                 worker_bridge.send_error(&error.to_string()).await;
@@ -2409,7 +2439,7 @@ async fn run_tui(
                     };
 
                     let client =
-                        match build_client(&worker_config.api_key, base_url.clone(), bearer_auth) {
+                        match build_client(&worker_config.api_key, base_url.clone(), bearer_auth, Provider::Anthropic) {
                             Ok(client) => client,
                             Err(error) => {
                                 worker_bridge.send_error(&error.to_string()).await;
@@ -2606,7 +2636,7 @@ async fn run_tui(
                         handle.abort();
                     }
                     let client =
-                        match build_client(&worker_config.api_key, base_url.clone(), bearer_auth) {
+                        match build_client(&worker_config.api_key, base_url.clone(), bearer_auth, Provider::Anthropic) {
                             Ok(client) => client,
                             Err(error) => {
                                 worker_bridge.send_error(&error.to_string()).await;
@@ -2867,6 +2897,7 @@ mod tests {
             max_tokens: None,
             no_stream: false,
             theme: None,
+            provider: None,
             thinking: false,
             no_thinking: false,
             verbose: false,
@@ -2894,6 +2925,22 @@ mod tests {
     }
 
     #[test]
+    fn resolve_config_uses_cli_provider() {
+        let _g = env_lock();
+        let _reset = EnvReset::new();
+
+        let cli = Cli {
+            provider: Some("bedrock".to_string()),
+            ..default_cli()
+        };
+        let config = Config::with_credential("test-key".to_string(), false);
+
+        let resolved = resolve_config(&cli, config, ClaudeSettings::default(), None).unwrap();
+
+        assert_eq!(resolved.provider, Provider::Bedrock);
+    }
+
+    #[test]
     fn resolve_config_uses_project_permissions() {
         let _g = env_lock();
         let _reset = EnvReset::new();
@@ -2914,6 +2961,7 @@ mod tests {
             max_tokens: None,
             no_stream: false,
             theme: None,
+            provider: None,
             thinking: false,
             no_thinking: false,
             verbose: false,
@@ -2959,6 +3007,7 @@ mod tests {
             max_tokens: None,
             no_stream: false,
             theme: None,
+            provider: None,
             thinking: false,
             no_thinking: false,
             verbose: false,

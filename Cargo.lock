@@ -1568,6 +1568,8 @@ dependencies = [
 name = "rust-claude-mcp"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "reqwest",
  "rust-claude-core",
  "serde",
  "serde_json",

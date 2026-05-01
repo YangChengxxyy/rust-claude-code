@@ -1,7 +1,5 @@
-## Purpose
+## MODIFIED Requirements
 
-Define how discovered MCP tools are exposed as local tools, forwarded to the model, permission-checked, and displayed in MCP status output.
-## Requirements
 ### Requirement: MCP tools are exposed as local tools
 Each discovered MCP tool SHALL be wrapped as a local tool and registered into the existing `ToolRegistry`. The local tool name SHALL use the format `mcp__<server_name>__<tool_name>`. This behavior SHALL apply to MCP tools discovered through stdio, SSE, and HTTP transports.
 
@@ -57,4 +55,3 @@ The system SHALL provide a `/mcp` slash command that displays currently configur
 #### Scenario: No MCP servers configured
 - **WHEN** `/mcp` is run and no `mcpServers` are configured
 - **THEN** the output SHALL indicate that no MCP servers are configured
-

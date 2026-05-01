@@ -10,6 +10,21 @@ pub enum Theme {
     Light,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Provider {
+    #[default]
+    Anthropic,
+    Bedrock,
+    Vertex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProviderConfig {
+    #[serde(default)]
+    pub provider: Provider,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub api_key: String,
@@ -17,6 +32,8 @@ pub struct Config {
     pub model: String,
     #[serde(default)]
     pub base_url: Option<String>,
+    #[serde(default)]
+    pub provider: Provider,
     #[serde(default)]
     pub bearer_auth: bool,
     #[serde(default)]
@@ -104,6 +121,30 @@ impl Default for ConfigProvenance {
 }
 
 impl Config {
+    pub fn resolve_provider(
+        cli_provider: Option<Provider>,
+        config_provider: Option<Provider>,
+    ) -> Result<(Provider, ConfigSource), ConfigError> {
+        if let Some(provider) = cli_provider {
+            return Ok((provider, ConfigSource::Cli));
+        }
+
+        let use_bedrock = env_flag_enabled("CLAUDE_CODE_USE_BEDROCK");
+        let use_vertex = env_flag_enabled("CLAUDE_CODE_USE_VERTEX");
+        match (use_bedrock, use_vertex) {
+            (true, true) => return Err(ConfigError::ConflictingProviderEnv),
+            (true, false) => return Ok((Provider::Bedrock, ConfigSource::Env)),
+            (false, true) => return Ok((Provider::Vertex, ConfigSource::Env)),
+            (false, false) => {}
+        }
+
+        if let Some(provider) = config_provider {
+            return Ok((provider, ConfigSource::UserConfig));
+        }
+
+        Ok((Provider::Anthropic, ConfigSource::Default))
+    }
+
     pub fn load() -> Result<Self, ConfigError> {
         let config_path = Self::config_path()?;
 
@@ -153,6 +194,7 @@ impl Config {
                 api_key,
                 model: raw.model.unwrap_or_else(default_model),
                 base_url: raw.base_url,
+                provider: raw.provider.unwrap_or_default(),
                 bearer_auth,
                 system_prompt: raw.system_prompt,
                 max_tokens: raw.max_tokens.unwrap_or_else(default_max_tokens),
@@ -170,6 +212,7 @@ impl Config {
                 api_key,
                 model: default_model(),
                 base_url: None,
+                provider: Provider::Anthropic,
                 bearer_auth,
                 system_prompt: None,
                 max_tokens: default_max_tokens(),
@@ -226,6 +269,7 @@ impl Config {
             api_key: None,
             model: Some(self.model.clone()),
             base_url: self.base_url.clone(),
+            provider: Some(self.provider),
             bearer_auth: Some(self.bearer_auth),
             system_prompt: self.system_prompt.clone(),
             max_tokens: Some(self.max_tokens),
@@ -254,6 +298,7 @@ impl Config {
             api_key,
             model: default_model(),
             base_url: None,
+            provider: Provider::Anthropic,
             bearer_auth,
             system_prompt: None,
             max_tokens: default_max_tokens(),
@@ -281,6 +326,13 @@ impl Config {
     }
 }
 
+fn env_flag_enabled(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE") | Some("True")
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ResolvedField<T> {
     pub value: Option<T>,
@@ -298,6 +350,7 @@ impl<T> ResolvedField<T> {
 pub struct ConfigOverrides {
     pub model: ResolvedField<String>,
     pub base_url: ResolvedField<Option<String>>,
+    pub provider: ResolvedField<Provider>,
     pub bearer_auth: ResolvedField<bool>,
     pub system_prompt: ResolvedField<Option<String>>,
     pub max_tokens: ResolvedField<u32>,
@@ -317,6 +370,9 @@ impl Config {
         if let Some(value) = overrides.base_url.value {
             self.base_url = value;
             self.provenance.base_url = overrides.base_url.source.unwrap_or(ConfigSource::Default);
+        }
+        if let Some(value) = overrides.provider.value {
+            self.provider = value;
         }
         if let Some(value) = overrides.bearer_auth.value {
             self.bearer_auth = value;
@@ -379,6 +435,8 @@ struct RawConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<Provider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     bearer_auth: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     system_prompt: Option<String>,
@@ -406,6 +464,8 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("Conflicting provider environment flags: CLAUDE_CODE_USE_BEDROCK and CLAUDE_CODE_USE_VERTEX are both enabled")]
+    ConflictingProviderEnv,
 }
 
 #[cfg(test)]
@@ -425,6 +485,65 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn test_provider_config_serializes_supported_providers() {
+        assert_eq!(serde_json::to_string(&Provider::Anthropic).unwrap(), "\"anthropic\"");
+        assert_eq!(serde_json::to_string(&Provider::Bedrock).unwrap(), "\"bedrock\"");
+        assert_eq!(serde_json::to_string(&Provider::Vertex).unwrap(), "\"vertex\"");
+
+        let config: ProviderConfig = serde_json::from_str(r#"{"provider":"bedrock"}"#).unwrap();
+        assert_eq!(config.provider, Provider::Bedrock);
+    }
+
+    #[test]
+    fn test_resolve_provider_precedence_and_conflicts() {
+        let _guard = env_lock().lock().unwrap();
+        let old_bedrock = std::env::var("CLAUDE_CODE_USE_BEDROCK").ok();
+        let old_vertex = std::env::var("CLAUDE_CODE_USE_VERTEX").ok();
+        unsafe {
+            std::env::remove_var("CLAUDE_CODE_USE_BEDROCK");
+            std::env::remove_var("CLAUDE_CODE_USE_VERTEX");
+        }
+
+        assert_eq!(
+            Config::resolve_provider(None, None).unwrap(),
+            (Provider::Anthropic, ConfigSource::Default)
+        );
+        assert_eq!(
+            Config::resolve_provider(None, Some(Provider::Vertex)).unwrap(),
+            (Provider::Vertex, ConfigSource::UserConfig)
+        );
+
+        unsafe {
+            std::env::set_var("CLAUDE_CODE_USE_BEDROCK", "1");
+        }
+        assert_eq!(
+            Config::resolve_provider(None, Some(Provider::Vertex)).unwrap(),
+            (Provider::Bedrock, ConfigSource::Env)
+        );
+        assert_eq!(
+            Config::resolve_provider(Some(Provider::Anthropic), Some(Provider::Vertex)).unwrap(),
+            (Provider::Anthropic, ConfigSource::Cli)
+        );
+
+        unsafe {
+            std::env::set_var("CLAUDE_CODE_USE_VERTEX", "true");
+        }
+        let error = Config::resolve_provider(None, None).unwrap_err();
+        assert!(matches!(error, ConfigError::ConflictingProviderEnv));
+
+        unsafe {
+            match old_bedrock {
+                Some(value) => std::env::set_var("CLAUDE_CODE_USE_BEDROCK", value),
+                None => std::env::remove_var("CLAUDE_CODE_USE_BEDROCK"),
+            }
+            match old_vertex {
+                Some(value) => std::env::set_var("CLAUDE_CODE_USE_VERTEX", value),
+                None => std::env::remove_var("CLAUDE_CODE_USE_VERTEX"),
+            }
+        }
     }
 
     struct TestEnv {
@@ -502,6 +621,7 @@ mod tests {
             api_key: "test-key".to_string(),
             model: "claude-3-opus".to_string(),
             base_url: None,
+            provider: Provider::Anthropic,
             bearer_auth: false,
             system_prompt: Some("You are a test assistant".to_string()),
             max_tokens: 4096,

@@ -5,7 +5,7 @@
 
 use rust_claude_core::mcp_config::{
     filter_supported_servers, McpServerConfig, McpServerState, McpServerStatus, McpServersConfig,
-    McpToolInfo, McpTransportType,
+    McpReconnectConfig, McpToolInfo, McpTransportType,
 };
 use std::collections::HashMap;
 use tokio::sync::Mutex;
@@ -49,6 +49,21 @@ pub struct McpManager {
 }
 
 impl McpManager {
+    pub fn qualified_tool_name(server_name: &str, tool_name: &str) -> String {
+        format!("mcp__{}__{}", server_name, tool_name)
+    }
+
+    pub fn disconnected_tool_error(server_name: &str) -> McpError {
+        McpError::ServerNotConnected(server_name.to_string())
+    }
+
+    pub fn reconnect_delay_ms(config: &McpReconnectConfig, attempt: u32) -> u64 {
+        let initial = config.initial_delay_ms.unwrap_or(500).max(1);
+        let max = config.max_delay_ms.unwrap_or(30_000).max(initial);
+        let multiplier = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
+        initial.saturating_mul(multiplier).min(max)
+    }
+
     /// Start all configured MCP servers and discover their tools.
     ///
     /// Servers with unsupported transport types are skipped with a warning.
@@ -84,7 +99,7 @@ impl McpManager {
                 Ok((client, tools)) => {
                     // Build tool index
                     for tool in &tools {
-                        let qualified_name = format!("mcp__{}__{}", name, tool.name);
+                        let qualified_name = Self::qualified_tool_name(name, &tool.name);
                         tool_index
                             .insert(qualified_name.clone(), (name.clone(), tool.name.clone()));
                         tool_infos.insert(qualified_name, tool.clone());
@@ -143,6 +158,15 @@ impl McpManager {
         }
     }
 
+    pub fn from_statuses(statuses: Vec<McpServerStatus>) -> Self {
+        McpManager {
+            servers: HashMap::new(),
+            statuses,
+            tool_index: HashMap::new(),
+            tool_infos: HashMap::new(),
+        }
+    }
+
     /// Get the status of all configured servers.
     pub fn server_statuses(&self) -> &[McpServerStatus] {
         &self.statuses
@@ -175,7 +199,7 @@ impl McpManager {
         let server = self
             .servers
             .get(server_name)
-            .ok_or_else(|| McpError::ServerNotConnected(server_name.clone()))?;
+            .ok_or_else(|| Self::disconnected_tool_error(server_name))?;
 
         let server_guard = server.lock().await;
         server_guard.client.call_tool(tool_name, arguments).await
@@ -232,6 +256,10 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
                 cwd: None,
+                url: None,
+                headers: HashMap::new(),
+                timeout_ms: None,
+                reconnect: None,
             },
         );
 
@@ -255,6 +283,10 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
                 cwd: None,
+                url: None,
+                headers: HashMap::new(),
+                timeout_ms: None,
+                reconnect: None,
             },
         );
 
@@ -278,6 +310,10 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
                 cwd: None,
+                url: None,
+                headers: HashMap::new(),
+                timeout_ms: None,
+                reconnect: None,
             },
         );
         // Another bad server
@@ -289,6 +325,10 @@ mod tests {
                 args: vec![],
                 env: HashMap::new(),
                 cwd: None,
+                url: None,
+                headers: HashMap::new(),
+                timeout_ms: None,
+                reconnect: None,
             },
         );
 
@@ -305,5 +345,47 @@ mod tests {
             .call_tool("mcp__unknown__tool", serde_json::json!({}))
             .await;
         assert!(matches!(result, Err(McpError::ToolNotFound(_))));
+    }
+
+    #[test]
+    fn test_reconnect_delay_uses_exponential_backoff() {
+        let config = rust_claude_core::mcp_config::McpReconnectConfig {
+            enabled: true,
+            initial_delay_ms: Some(100),
+            max_delay_ms: Some(1000),
+        };
+
+        assert_eq!(McpManager::reconnect_delay_ms(&config, 0), 100);
+        assert_eq!(McpManager::reconnect_delay_ms(&config, 1), 200);
+        assert_eq!(McpManager::reconnect_delay_ms(&config, 4), 1000);
+    }
+
+    #[test]
+    fn test_qualified_tool_name_uses_mcp_prefix() {
+        assert_eq!(
+            McpManager::qualified_tool_name("remote", "lookup"),
+            "mcp__remote__lookup"
+        );
+    }
+
+    #[test]
+    fn test_disconnected_tool_call_error_is_server_not_connected() {
+        let error = McpManager::disconnected_tool_error("remote");
+
+        assert!(matches!(error, McpError::ServerNotConnected(name) if name == "remote"));
+    }
+
+    #[test]
+    fn test_manager_can_report_remote_disconnected_status() {
+        let manager = McpManager::from_statuses(vec![McpServerStatus {
+            name: "remote".into(),
+            transport_type: McpTransportType::Sse,
+            state: McpServerState::Disconnected("network error".into()),
+            tools: vec![],
+        }]);
+
+        let status = &manager.server_statuses()[0];
+        assert_eq!(status.transport_type, McpTransportType::Sse);
+        assert!(matches!(status.state, McpServerState::Disconnected(_)));
     }
 }

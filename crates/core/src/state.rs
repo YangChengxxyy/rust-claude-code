@@ -448,6 +448,7 @@ mod tests {
             api_key: "test-key".to_string(),
             model: "claude-test".to_string(),
             base_url: None,
+            provider: crate::config::Provider::Anthropic,
             bearer_auth: false,
             system_prompt: Some("You are a test assistant".to_string()),
             max_tokens: 2048,

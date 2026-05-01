@@ -550,7 +550,7 @@ mod tests {
             &path,
             r#"{
                 "mcpServers": {
-                    "remote": {"type": "sse", "command": "http-server"},
+                    "remote": {"type": "websocket", "command": "http-server"},
                     "local": {"type": "stdio", "command": "npx"}
                 }
             }"#,
@@ -562,6 +562,47 @@ mod tests {
         // Unsupported transport still loads; filtering happens at runtime
         assert!(!settings.mcp_servers["remote"].is_supported_transport());
         assert!(settings.mcp_servers["local"].is_supported_transport());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_settings_with_remote_mcp_servers() {
+        let dir = make_temp_dir("mcp-remote");
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "mcpServers": {
+                    "sse-server": {
+                        "type": "sse",
+                        "url": "https://example.test/sse",
+                        "headers": {"Authorization": "Bearer token"},
+                        "timeout_ms": 10000
+                    },
+                    "http-server": {
+                        "type": "http",
+                        "url": "https://example.test/http"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let settings = ClaudeSettings::load_from(&path).unwrap();
+
+        assert_eq!(settings.mcp_servers.len(), 2);
+        let sse = &settings.mcp_servers["sse-server"];
+        assert_eq!(sse.transport_type, crate::mcp_config::McpTransportType::Sse);
+        assert_eq!(sse.url.as_deref(), Some("https://example.test/sse"));
+        assert_eq!(
+            sse.headers.get("Authorization").map(String::as_str),
+            Some("Bearer token")
+        );
+        assert_eq!(sse.timeout_ms, Some(10000));
+
+        let http = &settings.mcp_servers["http-server"];
+        assert_eq!(http.transport_type, crate::mcp_config::McpTransportType::Http);
+        assert_eq!(http.url.as_deref(), Some("https://example.test/http"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -580,6 +621,10 @@ mod tests {
                         args: vec![],
                         env: HashMap::new(),
                         cwd: None,
+                        url: None,
+                        headers: HashMap::new(),
+                        timeout_ms: None,
+                        reconnect: None,
                     },
                 );
                 m
@@ -597,6 +642,10 @@ mod tests {
                         args: vec![],
                         env: HashMap::new(),
                         cwd: None,
+                        url: None,
+                        headers: HashMap::new(),
+                        timeout_ms: None,
+                        reconnect: None,
                     },
                 );
                 m
@@ -625,6 +674,10 @@ mod tests {
                         args: vec![],
                         env: HashMap::new(),
                         cwd: None,
+                        url: None,
+                        headers: HashMap::new(),
+                        timeout_ms: None,
+                        reconnect: None,
                     },
                 );
                 m
@@ -642,6 +695,10 @@ mod tests {
                         args: vec![],
                         env: HashMap::new(),
                         cwd: None,
+                        url: None,
+                        headers: HashMap::new(),
+                        timeout_ms: None,
+                        reconnect: None,
                     },
                 );
                 m
@@ -669,6 +726,10 @@ mod tests {
                         args: vec![],
                         env: HashMap::new(),
                         cwd: None,
+                        url: None,
+                        headers: HashMap::new(),
+                        timeout_ms: None,
+                        reconnect: None,
                     },
                 );
                 m

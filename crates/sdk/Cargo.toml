@@ -1,26 +1,20 @@
 [package]
-name = "rust-claude-cli"
+name = "rust-claude-sdk"
 version.workspace = true
 edition.workspace = true
-
-[[bin]]
-name = "rust-claude"
-path = "src/main.rs"
 
 [dependencies]
 rust-claude-core = { path = "../core" }
 rust-claude-api = { path = "../api" }
-rust-claude-mcp = { path = "../mcp" }
 rust-claude-tools = { path = "../tools" }
-rust-claude-tui = { path = "../tui" }
-rust-claude-sdk = { path = "../sdk" }
+rust-claude-mcp = { path = "../mcp" }
 tokio = { workspace = true }
-anyhow = { workspace = true }
-clap = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-chrono = { workspace = true }
 futures-util = "0.3"
-arboard = "3"
+chrono = { workspace = true }
+
+[dev-dependencies]
+chrono = { workspace = true }

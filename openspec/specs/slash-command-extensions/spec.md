@@ -51,11 +51,11 @@ The TUI SHALL support an enhanced `/clear` command that can clear the visible ch
 - **THEN** the TUI SHALL clear the visible chat output while preserving the underlying conversation context needed for subsequent turns
 
 ### Requirement: Slash commands are registered through a unified command registry
-The TUI SHALL register slash commands through a unified dynamic command registry so help output, command dispatch metadata, command validation, and slash suggestions are derived from the same self-describing command definitions.
+The TUI SHALL register slash commands through a unified dynamic command registry backed by a `SlashCommand` trait so that help output, command dispatch metadata, command validation, and slash suggestions are derived from the same self-describing command definitions. Commands SHALL be registered at runtime via `SlashCommandRegistry::register()` rather than via a compile-time `const` array.
 
 #### Scenario: /help lists newly added commands
 - **WHEN** the user runs `/help`
-- **THEN** the help output SHALL include `/diff`, `/cost`, `/config`, `/resume`, `/context`, `/export`, `/copy`, and `/theme` with brief descriptions
+- **THEN** the help output SHALL include all registered commands including built-in commands and dynamically registered plugin commands
 
 #### Scenario: Unknown slash command is rejected consistently
 - **WHEN** the user enters an unrecognized slash command
@@ -63,11 +63,19 @@ The TUI SHALL register slash commands through a unified dynamic command registry
 
 #### Scenario: Slash suggestions reuse registered command definitions
 - **WHEN** the input buffer begins with `/`
-- **THEN** the suggestion overlay SHALL source command candidates from the same registry used by `/help` and command dispatch
+- **THEN** the suggestion overlay SHALL source command candidates from the same dynamic registry used by `/help` and command dispatch, including both built-in and plugin-provided commands
 
 #### Scenario: Command registry supports dynamic registration
-- **WHEN** a slash command definition is registered at runtime or initialization time
+- **WHEN** a slash command implementing the `SlashCommand` trait is registered at runtime or initialization time
 - **THEN** command validation, help output, and slash suggestions SHALL reflect that command without requiring a separate static command list update
+
+#### Scenario: Plugin commands are registered dynamically
+- **WHEN** a plugin manifest declares slash commands and the plugin is loaded
+- **THEN** those commands SHALL be registered in the same registry as built-in commands and SHALL appear in suggestions and help output
+
+#### Scenario: Unloading plugin removes its commands
+- **WHEN** a plugin is unloaded
+- **THEN** its registered slash commands SHALL be removed from the registry and SHALL no longer appear in suggestions or help output
 
 ### Requirement: Built-in slash commands include memory inspection
 The built-in slash command set SHALL include `/memory` as a first-party command.

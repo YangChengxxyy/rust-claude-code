@@ -7,6 +7,7 @@ edition.workspace = true
 rust-claude-core = { path = "../core" }
 rust-claude-api = { path = "../api" }
 rust-claude-tools = { path = "../tools" }
+rust-claude-sdk = { path = "../sdk" }
 tokio = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
@@ -15,3 +16,4 @@ serde_json = { workspace = true }
 unicode-width = { workspace = true }
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "regex-fancy"] }
 similar = "2"
+async-trait = { workspace = true }

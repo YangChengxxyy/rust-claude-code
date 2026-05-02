@@ -680,6 +680,7 @@ pub struct App {
     pub user_question_dialog: Option<UserQuestionDialog>,
     pub session_picker: Option<SessionPicker>,
     pub slash_suggestions: Option<SlashSuggestions>,
+    pub slash_registry: crate::slash::SlashCommandRegistry,
 
     // -- task panel --
     pub todo_visible: bool,
@@ -749,6 +750,11 @@ impl App {
             user_question_dialog: None,
             session_picker: None,
             slash_suggestions: None,
+            slash_registry: {
+                let mut r = crate::slash::SlashCommandRegistry::new();
+                crate::slash::register_builtin_commands(&mut r);
+                r
+            },
             todo_visible: false,
             tasks: Vec::new(),
             history,
@@ -786,18 +792,18 @@ impl App {
         let query = query.to_lowercase();
         let mut items = Vec::new();
 
-        for command in slash_command_registry().commands() {
+        for meta in self.slash_registry.all_meta() {
             let match_text = format!(
                 "{} {} {}",
-                command.name.to_lowercase(),
-                command.usage.to_lowercase(),
-                command.description.to_lowercase()
+                meta.name.to_lowercase(),
+                meta.usage.to_lowercase(),
+                meta.description.to_lowercase()
             );
             let item = SuggestionItem::new(
                 SuggestionKind::Command,
-                command.name,
-                command.description,
-                command.name,
+                &meta.name,
+                &meta.description,
+                &meta.name,
                 match_text,
             );
             if query.is_empty() || item.matches_query(&query) {
@@ -2097,6 +2103,17 @@ impl App {
             }
             "/exit" => self.should_quit = true,
             _ => {
+                // Try plugin/dynamic commands first
+                if self.slash_registry.contains(name) {
+                    match self.slash_registry.dispatch(name, arg, user_tx).await {
+                        Some(crate::slash::SlashCommandResult::SystemMessage(msg)) => {
+                            self.messages.push(ChatMessage::System(msg));
+                            self.sync_chat_viewport();
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
                 let detail = if has_slash_command(name) {
                     format!("Command parsing error: {}", name)
                 } else {

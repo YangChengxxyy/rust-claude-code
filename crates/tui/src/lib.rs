@@ -13,6 +13,7 @@ pub mod bridge;
 pub mod diff;
 pub mod events;
 pub mod highlight;
+pub mod slash;
 pub mod streaming_markdown;
 pub mod theme;
 pub mod ui;

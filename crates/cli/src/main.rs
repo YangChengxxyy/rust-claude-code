@@ -28,6 +28,7 @@ use rust_claude_tools::{
     WebSearchTool,
 };
 use rust_claude_tui::{App, AppEvent, ChatMessage, TerminalGuard, TuiBridge, UserCommand};
+use rust_claude_sdk::plugin::{PluginManager};
 use tokio::sync::{mpsc, Mutex};
 
 use rust_claude_cli::compaction::CompactionService;
@@ -521,7 +522,7 @@ async fn main() -> Result<()> {
     let app_state = Arc::new(Mutex::new(state));
 
     let claude_md_files = claude_md::discover_claude_md(&cwd);
-    let custom_agents = Arc::new(CustomAgentRegistry::discover(&cwd));
+    let mut custom_agents = Arc::new(CustomAgentRegistry::discover(&cwd));
     if resolved.verbose {
         println!("Discovered {} custom agent(s)", custom_agents.list().len());
         for error in custom_agents.errors() {
@@ -596,6 +597,32 @@ async fn main() -> Result<()> {
         Arc::new(manager)
     };
 
+    // Load plugins
+    let plugin_manager = Arc::new(Mutex::new(PluginManager::new(Some(&cwd))));
+    if !plugin_manager.lock().await.plugins().is_empty() && resolved.verbose {
+        println!(
+            "Plugins: loaded {} plugin(s)",
+            plugin_manager.lock().await.plugins().len()
+        );
+    }
+    // Register plugin custom agents
+    {
+        let mut all_agents: Vec<_> = custom_agents.list().into_iter().cloned().collect();
+        for plugin in plugin_manager.lock().await.plugins() {
+            for agent in &plugin.custom_agents {
+                all_agents.push(rust_claude_core::custom_agents::CustomAgentDefinition {
+                    name: agent.name.clone(),
+                    description: agent.description.clone(),
+                    system_prompt: agent.system_prompt.clone(),
+                    tools: agent.tools.clone(),
+                    model: agent.model.clone(),
+                    path: plugin.manifest_path.clone(),
+                });
+            }
+        }
+        custom_agents = Arc::new(rust_claude_core::custom_agents::CustomAgentRegistry::from_agents(all_agents));
+    }
+
     if resolved.system_prompt.is_none() {
         let mut tools_for_prompt = build_tools();
         register_mcp_tools(&mut tools_for_prompt, &mcp_manager);
@@ -648,7 +675,10 @@ async fn main() -> Result<()> {
         let run_result = if stream_enabled && !output_json {
             let (print_tx, mut print_rx) = tokio::sync::mpsc::channel::<AppEvent>(256);
             let bridge = rust_claude_tui::TuiBridge::new(print_tx);
-            query_loop = query_loop.with_bridge(bridge);
+            query_loop = query_loop
+                .with_output(Box::new(bridge.clone()))
+                .with_permission_ui(Box::new(bridge.clone()))
+                .with_user_question_ui(Box::new(bridge));
 
             // Spawn a task to consume bridge events and stream to stdout/stderr
             let print_handle = tokio::spawn(async move {
@@ -768,6 +798,7 @@ async fn main() -> Result<()> {
             hook_runner,
             mcp_manager,
             custom_agents,
+            plugin_manager,
         )
         .await
     }
@@ -1706,6 +1737,7 @@ async fn run_tui(
     hook_runner: Option<Arc<HookRunner>>,
     mcp_manager: Arc<McpManager>,
     custom_agents: Arc<CustomAgentRegistry>,
+    plugin_manager: Arc<Mutex<PluginManager>>,
 ) -> Result<()> {
     let (model, model_setting, permission_mode, git_branch) = {
         let state = app_state.lock().await;
@@ -1741,6 +1773,8 @@ async fn run_tui(
     let worker_mcp_manager = mcp_manager.clone();
     let worker_custom_agents = custom_agents.clone();
     let worker_config = config.clone();
+    let app_plugin_manager = plugin_manager.clone();
+    let app_worker_bridge = worker_bridge.clone();
     tokio::spawn(async move {
         let mut worker_config = worker_config;
         let mut active_query_task: Option<tokio::task::JoinHandle<()>> = None;
@@ -2453,7 +2487,9 @@ async fn run_tui(
                     let agent_context =
                         build_agent_context(Arc::new(client.clone()), worker_custom_agents.clone());
                     let mut query_loop = QueryLoop::new(client, tools)
-                        .with_bridge(worker_bridge.clone())
+                        .with_output(Box::new(worker_bridge.clone()))
+                        .with_permission_ui(Box::new(worker_bridge.clone()))
+                        .with_user_question_ui(Box::new(worker_bridge.clone()))
                         .with_compaction_config(CompactStrategy::Default.config())
                         .with_agent_context(agent_context);
                     if let Some(runner) = &worker_hook_runner {
@@ -2650,7 +2686,9 @@ async fn run_tui(
                     let agent_context =
                         build_agent_context(Arc::new(client.clone()), worker_custom_agents.clone());
                     let mut query_loop = QueryLoop::new(client, tools)
-                        .with_bridge(worker_bridge.clone())
+                        .with_output(Box::new(worker_bridge.clone()))
+                        .with_permission_ui(Box::new(worker_bridge.clone()))
+                        .with_user_question_ui(Box::new(worker_bridge.clone()))
                         .with_compaction_config(CompactStrategy::Default.config())
                         .with_agent_context(agent_context);
                     if let Some(runner) = &worker_hook_runner {
@@ -2770,6 +2808,55 @@ async fn run_tui(
 
     let mut terminal_guard = TerminalGuard::new()?;
     let mut app = App::new(model, model_setting, permission_mode, git_branch, theme);
+
+    // Register plugin slash commands in the TUI registry
+    {
+        let pm = app_plugin_manager.lock().await;
+        for plugin in pm.plugins() {
+            for cmd in &plugin.slash_commands {
+                let handler = rust_claude_tui::slash::PluginSlashCommandHandler::new(
+                    cmd.name.clone(),
+                    cmd.description.clone(),
+                    cmd.prompt.clone(),
+                );
+                app.slash_registry.register(handler.into_command());
+            }
+        }
+        // Register /plugin commands
+        {
+            let pm_arc = app_plugin_manager.clone();
+            let _bridge = app_worker_bridge.clone();
+            app.slash_registry.register(rust_claude_tui::slash::command(
+                "/plugin", "/plugin list|install <path>|remove <name>",
+                "Manage plugins",
+                move |args, _user_tx| {
+                    match args {
+                        Some(args_str) if args_str.starts_with("list") => {
+                            let pm_lock = pm_arc.blocking_lock();
+                            let plugins = pm_lock.plugins();
+                            let mut lines = vec!["Installed plugins:".to_string()];
+                            if plugins.is_empty() {
+                                lines.push("  (none)".to_string());
+                            } else {
+                                for p in plugins {
+                                    lines.push(format!("  {} v{} - {} (from {})",
+                                        p.name, p.version, p.description,
+                                        if p.is_project { "project" } else { "user" }
+                                    ));
+                                }
+                            }
+                            rust_claude_tui::slash::SlashCommandResult::SystemMessage(lines.join("\n"))
+                        }
+                        _ => {
+                            rust_claude_tui::slash::SlashCommandResult::SystemMessage(
+                                "Usage: /plugin list | /plugin install <path> | /plugin remove <name>".into()
+                            )
+                        }
+                    }
+                },
+            ));
+        }
+    }
     let run_result = app.run(terminal_guard.terminal_mut(), event_rx, user_tx).await;
     if let Some(runner) = &hook_runner {
         let session_id = { app_state.lock().await.session.id.clone() };

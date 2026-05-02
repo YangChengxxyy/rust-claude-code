@@ -1542,6 +1542,7 @@ dependencies = [
  "rust-claude-api",
  "rust-claude-core",
  "rust-claude-mcp",
+ "rust-claude-sdk",
  "rust-claude-tools",
  "rust-claude-tui",
  "serde",
@@ -1578,6 +1579,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-claude-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures-util",
+ "rust-claude-api",
+ "rust-claude-core",
+ "rust-claude-mcp",
+ "rust-claude-tools",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "rust-claude-tools"
 version = "0.1.0"
 dependencies = [
@@ -1601,10 +1619,12 @@ dependencies = [
 name = "rust-claude-tui"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "crossterm 0.28.1",
  "ratatui",
  "rust-claude-api",
  "rust-claude-core",
+ "rust-claude-sdk",
  "rust-claude-tools",
  "serde",
  "serde_json",

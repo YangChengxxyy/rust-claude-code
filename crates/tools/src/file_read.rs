@@ -110,7 +110,23 @@ impl Tool for FileReadTool {
         let input: FileReadInput = serde_json::from_value(input)
             .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
 
+        let path = input.path.clone();
+        let offset = input.offset;
+        let limit = input.limit;
+
         let content = Self::read_path(input).await?;
+
+        // Record read into file state cache (if app_state is available).
+        // Only record for file paths (not directories).
+        if let Some(app_state) = &context.app_state {
+            if path.is_file() {
+                let mut state = app_state.lock().await;
+                state
+                    .file_state_cache
+                    .record_read(&path, &content, offset, limit, false);
+            }
+        }
+
         Ok(ToolResult::success(context.tool_use_id, content))
     }
 }

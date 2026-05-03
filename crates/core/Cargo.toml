@@ -12,3 +12,4 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 glob-match = "0.2"
 serde_yaml = "0.9"
+lru = "0.12"

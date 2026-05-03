@@ -352,6 +352,16 @@ pub struct PermissionDialog {
     pub replace_all: bool,
 }
 
+/// State of the modal trust confirmation dialog.
+pub struct TrustDialog {
+    /// The project directory requesting trust.
+    pub project_path: String,
+    /// Which option is currently highlighted (0=Trust, 1=Don't Trust).
+    pub selected: usize,
+    /// Channel to send the user's decision back.
+    pub response_tx: Option<tokio::sync::oneshot::Sender<bool>>,
+}
+
 /// State of the modal structured user-question dialog.
 pub struct UserQuestionDialog {
     pub request: AskUserQuestionRequest,
@@ -677,6 +687,7 @@ pub struct App {
 
     // -- permission dialog --
     pub permission_dialog: Option<PermissionDialog>,
+    pub trust_dialog: Option<TrustDialog>,
     pub user_question_dialog: Option<UserQuestionDialog>,
     pub session_picker: Option<SessionPicker>,
     pub slash_suggestions: Option<SlashSuggestions>,
@@ -747,6 +758,7 @@ impl App {
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
             permission_dialog: None,
+            trust_dialog: None,
             user_question_dialog: None,
             session_picker: None,
             slash_suggestions: None,
@@ -1301,6 +1313,11 @@ impl App {
             return;
         }
 
+        if self.trust_dialog.is_some() {
+            self.handle_trust_key(key);
+            return;
+        }
+
         if self.permission_dialog.is_some() {
             self.handle_permission_key(key);
             return;
@@ -1635,6 +1652,37 @@ impl App {
         if let Some(dialog) = self.permission_dialog.take() {
             if let Some(tx) = dialog.response_tx {
                 let _ = tx.send(response);
+            }
+        }
+    }
+
+    fn handle_trust_key(&mut self, key: KeyEvent) {
+        let dialog = match &mut self.trust_dialog {
+            Some(d) => d,
+            None => return,
+        };
+
+        match key.code {
+            KeyCode::Char('y') => self.finish_trust_dialog(true),
+            KeyCode::Esc | KeyCode::Char('n') => self.finish_trust_dialog(false),
+            KeyCode::Up => {
+                dialog.selected = 0;
+            }
+            KeyCode::Down => {
+                dialog.selected = 1;
+            }
+            KeyCode::Enter => {
+                let trusted = dialog.selected == 0;
+                self.finish_trust_dialog(trusted);
+            }
+            _ => {}
+        }
+    }
+
+    fn finish_trust_dialog(&mut self, trusted: bool) {
+        if let Some(dialog) = self.trust_dialog.take() {
+            if let Some(tx) = dialog.response_tx {
+                let _ = tx.send(trusted);
             }
         }
     }
@@ -2457,6 +2505,16 @@ impl App {
                     tool_name, reason,
                 )));
                 self.sync_chat_viewport();
+            }
+            AppEvent::TrustRequest {
+                project_path,
+                response_tx,
+            } => {
+                self.trust_dialog = Some(TrustDialog {
+                    project_path,
+                    selected: 0,
+                    response_tx: Some(response_tx),
+                });
             }
             AppEvent::Resize(w, h) => {
                 self.terminal_width = w;

@@ -19,6 +19,7 @@ use rust_claude_core::{
     session::{ContextSnapshot, SessionSummary},
     settings::{ClaudeSettings, ParsedPermissions, SettingsLayer},
     state::AppState,
+    trust::{TrustManager, TrustStatus},
 };
 use rust_claude_mcp::{McpManager, McpManagerConfig};
 use rust_claude_tools::{
@@ -128,6 +129,10 @@ struct Cli {
 
     #[arg(long = "settings")]
     settings: Option<String>,
+
+    /// Trust the current directory (skip trust dialog for apiKeyHelper/env).
+    #[arg(long = "trust")]
+    trust: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -413,15 +418,62 @@ async fn main() -> Result<()> {
     user_settings.apply_env();
 
     let project_settings = ClaudeSettings::load_project(&cwd)?;
-    if let Some(layer) = &project_settings {
-        layer.settings.apply_env();
+
+    // Trust gate: check if project settings contain risky fields (apiKeyHelper, env).
+    // If so, verify the directory is trusted before applying them.
+    let project_trusted = if let Some(layer) = &project_settings {
+        let has_risky_fields =
+            layer.settings.api_key_helper.is_some() || !layer.settings.env.is_empty();
+
+        if has_risky_fields && !cli.trust {
+            let mut trust_manager = TrustManager::new();
+            let trust_status = trust_manager.check_trust(&cwd);
+
+            match trust_status {
+                TrustStatus::Trusted | TrustStatus::InheritedFromParent => true,
+                TrustStatus::Untrusted => {
+                    if cli.print {
+                        // Non-interactive mode: refuse to run
+                        return Err(anyhow!(
+                            "Untrusted directory: project settings contain apiKeyHelper or env variables.\n\
+                             Use --trust to trust this directory, or run interactively to confirm."
+                        ));
+                    }
+                    // Interactive mode: prompt for trust confirmation
+                    let trusted = prompt_trust_confirmation(&cwd)?;
+                    if trusted {
+                        trust_manager.accept_trust(&cwd)
+                            .map_err(|e| anyhow!("failed to persist trust: {e}"))?;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+        } else {
+            // Either no risky fields, or --trust flag was provided
+            true
+        }
+    } else {
+        true // No project settings at all
+    };
+
+    // Only apply project env if trusted
+    if project_trusted {
+        if let Some(layer) = &project_settings {
+            layer.settings.apply_env();
+        }
     }
 
     let config = match Config::load() {
         Ok(config) => config,
         Err(ConfigError::MissingApiKey) => {
-            let merged_settings =
-                merge_settings_layers(user_settings.clone(), project_settings.as_ref());
+            let merged_settings = if project_trusted {
+                merge_settings_layers(user_settings.clone(), project_settings.as_ref())
+            } else {
+                // Untrusted: only use user settings (skip project apiKeyHelper/env)
+                user_settings.clone()
+            };
             if let Some(ref helper) = merged_settings.api_key_helper {
                 match run_api_key_helper(helper) {
                     Ok(credential) => Config::with_credential(credential, true),
@@ -441,7 +493,18 @@ async fn main() -> Result<()> {
         Err(error) => return Err(error.into()),
     };
 
-    let resolved = resolve_config(&cli, config, user_settings, project_settings)?;
+    // When untrusted, strip risky fields from project settings but keep safe ones
+    let effective_project_settings = if project_trusted {
+        project_settings
+    } else {
+        project_settings.map(|mut layer| {
+            layer.settings.api_key_helper = None;
+            layer.settings.env.clear();
+            layer
+        })
+    };
+
+    let resolved = resolve_config(&cli, config, user_settings, effective_project_settings)?;
 
     if resolved.verbose {
         println!("cwd: {}", cwd.display());
@@ -522,6 +585,16 @@ async fn main() -> Result<()> {
     let app_state = Arc::new(Mutex::new(state));
 
     let claude_md_files = claude_md::discover_claude_md(&cwd);
+    // Record discovered CLAUDE.md files as partial views in the file state cache.
+    // This prevents the model from editing them without first doing a full FileRead.
+    if !claude_md_files.is_empty() {
+        let mut state = app_state.lock().await;
+        for f in &claude_md_files {
+            state
+                .file_state_cache
+                .record_read(&f.path, &f.content, None, None, true);
+        }
+    }
     let mut custom_agents = Arc::new(CustomAgentRegistry::discover(&cwd));
     if resolved.verbose {
         println!("Discovered {} custom agent(s)", custom_agents.list().len());
@@ -802,6 +875,32 @@ async fn main() -> Result<()> {
         )
         .await
     }
+}
+
+/// Prompt the user for trust confirmation on the terminal (pre-TUI).
+fn prompt_trust_confirmation(project_dir: &std::path::Path) -> Result<bool> {
+    use std::io::{self, BufRead, Write};
+
+    eprintln!();
+    eprintln!("  Security Warning");
+    eprintln!("  ================");
+    eprintln!();
+    eprintln!(
+        "  Project settings in {} contain apiKeyHelper or env variables",
+        project_dir.display()
+    );
+    eprintln!("  that will be executed/loaded. This could be a security risk if");
+    eprintln!("  you don't trust this project.");
+    eprintln!();
+    eprint!("  Do you trust this directory? [y/N] ");
+    io::stderr().flush()?;
+
+    let stdin = io::stdin();
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line)?;
+    let answer = line.trim().to_lowercase();
+
+    Ok(answer == "y" || answer == "yes")
 }
 
 fn run_api_key_helper(command: &str) -> Result<String> {
@@ -2991,19 +3090,11 @@ mod tests {
             continue_session: false,
             resume_session: None,
             settings: None,
+            trust: false,
         };
         let config = Config::with_credential("test-key".to_string(), false);
-        let user_settings = ClaudeSettings {
-            model: Some("user-model".into()),
-            ..Default::default()
-        };
-        let project_settings = Some(SettingsLayer {
-            path: std::path::PathBuf::from("/repo/.claude/settings.json"),
-            settings: ClaudeSettings {
-                model: Some("project-model".into()),
-                ..Default::default()
-            },
-        });
+        let user_settings = ClaudeSettings::default();
+        let project_settings: Option<SettingsLayer> = None;
 
         let resolved = resolve_config(&cli, config, user_settings, project_settings).unwrap();
         assert_eq!(resolved.model_setting, "opus[1m]");
@@ -3055,6 +3146,7 @@ mod tests {
             continue_session: false,
             resume_session: None,
             settings: None,
+            trust: false,
         };
         let config = Config::with_credential("test-key".to_string(), false);
         let project_settings = Some(SettingsLayer {
@@ -3101,6 +3193,7 @@ mod tests {
             continue_session: false,
             resume_session: None,
             settings: None,
+            trust: false,
         }
     }
 

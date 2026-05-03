@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 use crate::config::{Config, ConfigProvenance};
+use crate::file_state_cache::FileStateCache;
 use crate::git::GitContextSnapshot;
 use crate::message::{Message, Usage};
 use crate::permission::{PermissionCheck, PermissionMode, PermissionRequest, PermissionRule};
@@ -89,6 +90,8 @@ pub struct AppState {
     pub last_api_usage: Option<Usage>,
     /// Message count at the time of the last API response.
     pub last_api_message_index: usize,
+    /// LRU cache tracking file read state for staleness detection.
+    pub file_state_cache: FileStateCache,
 }
 
 impl AppState {
@@ -125,6 +128,7 @@ impl AppState {
             git_context: None,
             last_api_usage: None,
             last_api_message_index: 0,
+            file_state_cache: FileStateCache::new(100),
         }
     }
 

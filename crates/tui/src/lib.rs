@@ -18,7 +18,7 @@ pub mod streaming_markdown;
 pub mod theme;
 pub mod ui;
 
-pub use app::{App, PermissionDialog};
+pub use app::{App, PermissionDialog, TrustDialog};
 pub use bridge::TuiBridge;
 pub use events::{AppEvent, ChatMessage, PermissionResponse, UserCommand};
 

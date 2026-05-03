@@ -191,6 +191,12 @@ pub enum AppEvent {
         tool_name: String,
         reason: String,
     },
+    /// A trust confirmation is requested for a project directory.
+    TrustRequest {
+        project_path: String,
+        /// Channel to send the user's trust decision back (true = trust, false = deny).
+        response_tx: tokio::sync::oneshot::Sender<bool>,
+    },
 }
 
 /// The user's response to a permission confirmation dialog.

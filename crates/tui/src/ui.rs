@@ -224,6 +224,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_todo_panel(f, app, todo_area);
     }
 
+    if app.trust_dialog.is_some() {
+        draw_trust_dialog(f, app, full);
+    }
+
     if app.permission_dialog.is_some() {
         draw_permission_dialog(f, app, full);
     }
@@ -1069,6 +1073,74 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
     let paragraph = Paragraph::new(line);
     f.render_widget(paragraph, area);
+}
+
+fn draw_trust_dialog(f: &mut Frame, app: &App, area: Rect) {
+    let palette = app.palette();
+    let dialog = match &app.trust_dialog {
+        Some(d) => d,
+        None => return,
+    };
+
+    let dialog_width = 60u16.min(area.width.saturating_sub(4));
+    let dialog_height = 14u16.min(area.height.saturating_sub(2));
+    let x = area.x + (area.width.saturating_sub(dialog_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(dialog_height)) / 2;
+    let dialog_area = Rect::new(x, y, dialog_width, dialog_height);
+
+    f.render_widget(Clear, dialog_area);
+
+    let block = Block::default()
+        .title(" Trust This Directory? ")
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_set(border::ROUNDED)
+        .border_style(Style::default().fg(palette.warning));
+
+    let path_display = truncate_display(
+        &dialog.project_path,
+        (dialog_width as usize).saturating_sub(6),
+    );
+
+    let options = ["[y] Trust", "[n] Don't Trust"];
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            format!("  {}", path_display),
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "  Project settings contain apiKeyHelper or env",
+            Style::default().fg(palette.warning),
+        )]),
+        Line::from(vec![Span::styled(
+            "  variables that will be executed/loaded.",
+            Style::default().fg(palette.warning),
+        )]),
+        Line::from(""),
+    ];
+
+    for (i, label) in options.iter().enumerate() {
+        let style = if i == dialog.selected {
+            Style::default()
+                .fg(palette.claude)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.text)
+        };
+        let prefix = if i == dialog.selected { "> " } else { "  " };
+        lines.push(Line::from(vec![Span::styled(
+            format!("{}{}", prefix, label),
+            style,
+        )]));
+    }
+
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, dialog_area);
 }
 
 fn draw_permission_dialog(f: &mut Frame, app: &App, area: Rect) {

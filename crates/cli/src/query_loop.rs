@@ -41,6 +41,29 @@ pub enum QueryLoopError {
 const MAX_TOKENS_RECOVERY_LIMIT: usize = 3;
 const MAX_TOKENS_RECOVERY_MESSAGE: &str =
     "Continue from where you left off. Do not repeat what you already said. Pick up mid-thought if needed. Break remaining work into smaller pieces.";
+const MAX_OVERLOAD_RETRIES: u32 = 3;
+
+/// Tracks retry-related state across loop iterations within a single `run()` invocation.
+struct RetryState {
+    prompt_too_long_stage: u8,
+    consecutive_overload_count: u32,
+    using_fallback_model: bool,
+}
+
+impl RetryState {
+    fn new() -> Self {
+        Self {
+            prompt_too_long_stage: 0,
+            consecutive_overload_count: 0,
+            using_fallback_model: false,
+        }
+    }
+}
+
+enum ErrorRecoveryAction {
+    Retry,
+    Fail,
+}
 
 pub struct QueryLoop<C> {
     client: C,
@@ -128,6 +151,7 @@ where
         }
 
         let mut max_tokens_recovery_count: usize = 0;
+        let mut retry_state = RetryState::new();
 
         for _ in 0..self.max_rounds {
             // Auto-compaction check before building the request
@@ -162,10 +186,44 @@ where
                 state.session.stream
             };
             let response = if use_stream {
-                self.collect_response_from_stream(&request).await?
+                match self.collect_response_from_stream(&request).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        if let Some(action) = self.handle_api_error(
+                            &e,
+                            &mut retry_state,
+                            &app_state,
+                        ).await {
+                            match action {
+                                ErrorRecoveryAction::Retry => continue,
+                                ErrorRecoveryAction::Fail => return Err(e),
+                            }
+                        }
+                        return Err(e);
+                    }
+                }
             } else {
-                self.client.create_message(&request).await?
+                match self.client.create_message(&request).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        let e = QueryLoopError::Api(e);
+                        if let Some(action) = self.handle_api_error(
+                            &e,
+                            &mut retry_state,
+                            &app_state,
+                        ).await {
+                            match action {
+                                ErrorRecoveryAction::Retry => continue,
+                                ErrorRecoveryAction::Fail => return Err(e),
+                            }
+                        }
+                        return Err(e);
+                    }
+                }
             };
+
+            // Successful API response: reset overload counter
+            retry_state.consecutive_overload_count = 0;
 
             let assistant_message =
                 Message::assistant_with_usage(response.content.clone(), response.usage.clone());
@@ -246,6 +304,178 @@ where
             runner.run_stop("max_rounds", &session_id).await;
         }
         Err(QueryLoopError::MaxRoundsExceeded)
+    }
+
+    /// Handle API errors that may be recoverable (prompt-too-long, overloaded).
+    async fn handle_api_error(
+        &self,
+        error: &QueryLoopError,
+        retry_state: &mut RetryState,
+        app_state: &Arc<Mutex<AppState>>,
+    ) -> Option<ErrorRecoveryAction> {
+        match error {
+            QueryLoopError::Api(ApiError::PromptTooLong(_)) => {
+                Some(self.handle_prompt_too_long(retry_state, app_state).await)
+            }
+            QueryLoopError::Api(ApiError::Overloaded(_)) => {
+                Some(self.handle_overloaded(retry_state, app_state).await)
+            }
+            _ => None,
+        }
+    }
+
+    async fn handle_prompt_too_long(
+        &self,
+        retry_state: &mut RetryState,
+        app_state: &Arc<Mutex<AppState>>,
+    ) -> ErrorRecoveryAction {
+        retry_state.prompt_too_long_stage += 1;
+
+        match retry_state.prompt_too_long_stage {
+            1 => {
+                if let Some(bridge) = &self.bridge {
+                    bridge.send_compaction_start().await;
+                }
+                if let Some(compaction_config) = &self.compaction_config {
+                    let service = crate::compaction::CompactionService::new(
+                        &self.client,
+                        compaction_config.clone(),
+                    );
+                    match service.force_compact(app_state).await {
+                        Ok(result) => {
+                            if let Some(bridge) = &self.bridge {
+                                bridge.send_compaction_complete(result).await;
+                            }
+                            return ErrorRecoveryAction::Retry;
+                        }
+                        Err(e) => {
+                            if let Some(bridge) = &self.bridge {
+                                bridge
+                                    .send_error(&format!(
+                                        "Reactive compaction failed: {e}. Trying micro-compaction..."
+                                    ))
+                                    .await;
+                            }
+                            retry_state.prompt_too_long_stage = 2;
+                            return self.handle_prompt_too_long_stage2(retry_state, app_state).await;
+                        }
+                    }
+                }
+                retry_state.prompt_too_long_stage = 2;
+                self.handle_prompt_too_long_stage2(retry_state, app_state).await
+            }
+            2 => self.handle_prompt_too_long_stage2(retry_state, app_state).await,
+            _ => {
+                if let Some(bridge) = &self.bridge {
+                    bridge
+                        .send_error(
+                            "Prompt is too long and compaction could not reduce it enough. \
+                             Try using /compact manually or starting a new conversation.",
+                        )
+                        .await;
+                }
+                ErrorRecoveryAction::Fail
+            }
+        }
+    }
+
+    async fn handle_prompt_too_long_stage2(
+        &self,
+        _retry_state: &mut RetryState,
+        app_state: &Arc<Mutex<AppState>>,
+    ) -> ErrorRecoveryAction {
+        if let Some(bridge) = &self.bridge {
+            bridge
+                .send_error("Attempting micro-compaction (clearing old tool results)...")
+                .await;
+        }
+        if let Some(compaction_config) = &self.compaction_config {
+            let service = crate::compaction::CompactionService::new(
+                &self.client,
+                compaction_config.clone(),
+            );
+            match service.micro_compact(app_state).await {
+                Ok(result) if result.blocks_cleared > 0 => {
+                    if let Some(bridge) = &self.bridge {
+                        bridge
+                            .send_error(&format!(
+                                "Micro-compaction cleared {} tool result blocks (~{} tokens reduced)",
+                                result.blocks_cleared, result.estimated_token_reduction
+                            ))
+                            .await;
+                    }
+                    return ErrorRecoveryAction::Retry;
+                }
+                Ok(_) => {
+                    if let Some(bridge) = &self.bridge {
+                        bridge
+                            .send_error("Micro-compaction found no blocks to clear.")
+                            .await;
+                    }
+                }
+                Err(e) => {
+                    if let Some(bridge) = &self.bridge {
+                        bridge
+                            .send_error(&format!("Micro-compaction failed: {e}"))
+                            .await;
+                    }
+                }
+            }
+        }
+        if let Some(bridge) = &self.bridge {
+            bridge
+                .send_error(
+                    "Prompt is too long and compaction could not reduce it enough. \
+                     Try using /compact manually or starting a new conversation.",
+                )
+                .await;
+        }
+        ErrorRecoveryAction::Fail
+    }
+
+    async fn handle_overloaded(
+        &self,
+        retry_state: &mut RetryState,
+        app_state: &Arc<Mutex<AppState>>,
+    ) -> ErrorRecoveryAction {
+        retry_state.consecutive_overload_count += 1;
+        let count = retry_state.consecutive_overload_count;
+
+        if count > MAX_OVERLOAD_RETRIES && !retry_state.using_fallback_model {
+            let fallback = {
+                app_state.lock().await.config.fallback_model.clone()
+            };
+            if let Some(fallback_model) = fallback {
+                if let Some(bridge) = &self.bridge {
+                    bridge
+                        .send_error(&format!(
+                            "Switched to {} due to high demand",
+                            fallback_model
+                        ))
+                        .await;
+                }
+                {
+                    let mut state = app_state.lock().await;
+                    state.session.model_setting = fallback_model.clone();
+                    state.session.model = fallback_model;
+                }
+                retry_state.using_fallback_model = true;
+                retry_state.consecutive_overload_count = 0;
+                return ErrorRecoveryAction::Retry;
+            }
+        }
+
+        let backoff_secs = count as u64;
+        if let Some(bridge) = &self.bridge {
+            bridge
+                .send_error(&format!(
+                    "Service overloaded. Retrying in {backoff_secs}s... (attempt {count})"
+                ))
+                .await;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+
+        ErrorRecoveryAction::Retry
     }
 
     async fn collect_response_from_stream(

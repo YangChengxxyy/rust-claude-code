@@ -23,6 +23,12 @@ pub enum ApiError {
     #[error("Connection error: {0}")]
     Connection(String),
 
+    #[error("Prompt too long: {0}")]
+    PromptTooLong(String),
+
+    #[error("Service overloaded: {0}")]
+    Overloaded(String),
+
     #[error("Timeout")]
     Timeout,
 }

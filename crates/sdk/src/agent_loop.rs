@@ -42,6 +42,35 @@ pub enum QueryLoopError {
 const MAX_TOKENS_RECOVERY_LIMIT: usize = 3;
 const MAX_TOKENS_RECOVERY_MESSAGE: &str =
     "Continue from where you left off. Do not repeat what you already said. Pick up mid-thought if needed. Break remaining work into smaller pieces.";
+const MAX_OVERLOAD_RETRIES: u32 = 3;
+
+/// Tracks retry-related state across loop iterations within a single `run()` invocation.
+struct RetryState {
+    /// Reactive compaction escalation stage (0 = not triggered, 1-3 = stages).
+    /// Resets each turn.
+    prompt_too_long_stage: u8,
+    /// Number of consecutive overloaded (529) errors without a successful response.
+    consecutive_overload_count: u32,
+    /// Whether we switched to fallback model in this session.
+    using_fallback_model: bool,
+}
+
+impl RetryState {
+    fn new() -> Self {
+        Self {
+            prompt_too_long_stage: 0,
+            consecutive_overload_count: 0,
+            using_fallback_model: false,
+        }
+    }
+}
+
+enum ErrorRecoveryAction {
+    /// Retry the current loop iteration.
+    Retry,
+    /// Fail with the original error.
+    Fail,
+}
 
 pub struct QueryLoop<C> {
     client: C,
@@ -143,6 +172,7 @@ where
         }
 
         let mut max_tokens_recovery_count: usize = 0;
+        let mut retry_state = RetryState::new();
 
         for _ in 0..self.max_rounds {
             // Auto-compaction check before building the request
@@ -175,10 +205,44 @@ where
                 state.session.stream
             };
             let response = if use_stream {
-                self.collect_response_from_stream(&request).await?
+                match self.collect_response_from_stream(&request).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        if let Some(action) = self.handle_api_error(
+                            &e,
+                            &mut retry_state,
+                            &app_state,
+                        ).await {
+                            match action {
+                                ErrorRecoveryAction::Retry => continue,
+                                ErrorRecoveryAction::Fail => return Err(e),
+                            }
+                        }
+                        return Err(e);
+                    }
+                }
             } else {
-                self.client.create_message(&request).await?
+                match self.client.create_message(&request).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        let e = QueryLoopError::Api(e);
+                        if let Some(action) = self.handle_api_error(
+                            &e,
+                            &mut retry_state,
+                            &app_state,
+                        ).await {
+                            match action {
+                                ErrorRecoveryAction::Retry => continue,
+                                ErrorRecoveryAction::Fail => return Err(e),
+                            }
+                        }
+                        return Err(e);
+                    }
+                }
             };
+
+            // Successful API response: reset overload counter
+            retry_state.consecutive_overload_count = 0;
 
             let assistant_message =
                 Message::assistant_with_usage(response.content.clone(), response.usage.clone());
@@ -255,6 +319,173 @@ where
             runner.run_stop("max_rounds", &session_id).await;
         }
         Err(QueryLoopError::MaxRoundsExceeded)
+    }
+
+    /// Handle API errors that may be recoverable (prompt-too-long, overloaded).
+    /// Returns `Some(action)` if the error was recognized, `None` if not handled.
+    async fn handle_api_error(
+        &self,
+        error: &QueryLoopError,
+        retry_state: &mut RetryState,
+        app_state: &Arc<Mutex<AppState>>,
+    ) -> Option<ErrorRecoveryAction> {
+        match error {
+            QueryLoopError::Api(ApiError::PromptTooLong(_)) => {
+                Some(self.handle_prompt_too_long(retry_state, app_state).await)
+            }
+            QueryLoopError::Api(ApiError::Overloaded(_)) => {
+                Some(self.handle_overloaded(retry_state, app_state).await)
+            }
+            _ => None,
+        }
+    }
+
+    /// Three-stage reactive compaction for prompt-too-long errors.
+    async fn handle_prompt_too_long(
+        &self,
+        retry_state: &mut RetryState,
+        app_state: &Arc<Mutex<AppState>>,
+    ) -> ErrorRecoveryAction {
+        retry_state.prompt_too_long_stage += 1;
+
+        match retry_state.prompt_too_long_stage {
+            1 => {
+                // Stage 1: Full LLM-based compaction
+                if let Some(output) = &self.output {
+                    output.compaction_start();
+                }
+                if let Some(compaction_config) = &self.compaction_config {
+                    let service = crate::compaction::CompactionService::new(
+                        &self.client,
+                        compaction_config.clone(),
+                    );
+                    match service.force_compact(app_state).await {
+                        Ok(result) => {
+                            if let Some(output) = &self.output {
+                                output.compaction_complete(&result);
+                            }
+                            return ErrorRecoveryAction::Retry;
+                        }
+                        Err(e) => {
+                            if let Some(output) = &self.output {
+                                output.error(&format!(
+                                    "Reactive compaction failed: {e}. Trying micro-compaction..."
+                                ));
+                            }
+                            // Fall through to stage 2
+                            retry_state.prompt_too_long_stage = 2;
+                            return self.handle_prompt_too_long_stage2(retry_state, app_state).await;
+                        }
+                    }
+                }
+                // No compaction config — try micro-compaction directly
+                retry_state.prompt_too_long_stage = 2;
+                self.handle_prompt_too_long_stage2(retry_state, app_state).await
+            }
+            2 => self.handle_prompt_too_long_stage2(retry_state, app_state).await,
+            _ => {
+                // Stage 3: Give up, report to user
+                if let Some(output) = &self.output {
+                    output.error(
+                        "Prompt is too long and compaction could not reduce it enough. \
+                         Try using /compact manually or starting a new conversation.",
+                    );
+                }
+                ErrorRecoveryAction::Fail
+            }
+        }
+    }
+
+    /// Stage 2: Micro-compaction (strip old tool results).
+    async fn handle_prompt_too_long_stage2(
+        &self,
+        _retry_state: &mut RetryState,
+        app_state: &Arc<Mutex<AppState>>,
+    ) -> ErrorRecoveryAction {
+        if let Some(output) = &self.output {
+            output.error("Attempting micro-compaction (clearing old tool results)...");
+        }
+        if let Some(compaction_config) = &self.compaction_config {
+            let service = crate::compaction::CompactionService::new(
+                &self.client,
+                compaction_config.clone(),
+            );
+            match service.micro_compact(app_state).await {
+                Ok(result) if result.blocks_cleared > 0 => {
+                    if let Some(output) = &self.output {
+                        output.error(&format!(
+                            "Micro-compaction cleared {} tool result blocks (~{} tokens reduced)",
+                            result.blocks_cleared, result.estimated_token_reduction
+                        ));
+                    }
+                    return ErrorRecoveryAction::Retry;
+                }
+                Ok(_) => {
+                    // Nothing to clear
+                    if let Some(output) = &self.output {
+                        output.error("Micro-compaction found no blocks to clear.");
+                    }
+                }
+                Err(e) => {
+                    if let Some(output) = &self.output {
+                        output.error(&format!("Micro-compaction failed: {e}"));
+                    }
+                }
+            }
+        }
+        // Micro-compaction didn't help or not available
+        if let Some(output) = &self.output {
+            output.error(
+                "Prompt is too long and compaction could not reduce it enough. \
+                 Try using /compact manually or starting a new conversation.",
+            );
+        }
+        ErrorRecoveryAction::Fail
+    }
+
+    /// Handle overloaded (529) errors with backoff and model fallback.
+    async fn handle_overloaded(
+        &self,
+        retry_state: &mut RetryState,
+        app_state: &Arc<Mutex<AppState>>,
+    ) -> ErrorRecoveryAction {
+        retry_state.consecutive_overload_count += 1;
+        let count = retry_state.consecutive_overload_count;
+
+        if count > MAX_OVERLOAD_RETRIES && !retry_state.using_fallback_model {
+            // Try to switch to fallback model
+            let fallback = {
+                app_state.lock().await.config.fallback_model.clone()
+            };
+            if let Some(fallback_model) = fallback {
+                if let Some(output) = &self.output {
+                    output.error(&format!(
+                        "Switched to {} due to high demand",
+                        fallback_model
+                    ));
+                }
+                {
+                    let mut state = app_state.lock().await;
+                    state.session.model_setting = fallback_model.clone();
+                    state.session.model = fallback_model;
+                }
+                retry_state.using_fallback_model = true;
+                retry_state.consecutive_overload_count = 0;
+                // Retry immediately with fallback model (no backoff)
+                return ErrorRecoveryAction::Retry;
+            }
+        }
+
+        // Backoff: 1s * count
+        let backoff_secs = count as u64;
+        if let Some(output) = &self.output {
+            output.error(&format!(
+                "Service overloaded. Retrying in {backoff_secs}s... (attempt {count})"
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+
+        ErrorRecoveryAction::Retry
     }
 
     async fn collect_response_from_stream(
@@ -2000,5 +2231,301 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("\"session_id\":\"session-xyz\""));
         let _ = std::fs::remove_file(path);
+    }
+
+    // --- Reactive compaction & model fallback tests ---
+
+    /// A MockClient that can return errors for the first N calls, then successes.
+    struct MockClientWithErrors {
+        /// Sequence of results: Left(error) or Right(response)
+        results: Mutex<VecDeque<Result<CreateMessageResponse, ApiError>>>,
+    }
+
+    #[async_trait]
+    impl ModelClient for MockClientWithErrors {
+        async fn create_message(
+            &self,
+            _request: &CreateMessageRequest,
+        ) -> Result<CreateMessageResponse, ApiError> {
+            let mut results = self.results.lock().await;
+            results
+                .pop_front()
+                .expect("mock result should exist")
+        }
+
+        async fn create_message_stream(
+            &self,
+            request: &CreateMessageRequest,
+        ) -> Result<MessageStream, ApiError> {
+            // For simplicity, delegate to create_message
+            let result = self.create_message(request).await?;
+            let stop_reason = result.stop_reason.clone();
+            let usage_val = result.usage.clone();
+            let message_id = result.id.clone();
+            let role = result.role.clone();
+            let model = result.model.clone();
+            let content = result.content.clone();
+
+            let mut events = vec![Ok(StreamEvent::MessageStart {
+                message: rust_claude_api::StreamMessage {
+                    id: message_id,
+                    role,
+                    model,
+                    content: vec![],
+                    stop_reason: None,
+                    stop_sequence: None,
+                    usage: usage_val.clone(),
+                },
+            })];
+
+            for (index, block) in content.into_iter().enumerate() {
+                let delta = match &block {
+                    ContentBlock::Text { text } => {
+                        Some(rust_claude_api::ContentBlockDelta::TextDelta { text: text.clone() })
+                    }
+                    _ => None,
+                };
+                events.push(Ok(StreamEvent::ContentBlockStart {
+                    index,
+                    content_block: block,
+                }));
+                if let Some(delta) = delta {
+                    events.push(Ok(StreamEvent::ContentBlockDelta { index, delta }));
+                }
+                events.push(Ok(StreamEvent::ContentBlockStop { index }));
+            }
+
+            events.push(Ok(StreamEvent::MessageDelta {
+                delta: rust_claude_api::MessageDelta {
+                    stop_reason,
+                    stop_sequence: None,
+                },
+                usage: Some(usage_val),
+            }));
+
+            Ok(Box::pin(futures_util::stream::iter(events)))
+        }
+    }
+
+    fn ok_response(text: &str) -> Result<CreateMessageResponse, ApiError> {
+        Ok(CreateMessageResponse {
+            id: "msg_ok".to_string(),
+            response_type: "message".to_string(),
+            role: rust_claude_core::message::Role::Assistant,
+            content: vec![ContentBlock::text(text)],
+            model: "claude-test".to_string(),
+            stop_reason: Some(StopReason::EndTurn),
+            stop_sequence: None,
+            usage: usage(),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_prompt_too_long_triggers_reactive_compaction() {
+        // Mock responses:
+        // 1. PromptTooLong (main call — simulates the API rejecting the prompt)
+        // 2. Compaction summary response (consumed by force_compact LLM call)
+        // 3. Retry main call (success — after compaction reduced context)
+        let client = MockClientWithErrors {
+            results: Mutex::new(VecDeque::from(vec![
+                Err(ApiError::PromptTooLong("prompt is too long".to_string())),
+                // Compaction summary response
+                Ok(CreateMessageResponse {
+                    id: "msg_compact".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("Summary of conversation")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                }),
+                ok_response("recovered after compaction"),
+            ])),
+        };
+        let tools = ToolRegistry::new();
+        // Use a large context window so auto-compaction doesn't trigger after reactive compaction
+        let compaction_config = rust_claude_core::compaction::CompactionConfig {
+            context_window: 200_000,
+            threshold_ratio: 0.8,
+            preserve_ratio: 0.5,
+            summary_max_tokens: 8192,
+            ..Default::default()
+        };
+        let loop_runner = QueryLoop::new(client, tools)
+            .with_compaction_config(compaction_config);
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.session.stream = false;
+        let app_state = Arc::new(Mutex::new(state));
+
+        // Add enough messages for compaction to work (>4 messages required)
+        {
+            let mut s = app_state.lock().await;
+            for i in 0..10 {
+                if i % 2 == 0 {
+                    s.add_message(Message::user("x".repeat(400)));
+                } else {
+                    s.add_message(Message::assistant(vec![ContentBlock::text(
+                        "y".repeat(400),
+                    )]));
+                }
+            }
+        }
+
+        let result = loop_runner.run(app_state, "test prompt").await.unwrap();
+        assert_eq!(
+            result.content,
+            vec![ContentBlock::text("recovered after compaction")]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prompt_too_long_stage3_fails_after_exhaustion() {
+        // Three PromptTooLong errors with no compaction config → should fail
+        let client = MockClientWithErrors {
+            results: Mutex::new(VecDeque::from(vec![
+                Err(ApiError::PromptTooLong("too long 1".to_string())),
+                Err(ApiError::PromptTooLong("too long 2".to_string())),
+                Err(ApiError::PromptTooLong("too long 3".to_string())),
+            ])),
+        };
+        let tools = ToolRegistry::new();
+        // No compaction config = no compaction available
+        let loop_runner = QueryLoop::new(client, tools);
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.session.stream = false;
+        let app_state = Arc::new(Mutex::new(state));
+
+        let result = loop_runner.run(app_state, "test").await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            QueryLoopError::Api(ApiError::PromptTooLong(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_overloaded_backoff_and_retry() {
+        // Two overloaded errors, then success
+        let client = MockClientWithErrors {
+            results: Mutex::new(VecDeque::from(vec![
+                Err(ApiError::Overloaded("overloaded 1".to_string())),
+                Err(ApiError::Overloaded("overloaded 2".to_string())),
+                ok_response("recovered from overload"),
+            ])),
+        };
+        let tools = ToolRegistry::new();
+        let loop_runner = QueryLoop::new(client, tools).with_max_rounds(10);
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.session.stream = false;
+        let app_state = Arc::new(Mutex::new(state));
+
+        let start = Instant::now();
+        let result = loop_runner.run(app_state, "test").await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            result.content,
+            vec![ContentBlock::text("recovered from overload")]
+        );
+        // Should have waited at least 1s + 2s = 3s for backoff
+        assert!(
+            elapsed >= Duration::from_secs(3),
+            "expected >= 3s backoff, got {:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn test_overloaded_fallback_model_switch() {
+        // 4 overloaded errors (exceeds MAX_OVERLOAD_RETRIES=3), then success with fallback model
+        let client = MockClientWithErrors {
+            results: Mutex::new(VecDeque::from(vec![
+                Err(ApiError::Overloaded("overloaded".to_string())),
+                Err(ApiError::Overloaded("overloaded".to_string())),
+                Err(ApiError::Overloaded("overloaded".to_string())),
+                Err(ApiError::Overloaded("overloaded".to_string())),
+                ok_response("fallback model response"),
+            ])),
+        };
+        let tools = ToolRegistry::new();
+        let loop_runner = QueryLoop::new(client, tools).with_max_rounds(10);
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.session.stream = false;
+        state.config.fallback_model = Some("claude-haiku".to_string());
+        let app_state = Arc::new(Mutex::new(state));
+
+        let result = loop_runner.run(app_state.clone(), "test").await.unwrap();
+        assert_eq!(
+            result.content,
+            vec![ContentBlock::text("fallback model response")]
+        );
+
+        // Verify model was switched
+        let s = app_state.lock().await;
+        assert_eq!(s.session.model_setting, "claude-haiku");
+        assert_eq!(s.session.model, "claude-haiku");
+    }
+
+    #[tokio::test]
+    async fn test_overloaded_no_fallback_continues_retrying() {
+        // 4 overloaded errors with no fallback configured, then success
+        let client = MockClientWithErrors {
+            results: Mutex::new(VecDeque::from(vec![
+                Err(ApiError::Overloaded("overloaded".to_string())),
+                Err(ApiError::Overloaded("overloaded".to_string())),
+                Err(ApiError::Overloaded("overloaded".to_string())),
+                Err(ApiError::Overloaded("overloaded".to_string())),
+                ok_response("eventually recovered"),
+            ])),
+        };
+        let tools = ToolRegistry::new();
+        let loop_runner = QueryLoop::new(client, tools).with_max_rounds(10);
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.session.stream = false;
+        // No fallback_model configured
+        let app_state = Arc::new(Mutex::new(state));
+
+        let result = loop_runner.run(app_state, "test").await.unwrap();
+        assert_eq!(
+            result.content,
+            vec![ContentBlock::text("eventually recovered")]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_overloaded_counter_resets_on_success() {
+        // Overloaded, then success, then overloaded again — counter should have reset
+        let client = MockClientWithErrors {
+            results: Mutex::new(VecDeque::from(vec![
+                Err(ApiError::Overloaded("overloaded".to_string())),
+                // This response has tool_use to continue the loop
+                Ok(CreateMessageResponse {
+                    id: "msg_1".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("middle")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                }),
+            ])),
+        };
+        let tools = ToolRegistry::new();
+        let loop_runner = QueryLoop::new(client, tools).with_max_rounds(10);
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.session.stream = false;
+        let app_state = Arc::new(Mutex::new(state));
+
+        // Should succeed — overload count resets after the successful response
+        let result = loop_runner.run(app_state, "test").await.unwrap();
+        assert_eq!(result.content, vec![ContentBlock::text("middle")]);
     }
 }

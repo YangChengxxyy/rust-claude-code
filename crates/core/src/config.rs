@@ -51,6 +51,8 @@ pub struct Config {
     #[serde(default)]
     pub theme: Theme,
     #[serde(default)]
+    pub fallback_model: Option<String>,
+    #[serde(default)]
     pub provenance: ConfigProvenance,
 }
 
@@ -101,6 +103,7 @@ pub struct ConfigProvenance {
     pub always_deny: ConfigSource,
     pub stream: ConfigSource,
     pub theme: ConfigSource,
+    pub fallback_model: ConfigSource,
 }
 
 impl Default for ConfigProvenance {
@@ -116,6 +119,7 @@ impl Default for ConfigProvenance {
             always_deny: ConfigSource::Default,
             stream: ConfigSource::Default,
             theme: ConfigSource::Default,
+            fallback_model: ConfigSource::Default,
         }
     }
 }
@@ -189,6 +193,9 @@ impl Config {
             if raw.theme.is_some() {
                 provenance.theme = ConfigSource::UserConfig;
             }
+            if raw.fallback_model.is_some() {
+                provenance.fallback_model = ConfigSource::UserConfig;
+            }
 
             Ok(Config {
                 api_key,
@@ -203,6 +210,7 @@ impl Config {
                 always_deny: raw.always_deny.unwrap_or_default(),
                 stream: raw.stream.unwrap_or_else(default_true),
                 theme: raw.theme.unwrap_or_default(),
+                fallback_model: raw.fallback_model,
                 provenance,
             })
         } else {
@@ -221,6 +229,7 @@ impl Config {
                 always_deny: Vec::new(),
                 stream: true,
                 theme: Theme::Dark,
+                fallback_model: None,
                 provenance: ConfigProvenance::default(),
             })
         }
@@ -278,6 +287,7 @@ impl Config {
             always_deny: Some(self.always_deny.clone()),
             stream: Some(self.stream),
             theme: Some(self.theme),
+            fallback_model: self.fallback_model.clone(),
         };
         let content = serde_json::to_string_pretty(&raw)?;
         std::fs::write(&config_path, content)?;
@@ -307,6 +317,7 @@ impl Config {
             always_deny: Vec::new(),
             stream: true,
             theme: Theme::Dark,
+            fallback_model: None,
             provenance: ConfigProvenance::default(),
         }
     }
@@ -359,6 +370,7 @@ pub struct ConfigOverrides {
     pub always_deny: ResolvedField<Vec<crate::permission::PermissionRule>>,
     pub stream: ResolvedField<bool>,
     pub theme: ResolvedField<Theme>,
+    pub fallback_model: ResolvedField<Option<String>>,
 }
 
 impl Config {
@@ -422,6 +434,13 @@ impl Config {
             self.theme = value;
             self.provenance.theme = overrides.theme.source.unwrap_or(ConfigSource::Default);
         }
+        if let Some(value) = overrides.fallback_model.value {
+            self.fallback_model = value;
+            self.provenance.fallback_model = overrides
+                .fallback_model
+                .source
+                .unwrap_or(ConfigSource::Default);
+        }
         self
     }
 }
@@ -452,6 +471,8 @@ struct RawConfig {
     stream: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     theme: Option<Theme>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fallback_model: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -630,6 +651,7 @@ mod tests {
             always_deny: vec![],
             stream: false,
             theme: Theme::Light,
+            fallback_model: None,
             provenance: ConfigProvenance::default(),
         };
 
@@ -730,5 +752,41 @@ mod tests {
         let content = fs::read_to_string(Config::config_path().unwrap()).unwrap();
         assert!(!content.contains("api_key"));
         assert!(content.contains("claude-test"));
+    }
+
+    #[test]
+    fn test_config_defaults_fallback_model_to_none() {
+        let json = r#"{"api_key":"key123"}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.fallback_model.is_none());
+    }
+
+    #[test]
+    fn test_config_reads_fallback_model() {
+        let json = r#"{"api_key":"key123","fallback_model":"claude-haiku-4-20250514"}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            config.fallback_model.as_deref(),
+            Some("claude-haiku-4-20250514")
+        );
+    }
+
+    #[test]
+    fn test_config_overrides_fallback_model() {
+        let config = Config::with_credential("key".to_string(), false);
+        assert!(config.fallback_model.is_none());
+
+        let mut overrides = ConfigOverrides::default();
+        overrides.fallback_model.set(
+            Some("claude-haiku-4-20250514".to_string()),
+            ConfigSource::Env,
+        );
+
+        let config = config.apply_overrides(overrides);
+        assert_eq!(
+            config.fallback_model.as_deref(),
+            Some("claude-haiku-4-20250514")
+        );
+        assert_eq!(config.provenance.fallback_model, ConfigSource::Env);
     }
 }

@@ -33,6 +33,16 @@ Format the summary as a clear, structured narrative. Use bullet points for lists
 
 The summary will replace the original messages in the conversation, so it must contain enough context for the conversation to continue naturally."#;
 
+const MICRO_COMPACT_PLACEHOLDER: &str = "[Content cleared to reduce context size]";
+const MICRO_COMPACT_PRESERVE_TURNS: usize = 3;
+
+/// Result of a micro-compaction operation (no LLM call).
+#[derive(Debug, Clone)]
+pub struct MicroCompactionResult {
+    pub blocks_cleared: usize,
+    pub estimated_token_reduction: u32,
+}
+
 #[derive(Debug, Clone, Default)]
 struct CompactionContext {
     project_guidance: Option<String>,
@@ -357,6 +367,77 @@ impl<C: ModelClient> CompactionService<C> {
         }
 
         self.compact(app_state).await
+    }
+
+    /// Perform micro-compaction: replace old ToolResult content with a placeholder.
+    pub async fn micro_compact(
+        &self,
+        app_state: &Arc<Mutex<AppState>>,
+    ) -> Result<MicroCompactionResult, CompactionError> {
+        self.micro_compact_with_window(app_state, MICRO_COMPACT_PRESERVE_TURNS).await
+    }
+
+    /// Micro-compaction with a custom preservation window.
+    pub async fn micro_compact_with_window(
+        &self,
+        app_state: &Arc<Mutex<AppState>>,
+        preserve_turns: usize,
+    ) -> Result<MicroCompactionResult, CompactionError> {
+        let mut state = app_state.lock().await;
+        let msg_count = state.messages.len();
+
+        if msg_count == 0 {
+            return Ok(MicroCompactionResult {
+                blocks_cleared: 0,
+                estimated_token_reduction: 0,
+            });
+        }
+
+        let mut assistant_count = 0;
+        let mut preserve_from_index = 0;
+        for i in (0..msg_count).rev() {
+            if state.messages[i].role == Role::Assistant {
+                assistant_count += 1;
+                if assistant_count >= preserve_turns {
+                    preserve_from_index = i;
+                    break;
+                }
+            }
+        }
+
+        let mut blocks_cleared: usize = 0;
+        let mut estimated_token_reduction: u32 = 0;
+
+        for i in 0..preserve_from_index {
+            let msg = &mut state.messages[i];
+            for block in &mut msg.content {
+                if let ContentBlock::ToolResult {
+                    content, is_error, ..
+                } = block
+                {
+                    if content.is_empty()
+                        || *content == MICRO_COMPACT_PLACEHOLDER
+                        || *is_error
+                    {
+                        continue;
+                    }
+
+                    let old_tokens = (content.len() as u32) / 4;
+                    let placeholder_tokens = (MICRO_COMPACT_PLACEHOLDER.len() as u32) / 4;
+                    if old_tokens > placeholder_tokens {
+                        estimated_token_reduction += old_tokens - placeholder_tokens;
+                    }
+
+                    *content = MICRO_COMPACT_PLACEHOLDER.to_string();
+                    blocks_cleared += 1;
+                }
+            }
+        }
+
+        Ok(MicroCompactionResult {
+            blocks_cleared,
+            estimated_token_reduction,
+        })
     }
 
     /// Check if compaction is needed and perform it if so.

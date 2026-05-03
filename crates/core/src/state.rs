@@ -467,6 +467,7 @@ mod tests {
             }],
             stream: true,
             theme: crate::config::Theme::Dark,
+            fallback_model: None,
             provenance: crate::config::ConfigProvenance::default(),
         };
 

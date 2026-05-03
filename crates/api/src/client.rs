@@ -252,14 +252,33 @@ fn map_reqwest_error(error: reqwest::Error) -> ApiError {
 }
 
 fn map_error_response(status: StatusCode, body: &str) -> ApiError {
-    let message = match serde_json::from_str::<ApiErrorResponse>(body) {
-        Ok(error_response) => error_response.error.message,
-        Err(_) => body.trim().to_string(),
-    };
+    let parsed = serde_json::from_str::<ApiErrorResponse>(body).ok();
+    let message = parsed
+        .as_ref()
+        .map(|r| r.error.message.clone())
+        .unwrap_or_else(|| body.trim().to_string());
 
     match status {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => ApiError::Auth(message),
         StatusCode::TOO_MANY_REQUESTS => ApiError::RateLimited(message),
+        StatusCode::BAD_REQUEST => {
+            if let Some(ref parsed) = parsed {
+                if parsed.error.error_type == "invalid_request_error" {
+                    let msg_lower = message.to_lowercase();
+                    if msg_lower.contains("too long")
+                        || msg_lower.contains("too many tokens")
+                        || msg_lower.contains("exceeds the maximum")
+                    {
+                        return ApiError::PromptTooLong(message);
+                    }
+                }
+            }
+            ApiError::Api {
+                status: 400,
+                message,
+            }
+        }
+        _ if status.as_u16() == 529 => ApiError::Overloaded(message),
         _ => ApiError::Api {
             status: status.as_u16(),
             message,
@@ -427,5 +446,59 @@ mod tests {
         assert!(
             matches!(error, ApiError::Api { status: 400, message } if message == "bad request")
         );
+    }
+
+    #[test]
+    fn test_error_response_maps_prompt_too_long() {
+        let error = map_error_response(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"type":"invalid_request_error","message":"prompt is too long: 250000 tokens > 200000 maximum"}}"#,
+        );
+        assert!(matches!(error, ApiError::PromptTooLong(msg) if msg.contains("too long")));
+    }
+
+    #[test]
+    fn test_error_response_maps_too_many_tokens() {
+        let error = map_error_response(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"type":"invalid_request_error","message":"Request too large: too many tokens"}}"#,
+        );
+        assert!(matches!(error, ApiError::PromptTooLong(msg) if msg.contains("too many tokens")));
+    }
+
+    #[test]
+    fn test_error_response_maps_exceeds_maximum() {
+        let error = map_error_response(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"type":"invalid_request_error","message":"Input exceeds the maximum allowed length"}}"#,
+        );
+        assert!(matches!(error, ApiError::PromptTooLong(msg) if msg.contains("exceeds the maximum")));
+    }
+
+    #[test]
+    fn test_error_response_non_prompt_400_not_mapped_to_prompt_too_long() {
+        let error = map_error_response(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"type":"invalid_request_error","message":"invalid model specified"}}"#,
+        );
+        assert!(matches!(error, ApiError::Api { status: 400, .. }));
+    }
+
+    #[test]
+    fn test_error_response_maps_overloaded_529() {
+        let error = map_error_response(
+            StatusCode::from_u16(529).unwrap(),
+            r#"{"error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        );
+        assert!(matches!(error, ApiError::Overloaded(msg) if msg == "Overloaded"));
+    }
+
+    #[test]
+    fn test_error_response_rate_limit_429_unchanged() {
+        let error = map_error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":{"type":"rate_limit_error","message":"slow down"}}"#,
+        );
+        assert!(matches!(error, ApiError::RateLimited(msg) if msg == "slow down"));
     }
 }

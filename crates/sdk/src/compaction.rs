@@ -33,6 +33,16 @@ Format the summary as a clear, structured narrative. Use bullet points for lists
 
 The summary will replace the original messages in the conversation, so it must contain enough context for the conversation to continue naturally."#;
 
+const MICRO_COMPACT_PLACEHOLDER: &str = "[Content cleared to reduce context size]";
+const MICRO_COMPACT_PRESERVE_TURNS: usize = 3;
+
+/// Result of a micro-compaction operation (no LLM call).
+#[derive(Debug, Clone)]
+pub struct MicroCompactionResult {
+    pub blocks_cleared: usize,
+    pub estimated_token_reduction: u32,
+}
+
 #[derive(Debug, Clone, Default)]
 struct CompactionContext {
     project_guidance: Option<String>,
@@ -357,6 +367,85 @@ impl<C: ModelClient> CompactionService<C> {
         }
 
         self.compact(app_state).await
+    }
+
+    /// Perform micro-compaction: replace old ToolResult content with a placeholder.
+    ///
+    /// Unlike full compaction, this does NOT call the LLM. It simply clears
+    /// ToolResult content blocks that are older than the preservation window
+    /// (default: most recent 3 assistant-user turn pairs).
+    pub async fn micro_compact(
+        &self,
+        app_state: &Arc<Mutex<AppState>>,
+    ) -> Result<MicroCompactionResult, CompactionError> {
+        self.micro_compact_with_window(app_state, MICRO_COMPACT_PRESERVE_TURNS).await
+    }
+
+    /// Micro-compaction with a custom preservation window.
+    pub async fn micro_compact_with_window(
+        &self,
+        app_state: &Arc<Mutex<AppState>>,
+        preserve_turns: usize,
+    ) -> Result<MicroCompactionResult, CompactionError> {
+        let mut state = app_state.lock().await;
+        let msg_count = state.messages.len();
+
+        if msg_count == 0 {
+            return Ok(MicroCompactionResult {
+                blocks_cleared: 0,
+                estimated_token_reduction: 0,
+            });
+        }
+
+        // Count assistant messages from the end to determine the preservation boundary.
+        // A "turn" is one assistant message. We preserve the most recent `preserve_turns` turns.
+        let mut assistant_count = 0;
+        let mut preserve_from_index = 0; // messages at or after this index are preserved
+        for i in (0..msg_count).rev() {
+            if state.messages[i].role == Role::Assistant {
+                assistant_count += 1;
+                if assistant_count >= preserve_turns {
+                    preserve_from_index = i;
+                    break;
+                }
+            }
+        }
+
+        let mut blocks_cleared: usize = 0;
+        let mut estimated_token_reduction: u32 = 0;
+
+        for i in 0..preserve_from_index {
+            let msg = &mut state.messages[i];
+            for block in &mut msg.content {
+                if let ContentBlock::ToolResult {
+                    content, is_error, ..
+                } = block
+                {
+                    // Skip already-cleared or empty blocks
+                    if content.is_empty()
+                        || *content == MICRO_COMPACT_PLACEHOLDER
+                        || *is_error
+                    {
+                        continue;
+                    }
+
+                    // Estimate token reduction (chars / 4 heuristic)
+                    let old_tokens = (content.len() as u32) / 4;
+                    let placeholder_tokens = (MICRO_COMPACT_PLACEHOLDER.len() as u32) / 4;
+                    if old_tokens > placeholder_tokens {
+                        estimated_token_reduction += old_tokens - placeholder_tokens;
+                    }
+
+                    *content = MICRO_COMPACT_PLACEHOLDER.to_string();
+                    blocks_cleared += 1;
+                }
+            }
+        }
+
+        Ok(MicroCompactionResult {
+            blocks_cleared,
+            estimated_token_reduction,
+        })
     }
 
     /// Check if compaction is needed and perform it if so.
@@ -773,5 +862,251 @@ mod tests {
             panic!("first message should be text");
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- Micro-compaction tests ---
+
+    /// Helper: create a conversation with tool use/result pairs
+    fn make_tool_conversation() -> Vec<Message> {
+        vec![
+            // Turn 1: user
+            Message::user("Do something"),
+            // Turn 1: assistant with tool use
+            Message::assistant(vec![
+                ContentBlock::text("Let me check."),
+                ContentBlock::tool_use("tu_1", "Bash", serde_json::json!({"command": "ls"})),
+            ]),
+            // Turn 2: user with tool result
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::tool_result(
+                    "tu_1",
+                    "file1.rs\nfile2.rs\nfile3.rs\n".repeat(100),
+                    false,
+                )],
+                usage: None,
+            },
+            // Turn 2: assistant with tool use
+            Message::assistant(vec![
+                ContentBlock::text("Reading file."),
+                ContentBlock::tool_use("tu_2", "FileRead", serde_json::json!({"path": "file1.rs"})),
+            ]),
+            // Turn 3: user with tool result
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::tool_result(
+                    "tu_2",
+                    "fn main() { println!(\"hello\"); }".repeat(50),
+                    false,
+                )],
+                usage: None,
+            },
+            // Turn 3: assistant with text
+            Message::assistant(vec![ContentBlock::text("I see the code.")]),
+            // Turn 4: user
+            Message::user("Now do more"),
+            // Turn 4: assistant with tool use
+            Message::assistant(vec![ContentBlock::tool_use(
+                "tu_3",
+                "Grep",
+                serde_json::json!({"pattern": "fn"}),
+            )]),
+            // Turn 5: user with tool result
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::tool_result(
+                    "tu_3",
+                    "grep results here".repeat(20),
+                    false,
+                )],
+                usage: None,
+            },
+            // Turn 5: assistant (recent)
+            Message::assistant(vec![ContentBlock::text("Found the functions.")]),
+            // Turn 6: user
+            Message::user("One more thing"),
+            // Turn 6: assistant (recent)
+            Message::assistant(vec![
+                ContentBlock::tool_use("tu_4", "Bash", serde_json::json!({"command": "cat"})),
+            ]),
+            // Turn 7: user with tool result (recent)
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::tool_result("tu_4", "recent output", false)],
+                usage: None,
+            },
+            // Turn 7: assistant (most recent)
+            Message::assistant(vec![ContentBlock::text("Done!")]),
+        ]
+    }
+
+    #[tokio::test]
+    async fn test_micro_compact_clears_old_tool_results() {
+        let client = MockCompactionClient {
+            summary_text: "unused".to_string(),
+            should_fail: false,
+        };
+        let service = CompactionService::new(client, compact_test_config());
+        let state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
+        {
+            let mut s = state.lock().await;
+            for msg in make_tool_conversation() {
+                s.add_message(msg);
+            }
+        }
+
+        // preserve_turns=3 means last 3 assistant messages are preserved
+        let result = service.micro_compact_with_window(&state, 3).await.unwrap();
+        assert!(result.blocks_cleared > 0, "should have cleared some blocks");
+        assert!(result.estimated_token_reduction > 0);
+
+        let s = state.lock().await;
+        // Check old tool results are cleared
+        for block in &s.messages[2].content {
+            // Turn 2 user tool result (old)
+            if let ContentBlock::ToolResult { content, .. } = block {
+                assert_eq!(content, MICRO_COMPACT_PLACEHOLDER);
+            }
+        }
+        for block in &s.messages[4].content {
+            // Turn 3 user tool result (old)
+            if let ContentBlock::ToolResult { content, .. } = block {
+                assert_eq!(content, MICRO_COMPACT_PLACEHOLDER);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_micro_compact_preserves_recent_tool_results() {
+        let client = MockCompactionClient {
+            summary_text: "unused".to_string(),
+            should_fail: false,
+        };
+        let service = CompactionService::new(client, compact_test_config());
+        let state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
+        {
+            let mut s = state.lock().await;
+            for msg in make_tool_conversation() {
+                s.add_message(msg);
+            }
+        }
+
+        service.micro_compact_with_window(&state, 3).await.unwrap();
+
+        let s = state.lock().await;
+        // The most recent tool result (message index 12) should be preserved
+        for block in &s.messages[12].content {
+            if let ContentBlock::ToolResult { content, .. } = block {
+                assert_eq!(content, "recent output");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_micro_compact_leaves_text_and_thinking_untouched() {
+        let client = MockCompactionClient {
+            summary_text: "unused".to_string(),
+            should_fail: false,
+        };
+        let service = CompactionService::new(client, compact_test_config());
+        let state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
+        {
+            let mut s = state.lock().await;
+            for msg in make_tool_conversation() {
+                s.add_message(msg);
+            }
+        }
+
+        service.micro_compact_with_window(&state, 3).await.unwrap();
+
+        let s = state.lock().await;
+        // Text blocks should be untouched
+        if let ContentBlock::Text { text } = &s.messages[1].content[0] {
+            assert_eq!(text, "Let me check.");
+        } else {
+            panic!("expected text block");
+        }
+        // ToolUse blocks should be untouched
+        if let ContentBlock::ToolUse { name, .. } = &s.messages[1].content[1] {
+            assert_eq!(name, "Bash");
+        } else {
+            panic!("expected tool_use block");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_micro_compact_idempotent() {
+        let client = MockCompactionClient {
+            summary_text: "unused".to_string(),
+            should_fail: false,
+        };
+        let service = CompactionService::new(client, compact_test_config());
+        let state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
+        {
+            let mut s = state.lock().await;
+            for msg in make_tool_conversation() {
+                s.add_message(msg);
+            }
+        }
+
+        let result1 = service.micro_compact_with_window(&state, 3).await.unwrap();
+        assert!(result1.blocks_cleared > 0);
+
+        // Second call should find nothing to clear
+        let result2 = service.micro_compact_with_window(&state, 3).await.unwrap();
+        assert_eq!(result2.blocks_cleared, 0);
+        assert_eq!(result2.estimated_token_reduction, 0);
+    }
+
+    #[tokio::test]
+    async fn test_micro_compact_skips_error_tool_results() {
+        let client = MockCompactionClient {
+            summary_text: "unused".to_string(),
+            should_fail: false,
+        };
+        let service = CompactionService::new(client, compact_test_config());
+        let state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
+        {
+            let mut s = state.lock().await;
+            // Build a conversation with error tool results
+            s.add_message(Message::user("do it"));
+            s.add_message(Message::assistant(vec![ContentBlock::tool_use(
+                "tu_err",
+                "Bash",
+                serde_json::json!({"command": "bad"}),
+            )]));
+            s.add_message(Message {
+                role: Role::User,
+                content: vec![ContentBlock::tool_result(
+                    "tu_err",
+                    "command not found",
+                    true, // is_error
+                )],
+                usage: None,
+            });
+            // Add more turns to push the error into the "old" zone
+            for _ in 0..6 {
+                s.add_message(Message::user("more"));
+                s.add_message(Message::assistant(vec![ContentBlock::text("ok")]));
+            }
+        }
+
+        let result = service.micro_compact_with_window(&state, 3).await.unwrap();
+        // Error tool results should be skipped
+        assert_eq!(result.blocks_cleared, 0);
+    }
+
+    #[tokio::test]
+    async fn test_micro_compact_empty_messages() {
+        let client = MockCompactionClient {
+            summary_text: "unused".to_string(),
+            should_fail: false,
+        };
+        let service = CompactionService::new(client, compact_test_config());
+        let state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
+
+        let result = service.micro_compact(&state).await.unwrap();
+        assert_eq!(result.blocks_cleared, 0);
+        assert_eq!(result.estimated_token_reduction, 0);
     }
 }

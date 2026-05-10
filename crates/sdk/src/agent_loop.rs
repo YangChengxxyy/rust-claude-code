@@ -26,6 +26,7 @@ const SESSION_PERMISSION_DECISION_LIMIT: usize = 10;
 
 use crate::hooks::HookRunner;
 use crate::output::{OutputSink, PermissionDecision, PermissionUI, SessionPersistence, UserQuestionUI};
+use crate::streaming_tool_executor::{StreamingToolExecutor, StreamingToolOutput};
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryLoopError {
@@ -37,6 +38,11 @@ pub enum QueryLoopError {
 
     #[error("maximum query rounds exceeded")]
     MaxRoundsExceeded,
+}
+
+struct StreamedResponse {
+    response: CreateMessageResponse,
+    tool_outputs: Option<Vec<StreamingToolOutput>>,
 }
 
 const MAX_TOKENS_RECOVERY_LIMIT: usize = 3;
@@ -74,7 +80,7 @@ enum ErrorRecoveryAction {
 
 pub struct QueryLoop<C> {
     client: C,
-    tools: ToolRegistry,
+    tools: Arc<ToolRegistry>,
     max_rounds: usize,
     output: Option<Box<dyn OutputSink>>,
     permission_ui: Option<Box<dyn PermissionUI>>,
@@ -92,7 +98,7 @@ where
     pub fn new(client: C, tools: ToolRegistry) -> Self {
         Self {
             client,
-            tools,
+            tools: Arc::new(tools),
             max_rounds: 8,
             output: None,
             permission_ui: None,
@@ -255,8 +261,8 @@ where
                 let state = app_state.lock().await;
                 state.session.stream
             };
-            let response = if use_stream {
-                match self.collect_response_from_stream(&request).await {
+            let streamed_response = if use_stream {
+                match self.collect_response_from_stream(&request, &app_state).await {
                     Ok(resp) => resp,
                     Err(e) => {
                         if let Some(action) = self.handle_api_error(
@@ -274,7 +280,10 @@ where
                 }
             } else {
                 match self.client.create_message(&request).await {
-                    Ok(resp) => resp,
+                    Ok(resp) => StreamedResponse {
+                        response: resp,
+                        tool_outputs: None,
+                    },
                     Err(e) => {
                         let e = QueryLoopError::Api(e);
                         if let Some(action) = self.handle_api_error(
@@ -291,6 +300,8 @@ where
                     }
                 }
             };
+            let response = streamed_response.response;
+            let streamed_tool_outputs = streamed_response.tool_outputs;
 
             // Successful API response: reset overload counter
             retry_state.consecutive_overload_count = 0;
@@ -344,8 +355,12 @@ where
             if stop_reason == Some(StopReason::MaxTokens) {
                 // If the response has tool_use blocks, execute them first
                 if assistant_message.has_tool_use() {
-                    self.execute_tool_uses(&app_state, &assistant_message)
-                        .await?;
+                    if let Some(tool_outputs) = streamed_tool_outputs {
+                        self.append_streaming_tool_results(&app_state, tool_outputs).await?;
+                    } else {
+                        self.execute_tool_uses(&app_state, &assistant_message)
+                            .await?;
+                    }
                 }
 
                 if max_tokens_recovery_count < MAX_TOKENS_RECOVERY_LIMIT {
@@ -391,8 +406,12 @@ where
                 return Ok(assistant_message);
             }
 
-            self.execute_tool_uses(&app_state, &assistant_message)
-                .await?;
+            if let Some(tool_outputs) = streamed_tool_outputs {
+                self.append_streaming_tool_results(&app_state, tool_outputs).await?;
+            } else {
+                self.execute_tool_uses(&app_state, &assistant_message)
+                    .await?;
+            }
         }
 
         if let Some(runner) = &self.hook_runner {
@@ -590,7 +609,8 @@ where
     async fn collect_response_from_stream(
         &self,
         request: &CreateMessageRequest,
-    ) -> Result<CreateMessageResponse, QueryLoopError> {
+        app_state: &Arc<Mutex<AppState>>,
+    ) -> Result<StreamedResponse, QueryLoopError> {
         let mut stream = self.client.create_message_stream(request).await?;
         let mut message_id = String::new();
         let response_type = "message".to_string();
@@ -601,6 +621,14 @@ where
         let mut stop_reason = None;
         let mut stop_sequence = None;
         let mut usage = None;
+        let mut executor = Some(StreamingToolExecutor::new(
+            self.tools.clone(),
+            app_state.clone(),
+            self.agent_context.clone(),
+            self.user_question_callback(),
+        ));
+        let mut streamed_tool_count = 0usize;
+        let mut tool_outputs = None;
 
         while let Some(event) = stream.next().await {
             match event? {
@@ -677,6 +705,41 @@ where
                                 output.thinking_complete(thinking);
                             }
                         }
+                        if let ContentBlock::ToolUse {
+                            id,
+                            name,
+                            input,
+                        } = &block
+                        {
+                            if let Some(active_executor) = &executor {
+                                let schedule_result = self.schedule_streamed_tool(
+                                    app_state,
+                                    active_executor,
+                                    index,
+                                    id,
+                                    name,
+                                    input,
+                                )
+                                .await;
+                                match schedule_result {
+                                    Ok(()) => streamed_tool_count += 1,
+                                    Err(error) if streamed_tool_count == 0 => {
+                                        if let Some(executor) = executor.take() {
+                                            executor
+                                                .discard()
+                                                .await
+                                                .map_err(|error| QueryLoopError::Tool(error.to_string()))?;
+                                        }
+                                        if let Some(output) = &self.output {
+                                            output.error(&format!(
+                                                "Streaming tool execution unavailable, falling back: {error}"
+                                            ));
+                                        }
+                                    }
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                        }
                         content[index] = Some(block);
                     }
                 }
@@ -695,7 +758,18 @@ where
             }
         }
 
-        Ok(CreateMessageResponse {
+        if let Some(executor) = executor.take() {
+            let results = executor
+                .finish()
+                .await
+                .map_err(|error| QueryLoopError::Tool(error.to_string()))?;
+            if !results.is_empty() {
+                tool_outputs = Some(results);
+            }
+        }
+
+        Ok(StreamedResponse {
+            response: CreateMessageResponse {
             id: message_id,
             response_type,
             role,
@@ -705,7 +779,80 @@ where
             stop_sequence,
             usage: usage
                 .ok_or_else(|| QueryLoopError::Tool("missing streamed usage".to_string()))?,
+            },
+            tool_outputs,
         })
+    }
+
+    async fn schedule_streamed_tool(
+        &self,
+        app_state: &Arc<Mutex<AppState>>,
+        executor: &StreamingToolExecutor,
+        index: usize,
+        tool_use_id: &str,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Result<(), QueryLoopError> {
+        let is_read_only = self
+            .tools
+            .get(name)
+            .map(|tool| tool.is_read_only)
+            .unwrap_or(false);
+
+        if let Some(output) = &self.output {
+            output.tool_use(name, input);
+        }
+
+        if let Some((denial_msg, is_error)) = self
+            .check_tool_permission(app_state, name, input, is_read_only)
+            .await
+        {
+            let result = rust_claude_core::tool_types::ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                content: denial_msg.clone(),
+                is_error,
+                metadata: Default::default(),
+            };
+            executor
+                .add_precomputed_result(index, name, input.clone(), result)
+                .await;
+            return Ok(());
+        }
+
+        let mut scheduled_input = input.clone();
+        let session_id = { app_state.lock().await.session.id.clone() };
+        if let Some(runner) = &self.hook_runner {
+            let cwd = { app_state.lock().await.cwd.clone() };
+            let hook_result = runner
+                .run_pre_tool_use_with_cwd(name, &scheduled_input, &session_id, &cwd)
+                .await;
+            match hook_result {
+                rust_claude_core::hooks::HookResult::Continue => {}
+                rust_claude_core::hooks::HookResult::ContinueWithInput { updated_input } => {
+                    scheduled_input = updated_input;
+                }
+                rust_claude_core::hooks::HookResult::Block { reason } => {
+                    let msg = format!("Hook blocked: {}", reason);
+                    if let Some(output) = &self.output {
+                        output.hook_blocked(name, &reason);
+                        output.tool_result(name, &msg, true);
+                    }
+                    let result = rust_claude_core::tool_types::ToolResult::error(
+                        tool_use_id.to_string(),
+                        msg,
+                    );
+                    executor
+                        .add_precomputed_result(index, name, scheduled_input, result)
+                        .await;
+                    return Ok(());
+                }
+            }
+        }
+
+        executor
+            .add_tool(index, tool_use_id, name, scheduled_input)
+            .await
+            .map_err(|error| QueryLoopError::Tool(error.to_string()))
     }
 
     async fn build_request(
@@ -1174,6 +1321,58 @@ where
         }
         Ok(())
     }
+
+    async fn append_streaming_tool_results(
+        &self,
+        app_state: &Arc<Mutex<AppState>>,
+        tool_outputs: Vec<StreamingToolOutput>,
+    ) -> Result<(), QueryLoopError> {
+        let session_id = { app_state.lock().await.session.id.clone() };
+        let mut tool_results = Vec::new();
+
+        for output in tool_outputs {
+            if let Some(sink) = &self.output {
+                sink.tool_result(
+                    &output.name,
+                    &output.result.content,
+                    output.result.is_error,
+                );
+            }
+            if output.run_post_hook {
+                if let Some(runner) = &self.hook_runner {
+                let cwd = { app_state.lock().await.cwd.clone() };
+                runner
+                    .run_post_tool_use_with_cwd(
+                        &output.name,
+                        &output.input,
+                        &output.result.content,
+                        output.result.is_error,
+                        &session_id,
+                        &cwd,
+                    )
+                    .await;
+                }
+            }
+            tool_results.push((
+                output.result.tool_use_id,
+                output.result.content,
+                output.result.is_error,
+            ));
+        }
+
+        let tool_result_message = Message::tool_results(&tool_results);
+        let mut state = app_state.lock().await;
+        state.add_message(tool_result_message.clone());
+        drop(state);
+        if let Some(persistence) = &self.session_persistence {
+            if let Err(e) = persistence.lock().await.persist_message(&tool_result_message) {
+                if let Some(output) = &self.output {
+                    output.error(&format!("Failed to persist tool result message: {e}"));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn ensure_index<T>(items: &mut Vec<Option<T>>, index: usize) {
@@ -1195,6 +1394,7 @@ mod tests {
     };
     use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
     struct MockClient {
@@ -1665,6 +1865,10 @@ mod tests {
 
     struct SlowWriteTool;
 
+    struct NotifyingReadTool {
+        started: Arc<AtomicBool>,
+    }
+
     #[async_trait]
     impl Tool for SlowReadTool {
         fn info(&self) -> rust_claude_core::tool_types::ToolInfo {
@@ -1719,6 +1923,37 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl Tool for NotifyingReadTool {
+        fn info(&self) -> rust_claude_core::tool_types::ToolInfo {
+            rust_claude_core::tool_types::ToolInfo {
+                name: "NotifyRead".to_string(),
+                description: "notifying read".to_string(),
+                input_schema: serde_json::json!({}),
+            }
+        }
+
+        fn is_read_only(&self) -> bool {
+            true
+        }
+
+        fn is_concurrency_safe(&self) -> bool {
+            true
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            context: ToolContext,
+        ) -> Result<rust_claude_core::tool_types::ToolResult, ToolError> {
+            self.started.store(true, Ordering::SeqCst);
+            Ok(rust_claude_core::tool_types::ToolResult::success(
+                context.tool_use_id,
+                "started",
+            ))
+        }
+    }
+
     #[tokio::test]
     async fn test_query_loop_executes_concurrency_safe_tools_in_parallel() {
         let client = MockClient {
@@ -1759,6 +1994,76 @@ mod tests {
         let elapsed = started.elapsed();
 
         assert!(elapsed < Duration::from_millis(90));
+    }
+
+    #[tokio::test]
+    async fn test_streaming_tool_starts_before_message_stop() {
+        struct DelayedMessageStopClient {
+            tool_started: Arc<AtomicBool>,
+        }
+
+        #[async_trait]
+        impl ModelClient for DelayedMessageStopClient {
+            async fn create_message(
+                &self,
+                _request: &CreateMessageRequest,
+            ) -> Result<CreateMessageResponse, ApiError> {
+                unreachable!("streaming test should use create_message_stream")
+            }
+
+            async fn create_message_stream(
+                &self,
+                _request: &CreateMessageRequest,
+            ) -> Result<MessageStream, ApiError> {
+                let tool_started = self.tool_started.clone();
+                let stream = async_stream::stream! {
+                    yield Ok(StreamEvent::MessageStart {
+                        message: rust_claude_api::StreamMessage {
+                            id: "msg_1".to_string(),
+                            role: rust_claude_core::message::Role::Assistant,
+                            model: "claude-test".to_string(),
+                            content: vec![],
+                            stop_reason: None,
+                            stop_sequence: None,
+                            usage: usage(),
+                        },
+                    });
+                    yield Ok(StreamEvent::ContentBlockStart {
+                        index: 0,
+                        content_block: ContentBlock::tool_use("tool_1", "NotifyRead", serde_json::json!({})),
+                    });
+                    yield Ok(StreamEvent::ContentBlockStop { index: 0 });
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    assert!(
+                        tool_started.load(Ordering::SeqCst),
+                        "tool should start before message_stop"
+                    );
+                    yield Ok(StreamEvent::MessageDelta {
+                        delta: rust_claude_api::MessageDelta {
+                            stop_reason: Some(StopReason::ToolUse),
+                            stop_sequence: None,
+                        },
+                        usage: Some(usage()),
+                    });
+                    yield Ok(StreamEvent::MessageStop);
+                };
+                Ok(Box::pin(stream))
+            }
+        }
+
+        let tool_started = Arc::new(AtomicBool::new(false));
+        let client = DelayedMessageStopClient {
+            tool_started: tool_started.clone(),
+        };
+        let mut tools = ToolRegistry::new();
+        tools.register(NotifyingReadTool {
+            started: tool_started,
+        });
+        let loop_runner = QueryLoop::new(client, tools).with_max_rounds(1);
+        let app_state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
+
+        let result = loop_runner.run(app_state, "early").await;
+        assert!(matches!(result, Err(QueryLoopError::MaxRoundsExceeded)));
     }
 
     #[tokio::test]
@@ -2715,7 +3020,7 @@ mod tests {
 
         let loop_runner = QueryLoop {
             client,
-            tools,
+            tools: Arc::new(tools),
             max_rounds: 8,
             output: None,
             permission_ui: None,

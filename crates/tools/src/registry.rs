@@ -2,12 +2,13 @@ use std::collections::HashMap;
 
 use rust_claude_core::tool_types::ToolInfo;
 
-use crate::tool::{Tool, ToolContext, ToolError};
+use crate::tool::{InterruptBehavior, Tool, ToolContext, ToolError};
 
 pub struct RegisteredTool {
     pub info: ToolInfo,
     pub is_read_only: bool,
     pub is_concurrency_safe: bool,
+    pub interrupt_behavior: InterruptBehavior,
     pub tool: Box<dyn Tool>,
 }
 
@@ -29,12 +30,13 @@ impl ToolRegistry {
         let info = tool.info();
         self.tools.insert(
             info.name.clone(),
-            RegisteredTool {
-                is_read_only: tool.is_read_only(),
-                is_concurrency_safe: tool.is_concurrency_safe(),
-                info,
-                tool: Box::new(tool),
-            },
+                RegisteredTool {
+                    is_read_only: tool.is_read_only(),
+                    is_concurrency_safe: tool.is_concurrency_safe(),
+                    interrupt_behavior: tool.interrupt_behavior(),
+                    info,
+                    tool: Box::new(tool),
+                },
         );
     }
 
@@ -98,10 +100,39 @@ impl Default for ToolRegistry {
 mod tests {
     use super::*;
     use crate::bash::BashTool;
+    use crate::tool::InterruptBehavior;
     use crate::{
         EnterPlanModeTool, ExitPlanModeTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
         GrepTool, MonitorTool, TodoWriteTool,
     };
+
+    struct BlockingTool;
+
+    #[async_trait::async_trait]
+    impl Tool for BlockingTool {
+        fn info(&self) -> ToolInfo {
+            ToolInfo {
+                name: "BlockingTool".to_string(),
+                description: "Blocking tool".to_string(),
+                input_schema: serde_json::json!({}),
+            }
+        }
+
+        fn interrupt_behavior(&self) -> InterruptBehavior {
+            InterruptBehavior::Block
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            context: ToolContext,
+        ) -> Result<rust_claude_core::tool_types::ToolResult, ToolError> {
+            Ok(rust_claude_core::tool_types::ToolResult::success(
+                context.tool_use_id,
+                "ok".to_string(),
+            ))
+        }
+    }
 
     #[test]
     fn test_register_and_get() {
@@ -111,7 +142,17 @@ mod tests {
         let tool = registry.get("Bash").unwrap();
         assert_eq!(tool.info.name, "Bash");
         assert!(!tool.is_concurrency_safe);
+        assert_eq!(tool.interrupt_behavior, InterruptBehavior::Cancel);
         assert!(registry.get("Unknown").is_none());
+    }
+
+    #[test]
+    fn test_register_preserves_explicit_interrupt_behavior() {
+        let mut registry = ToolRegistry::new();
+        registry.register(BlockingTool);
+
+        let tool = registry.get("BlockingTool").unwrap();
+        assert_eq!(tool.interrupt_behavior, InterruptBehavior::Block);
     }
 
     #[test]
@@ -128,6 +169,7 @@ mod tests {
                 },
                 is_read_only: false,
                 is_concurrency_safe: false,
+                interrupt_behavior: InterruptBehavior::Cancel,
                 tool: Box::new(BashTool::new()),
             },
         );
@@ -203,6 +245,7 @@ mod tests {
                 },
                 is_read_only: false,
                 is_concurrency_safe: false,
+                interrupt_behavior: InterruptBehavior::Cancel,
                 tool: Box::new(BashTool::new()),
             },
         );
@@ -216,6 +259,7 @@ mod tests {
                 },
                 is_read_only: false,
                 is_concurrency_safe: false,
+                interrupt_behavior: InterruptBehavior::Cancel,
                 tool: Box::new(BashTool::new()),
             },
         );

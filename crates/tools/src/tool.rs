@@ -142,6 +142,12 @@ pub enum ToolError {
     Execution(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InterruptBehavior {
+    Cancel,
+    Block,
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn info(&self) -> ToolInfo;
@@ -152,6 +158,10 @@ pub trait Tool: Send + Sync {
 
     fn is_concurrency_safe(&self) -> bool {
         false
+    }
+
+    fn interrupt_behavior(&self) -> InterruptBehavior {
+        InterruptBehavior::Cancel
     }
 
     async fn execute(

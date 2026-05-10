@@ -40,7 +40,7 @@ pub use task_tool::TaskTool;
 pub use todo_write::TodoWriteTool;
 pub use tool::{
     AgentContext, AgentRunOptions, AskUserQuestionOption, AskUserQuestionRequest,
-    AskUserQuestionResponse, Tool, ToolContext, ToolError, UserQuestionCallback,
+    AskUserQuestionResponse, InterruptBehavior, Tool, ToolContext, ToolError, UserQuestionCallback,
 };
 pub use web_fetch_tool::WebFetchTool;
 pub use web_search_tool::WebSearchTool;

@@ -175,6 +175,7 @@ impl Tool for BashTool {
         let marker = format!("{CWD_MARKER_PREFIX}{}__", uuid::Uuid::new_v4());
         let shell_command = Self::command_with_cwd_capture(&input.command, &marker);
         let mut command = Command::new("sh");
+        command.kill_on_drop(true);
         command.arg("-c").arg(shell_command);
         if let Some(start_dir) = Self::resolve_start_dir(input.workdir.as_deref(), &context).await?
         {
@@ -226,6 +227,7 @@ mod tests {
     use rust_claude_core::state::AppState;
     use std::sync::Arc;
     use tokio::sync::Mutex;
+    use tokio::time::{sleep, Duration};
 
     fn unique_temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -281,6 +283,37 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, ToolError::Execution(message) if message.contains("timed out")));
+    }
+
+    #[tokio::test]
+    async fn test_bash_abort_kills_child_process() {
+        let marker = format!("rust-claude-bash-abort-{}", uuid::Uuid::new_v4());
+        let path = std::env::temp_dir().join(&marker);
+        let command = format!(
+            "sleep 5; printf done > {}",
+            path.display()
+        );
+        let tool = BashTool::new();
+        let handle = tokio::spawn(async move {
+            let _ = tool
+                .execute(
+                    serde_json::json!({ "command": command, "timeout_ms": 10_000 }),
+                    ToolContext {
+                        tool_use_id: "tool_abort".to_string(),
+                        app_state: None,
+                        agent_context: None,
+                        user_question_callback: None,
+                    },
+                )
+                .await;
+        });
+
+        sleep(Duration::from_millis(100)).await;
+        handle.abort();
+        sleep(Duration::from_millis(200)).await;
+
+        assert!(!path.exists(), "aborted Bash child should not keep running");
+        let _ = tokio::fs::remove_file(path).await;
     }
 
     #[tokio::test]

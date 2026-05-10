@@ -207,7 +207,9 @@ impl Tool for MonitorTool {
         let timeout_duration = Self::timeout_duration(input.timeout);
         let started_at = Instant::now();
 
-        let mut child = Command::new("sh")
+        let mut command = Command::new("sh");
+        command.kill_on_drop(true);
+        let mut child = command
             .arg("-c")
             .arg(&input.command)
             .stdout(std::process::Stdio::piped())
@@ -263,6 +265,7 @@ impl Tool for MonitorTool {
 mod tests {
     use super::*;
     use crate::tool::Tool;
+    use tokio::time::{sleep, Duration};
 
     fn context() -> ToolContext {
         ToolContext {
@@ -271,6 +274,35 @@ mod tests {
             agent_context: None,
             user_question_callback: None,
         }
+    }
+
+    #[tokio::test]
+    async fn test_monitor_abort_kills_child_process() {
+        let path = std::env::temp_dir().join(format!(
+            "rust-claude-monitor-abort-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let command = format!("sleep 5; printf done > {}", path.display());
+        let tool = MonitorTool::new();
+        let handle = tokio::spawn(async move {
+            let _ = tool
+                .execute(
+                    serde_json::json!({
+                        "command": command,
+                        "pattern": "done",
+                        "timeout": 10_000
+                    }),
+                    context(),
+                )
+                .await;
+        });
+
+        sleep(Duration::from_millis(100)).await;
+        handle.abort();
+        sleep(Duration::from_millis(200)).await;
+
+        assert!(!path.exists(), "aborted Monitor child should not keep running");
+        let _ = tokio::fs::remove_file(path).await;
     }
 
     #[tokio::test]

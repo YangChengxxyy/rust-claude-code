@@ -1,4 +1,6 @@
 use rust_claude_core::compaction::CompactionResult;
+use rust_claude_core::message::Message;
+use rust_claude_core::session::SessionEvent;
 use rust_claude_core::state::TodoItem;
 use rust_claude_tools::{AskUserQuestionRequest, AskUserQuestionResponse};
 
@@ -107,4 +109,16 @@ impl UserQuestionUI for NoopUserQuestionUI {
     ) -> Option<AskUserQuestionResponse> {
         None
     }
+}
+
+/// Trait for incremental session persistence from the agent loop.
+///
+/// The agent loop calls these methods at the appropriate points during execution.
+/// Implementations handle the actual I/O (e.g., appending to a JSONL file).
+pub trait SessionPersistence: Send + Sync {
+    /// Persist a message (user or assistant) to the session log.
+    fn persist_message(&mut self, msg: &Message) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Persist a session event (compaction boundary, permission change, etc.).
+    fn persist_event(&mut self, event: &SessionEvent) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }

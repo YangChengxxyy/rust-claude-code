@@ -3610,6 +3610,7 @@ mod tests {
                 message_count: 1,
                 first_user_summary: "first".into(),
                 total_usage: None,
+                interrupted: false,
             }],
             0,
         ));
@@ -3730,6 +3731,7 @@ mod tests {
                     message_count: 1,
                     first_user_summary: "first".into(),
                     total_usage: None,
+                    interrupted: false,
                 },
                 SessionSummary {
                     id: "two".into(),
@@ -3741,6 +3743,7 @@ mod tests {
                     message_count: 2,
                     first_user_summary: "second".into(),
                     total_usage: None,
+                    interrupted: false,
                 },
             ],
             0,

@@ -582,6 +582,33 @@ async fn main() -> Result<()> {
         state.session.id = SessionFile::new(&state.session.model, &state.session.model_setting, &cwd).id;
     }
 
+    // Create JSONL session writer for incremental persistence.
+    // For resumed interrupted sessions, open in append mode; for new sessions, create fresh.
+    let session_writer: Option<Arc<Mutex<Box<dyn rust_claude_sdk::output::SessionPersistence>>>> = {
+        let jsonl_path = session::sessions_dir().join(format!("{}.jsonl", &state.session.id));
+        let writer_result = if jsonl_path.exists() {
+            // Resume existing JSONL session: append instead of truncating history.
+            session::SessionWriter::open_append(&jsonl_path)
+        } else {
+            // New session: create fresh JSONL file
+            session::SessionWriter::new(
+                &state.session.id,
+                &state.session.model,
+                &state.session.model_setting,
+                &cwd,
+            )
+        };
+        match writer_result {
+            Ok(writer) => Some(Arc::new(Mutex::new(
+                Box::new(writer) as Box<dyn rust_claude_sdk::output::SessionPersistence>,
+            ))),
+            Err(e) => {
+                eprintln!("Warning: failed to create session writer: {e}");
+                None
+            }
+        }
+    };
+
     let app_state = Arc::new(Mutex::new(state));
 
     let claude_md_files = claude_md::discover_claude_md(&cwd);
@@ -743,6 +770,9 @@ async fn main() -> Result<()> {
         if let Some(runner) = &hook_runner {
             query_loop = query_loop.with_hook_runner(runner.clone());
         }
+        if let Some(writer) = &session_writer {
+            query_loop = query_loop.with_shared_session_persistence(writer.clone());
+        }
 
         // For streaming print mode, attach a bridge that streams to stdout
         let run_result = if stream_enabled && !output_json {
@@ -850,6 +880,10 @@ async fn main() -> Result<()> {
                 Err(error) => Err(error.into()),
             }
         };
+
+        finish_session_writer(&session_writer).await;
+
+
         if let Some(runner) = &hook_runner {
             let session_id = { app_state.lock().await.session.id.clone() };
             let reason = if run_result.is_ok() {
@@ -859,7 +893,7 @@ async fn main() -> Result<()> {
             };
             runner.run_session_end(reason, &session_id).await;
         }
-        Ok(run_result?)
+    Ok(run_result?)
     } else {
         let allowed_tools = resolved.allowed_tools.clone();
         let disallowed_tools = resolved.disallowed_tools.clone();
@@ -872,8 +906,22 @@ async fn main() -> Result<()> {
             mcp_manager,
             custom_agents,
             plugin_manager,
+            session_writer,
         )
         .await
+    }
+}
+
+async fn finish_session_writer(
+    session_writer: &Option<Arc<Mutex<Box<dyn rust_claude_sdk::output::SessionPersistence>>>>,
+) {
+    if let Some(writer) = session_writer {
+        let _ = writer
+            .lock()
+            .await
+            .persist_event(&rust_claude_core::session::SessionEvent::SessionEnd {
+                updated_at: chrono::Local::now().to_rfc3339(),
+            });
     }
 }
 
@@ -1837,6 +1885,7 @@ async fn run_tui(
     mcp_manager: Arc<McpManager>,
     custom_agents: Arc<CustomAgentRegistry>,
     plugin_manager: Arc<Mutex<PluginManager>>,
+    session_writer: Option<Arc<Mutex<Box<dyn rust_claude_sdk::output::SessionPersistence>>>>,
 ) -> Result<()> {
     let (model, model_setting, permission_mode, git_branch) = {
         let state = app_state.lock().await;
@@ -1872,6 +1921,7 @@ async fn run_tui(
     let worker_mcp_manager = mcp_manager.clone();
     let worker_custom_agents = custom_agents.clone();
     let worker_config = config.clone();
+    let worker_session_writer = session_writer.clone();
     let app_plugin_manager = plugin_manager.clone();
     let app_worker_bridge = worker_bridge.clone();
     tokio::spawn(async move {
@@ -1894,7 +1944,32 @@ async fn run_tui(
                     let compaction_config = strategy.config();
                     let service = CompactionService::new(client, compaction_config.clone());
                     match service.force_compact(&worker_state).await {
-                        Ok(result) => worker_bridge.send_compaction_complete(result).await,
+                        Ok(result) => {
+                            worker_bridge.send_compaction_complete(result.clone()).await;
+                            // Persist compaction boundary via JSONL writer
+                            if let Some(writer) = &worker_session_writer {
+                                let summary = {
+                                    let state = worker_state.lock().await;
+                                    state.messages.first()
+                                        .and_then(|m| m.content.first())
+                                        .and_then(|b| match b {
+                                            ContentBlock::Text { text } => Some(text.clone()),
+                                            _ => None,
+                                        })
+                                        .unwrap_or_else(|| format!(
+                                            "Compacted {} messages to {}",
+                                            result.original_message_count,
+                                            result.compacted_message_count
+                                        ))
+                                };
+                                let event = rust_claude_core::session::SessionEvent::CompactBoundary { summary };
+                                if let Err(e) = writer.lock().await.persist_event(&event) {
+                                    worker_bridge
+                                        .send_error(&format!("Warning: failed to persist compaction: {e}"))
+                                        .await;
+                                }
+                            }
+                        }
                         Err(e) => {
                             worker_bridge
                                 .send_error(&format!("Compaction failed: {e}"))
@@ -1902,6 +1977,7 @@ async fn run_tui(
                         }
                     }
 
+                    // Legacy JSON save as fallback
                     let state_snapshot = worker_state.lock().await;
                     let mut session_file = SessionFile::new(
                         &state_snapshot.session.model,
@@ -2594,6 +2670,9 @@ async fn run_tui(
                     if let Some(runner) = &worker_hook_runner {
                         query_loop = query_loop.with_hook_runner(runner.clone());
                     }
+                    if let Some(writer) = &worker_session_writer {
+                        query_loop = query_loop.with_shared_session_persistence(writer.clone());
+                    }
                     let worker_bridge_clone = worker_bridge.clone();
                     let worker_state_clone = worker_state.clone();
                     let handle = tokio::spawn(async move {
@@ -2793,6 +2872,9 @@ async fn run_tui(
                     if let Some(runner) = &worker_hook_runner {
                         query_loop = query_loop.with_hook_runner(runner.clone());
                     }
+                    if let Some(writer) = &worker_session_writer {
+                        query_loop = query_loop.with_shared_session_persistence(writer.clone());
+                    }
                     let worker_bridge_clone = worker_bridge.clone();
                     let worker_state_clone = worker_state.clone();
 
@@ -2879,6 +2961,10 @@ async fn run_tui(
                             }
                         }
 
+                        // Session data is already persisted per-turn via the JSONL
+                        // session writer. The legacy JSON save below is kept as a
+                        // fallback snapshot for backward compatibility and as insurance
+                        // in case the JSONL writer was not available.
                         let state_snapshot = worker_state_clone.lock().await;
                         let mut session_file = SessionFile::new(
                             &state_snapshot.session.model,
@@ -2957,6 +3043,7 @@ async fn run_tui(
         }
     }
     let run_result = app.run(terminal_guard.terminal_mut(), event_rx, user_tx).await;
+    finish_session_writer(&session_writer).await;
     if let Some(runner) = &hook_runner {
         let session_id = { app_state.lock().await.session.id.clone() };
         let reason = if run_result.is_ok() {
@@ -3023,6 +3110,45 @@ mod tests {
         assert_eq!(effort_budget("medium"), Some(Some(10_000)));
         assert_eq!(effort_budget("high"), Some(None));
         assert_eq!(effort_budget("extreme"), None);
+    }
+
+    struct MockSessionPersistence {
+        events: Arc<Mutex<Vec<rust_claude_core::session::SessionEvent>>>,
+    }
+
+    impl rust_claude_sdk::output::SessionPersistence for MockSessionPersistence {
+        fn persist_message(
+            &mut self,
+            _msg: &Message,
+        ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            Ok(())
+        }
+
+        fn persist_event(
+            &mut self,
+            event: &rust_claude_core::session::SessionEvent,
+        ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn finish_session_writer_persists_session_end() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let writer: Arc<tokio::sync::Mutex<Box<dyn rust_claude_sdk::output::SessionPersistence>>> =
+            Arc::new(tokio::sync::Mutex::new(Box::new(MockSessionPersistence {
+                events: events.clone(),
+            })));
+
+        finish_session_writer(&Some(writer)).await;
+
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            rust_claude_core::session::SessionEvent::SessionEnd { .. }
+        ));
     }
 
     /// RAII guard that clears `ANTHROPIC_MODEL` and `RUST_CLAUDE_MODEL_OVERRIDE`

@@ -1,4 +1,4 @@
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Users can resume a specific saved session
 The CLI SHALL support resuming a specific saved session by id through `--resume` and `-r`, supporting both `.json` and `.jsonl` session formats.

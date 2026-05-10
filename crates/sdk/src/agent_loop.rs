@@ -25,7 +25,7 @@ const SESSION_MCP_TOOL_LIMIT: usize = 20;
 const SESSION_PERMISSION_DECISION_LIMIT: usize = 10;
 
 use crate::hooks::HookRunner;
-use crate::output::{OutputSink, PermissionDecision, PermissionUI, UserQuestionUI};
+use crate::output::{OutputSink, PermissionDecision, PermissionUI, SessionPersistence, UserQuestionUI};
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryLoopError {
@@ -82,6 +82,7 @@ pub struct QueryLoop<C> {
     compaction_config: Option<CompactionConfig>,
     hook_runner: Option<Arc<HookRunner>>,
     agent_context: Option<rust_claude_tools::AgentContext>,
+    session_persistence: Option<Arc<Mutex<Box<dyn SessionPersistence>>>>,
 }
 
 impl<C> QueryLoop<C>
@@ -99,6 +100,7 @@ where
             compaction_config: None,
             hook_runner: None,
             agent_context: None,
+            session_persistence: None,
         }
     }
 
@@ -137,6 +139,19 @@ where
         self
     }
 
+    pub fn with_session_persistence(mut self, persistence: Box<dyn SessionPersistence>) -> Self {
+        self.session_persistence = Some(Arc::new(Mutex::new(persistence)));
+        self
+    }
+
+    pub fn with_shared_session_persistence(
+        mut self,
+        persistence: Arc<Mutex<Box<dyn SessionPersistence>>>,
+    ) -> Self {
+        self.session_persistence = Some(persistence);
+        self
+    }
+
     fn user_question_callback(&self) -> Option<UserQuestionCallback> {
         let ui = Arc::clone(self.user_question_ui.as_ref()?);
         Some(Arc::new(move |request| {
@@ -166,9 +181,19 @@ where
                 .and_then(|store| memory::scan_memory_store(&store).ok())
         };
 
+        let user_message = Message::user(user_input_str);
         {
             let mut state = app_state.lock().await;
-            state.add_message(Message::user(user_input_str));
+            state.add_message(user_message.clone());
+        }
+
+        // Persist user message to session log
+        if let Some(persistence) = &self.session_persistence {
+            if let Err(e) = persistence.lock().await.persist_message(&user_message) {
+                if let Some(output) = &self.output {
+                    output.error(&format!("Failed to persist user message: {e}"));
+                }
+            }
         }
 
         let mut max_tokens_recovery_count: usize = 0;
@@ -186,6 +211,32 @@ where
                         if let Some(output) = &self.output {
                             output.compaction_start();
                             output.compaction_complete(&result);
+                        }
+                        // Persist compaction boundary to session log
+                        if let Some(persistence) = &self.session_persistence {
+                            // Extract the summary text from the first message after compaction
+                            let summary = {
+                                let state = app_state.lock().await;
+                                state.messages.first()
+                                    .and_then(|m| m.content.first())
+                                    .and_then(|b| match b {
+                                        ContentBlock::Text { text } => Some(text.clone()),
+                                        _ => None,
+                                    })
+                                    .unwrap_or_else(|| format!(
+                                        "Compacted {} messages to {}",
+                                        result.original_message_count,
+                                        result.compacted_message_count
+                                    ))
+                            };
+                            let event = rust_claude_core::session::SessionEvent::CompactBoundary {
+                                summary,
+                            };
+                            if let Err(e) = persistence.lock().await.persist_event(&event) {
+                                if let Some(output) = &self.output {
+                                    output.error(&format!("Failed to persist compaction boundary: {e}"));
+                                }
+                            }
                         }
                     }
                     Ok(None) => {} // no compaction needed
@@ -268,6 +319,27 @@ where
                 state.update_api_usage(response.usage.clone());
             }
 
+            // Persist assistant message and usage to session log
+            if let Some(persistence) = &self.session_persistence {
+                let mut p = persistence.lock().await;
+                if let Err(e) = p.persist_message(&assistant_message) {
+                    if let Some(output) = &self.output {
+                        output.error(&format!("Failed to persist assistant message: {e}"));
+                    }
+                }
+                let usage_event = rust_claude_core::session::SessionEvent::UsageUpdate {
+                    usage: {
+                        let state = app_state.lock().await;
+                        state.total_usage.clone()
+                    },
+                };
+                if let Err(e) = p.persist_event(&usage_event) {
+                    if let Some(output) = &self.output {
+                        output.error(&format!("Failed to persist usage update: {e}"));
+                    }
+                }
+            }
+
             // Handle max tokens truncation with recovery
             if stop_reason == Some(StopReason::MaxTokens) {
                 // If the response has tool_use blocks, execute them first
@@ -287,9 +359,17 @@ where
                     }
 
                     // Inject continuation message
+                    let continuation_message = Message::user(MAX_TOKENS_RECOVERY_MESSAGE);
                     {
                         let mut state = app_state.lock().await;
-                        state.add_message(Message::user(MAX_TOKENS_RECOVERY_MESSAGE));
+                        state.add_message(continuation_message.clone());
+                    }
+                    if let Some(persistence) = &self.session_persistence {
+                        if let Err(e) = persistence.lock().await.persist_message(&continuation_message) {
+                            if let Some(output) = &self.output {
+                                output.error(&format!("Failed to persist continuation message: {e}"));
+                            }
+                        }
                     }
                     continue;
                 }
@@ -363,6 +443,25 @@ where
                         Ok(result) => {
                             if let Some(output) = &self.output {
                                 output.compaction_complete(&result);
+                            }
+                            // Persist reactive compaction boundary
+                            if let Some(persistence) = &self.session_persistence {
+                                let summary = {
+                                    let state = app_state.lock().await;
+                                    state.messages.first()
+                                        .and_then(|m| m.content.first())
+                                        .and_then(|b| match b {
+                                            ContentBlock::Text { text } => Some(text.clone()),
+                                            _ => None,
+                                        })
+                                        .unwrap_or_else(|| format!(
+                                            "Reactive compaction: {} -> {} messages",
+                                            result.original_message_count,
+                                            result.compacted_message_count
+                                        ))
+                                };
+                                let event = rust_claude_core::session::SessionEvent::CompactBoundary { summary };
+                                let _ = persistence.lock().await.persist_event(&event);
                             }
                             return ErrorRecoveryAction::Retry;
                         }
@@ -799,23 +898,32 @@ where
                             None
                         }
                         Some(PermissionDecision::AllowAlways) => {
-                            let mut state = app_state.lock().await;
-                            let rule = rust_claude_core::permission::PermissionRule {
-                                tool_name: tool_name.to_string(),
-                                // Use the exact command as the pattern so we
-                                // don't accidentally allow broader commands
-                                // than the user intended.
-                                pattern: command.map(|c| c.to_string()),
-                                path_pattern: None,
-                                rule_type: rust_claude_core::permission::RuleType::Allow,
+                            let (mode, allow_rules, deny_rules) = {
+                                let mut state = app_state.lock().await;
+                                let rule = rust_claude_core::permission::PermissionRule {
+                                    tool_name: tool_name.to_string(),
+                                    pattern: command.map(|c| c.to_string()),
+                                    path_pattern: None,
+                                    rule_type: rust_claude_core::permission::RuleType::Allow,
+                                };
+                                state.always_allow_rules.push(rule);
+                                state.record_permission_decision(
+                                    tool_name,
+                                    "allowed",
+                                    command.map(|value| value.to_string()),
+                                    SESSION_PERMISSION_DECISION_LIMIT,
+                                );
+                                (state.permission_mode, state.always_allow_rules.clone(), state.always_deny_rules.clone())
                             };
-                            state.always_allow_rules.push(rule);
-                            state.record_permission_decision(
-                                tool_name,
-                                "allowed",
-                                command.map(|value| value.to_string()),
-                                SESSION_PERMISSION_DECISION_LIMIT,
-                            );
+                            // Persist permission change to session log
+                            if let Some(persistence) = &self.session_persistence {
+                                let event = rust_claude_core::session::SessionEvent::PermissionChange {
+                                    mode,
+                                    allow_rules,
+                                    deny_rules,
+                                };
+                                let _ = persistence.lock().await.persist_event(&event);
+                            }
                             None
                         }
                         Some(PermissionDecision::Deny) => {
@@ -829,20 +937,32 @@ where
                             Some(("Permission denied by user".to_string(), true))
                         }
                         Some(PermissionDecision::DenyAlways) => {
-                            let mut state = app_state.lock().await;
-                            let rule = rust_claude_core::permission::PermissionRule {
-                                tool_name: tool_name.to_string(),
-                                pattern: command.map(|c| c.to_string()),
-                                path_pattern: None,
-                                rule_type: rust_claude_core::permission::RuleType::Deny,
+                            let (mode, allow_rules, deny_rules) = {
+                                let mut state = app_state.lock().await;
+                                let rule = rust_claude_core::permission::PermissionRule {
+                                    tool_name: tool_name.to_string(),
+                                    pattern: command.map(|c| c.to_string()),
+                                    path_pattern: None,
+                                    rule_type: rust_claude_core::permission::RuleType::Deny,
+                                };
+                                state.always_deny_rules.push(rule);
+                                state.record_permission_decision(
+                                    tool_name,
+                                    "denied",
+                                    command.map(|value| value.to_string()),
+                                    SESSION_PERMISSION_DECISION_LIMIT,
+                                );
+                                (state.permission_mode, state.always_allow_rules.clone(), state.always_deny_rules.clone())
                             };
-                            state.always_deny_rules.push(rule);
-                            state.record_permission_decision(
-                                tool_name,
-                                "denied",
-                                command.map(|value| value.to_string()),
-                                SESSION_PERMISSION_DECISION_LIMIT,
-                            );
+                            // Persist permission change to session log
+                            if let Some(persistence) = &self.session_persistence {
+                                let event = rust_claude_core::session::SessionEvent::PermissionChange {
+                                    mode,
+                                    allow_rules,
+                                    deny_rules,
+                                };
+                                let _ = persistence.lock().await.persist_event(&event);
+                            }
                             Some(("Permission denied by user (always deny)".to_string(), true))
                         }
                         None => {
@@ -1036,13 +1156,22 @@ where
 
         tool_results.sort_by_key(|(index, _, _, _)| *index);
 
-        let mut state = app_state.lock().await;
-        state.add_message(Message::tool_results(
+        let tool_result_message = Message::tool_results(
             &tool_results
                 .into_iter()
                 .map(|(_, tool_use_id, content, is_error)| (tool_use_id, content, is_error))
                 .collect::<Vec<_>>(),
-        ));
+        );
+        let mut state = app_state.lock().await;
+        state.add_message(tool_result_message.clone());
+        drop(state);
+        if let Some(persistence) = &self.session_persistence {
+            if let Err(e) = persistence.lock().await.persist_message(&tool_result_message) {
+                if let Some(output) = &self.output {
+                    output.error(&format!("Failed to persist tool result message: {e}"));
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -2527,5 +2656,220 @@ mod tests {
         // Should succeed — overload count resets after the successful response
         let result = loop_runner.run(app_state, "test").await.unwrap();
         assert_eq!(result.content, vec![ContentBlock::text("middle")]);
+    }
+
+    // --- Session persistence tests ---
+
+    #[derive(Debug, Clone)]
+    enum PersistenceCall {
+        Message(Message),
+        Event(rust_claude_core::session::SessionEvent),
+    }
+
+    struct MockSessionPersistence {
+        calls: Arc<std::sync::Mutex<Vec<PersistenceCall>>>,
+    }
+
+    impl MockSessionPersistence {
+        fn new(calls: Arc<std::sync::Mutex<Vec<PersistenceCall>>>) -> Self {
+            Self { calls }
+        }
+    }
+
+    impl crate::output::SessionPersistence for MockSessionPersistence {
+        fn persist_message(
+            &mut self,
+            msg: &Message,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.calls.lock().unwrap().push(PersistenceCall::Message(msg.clone()));
+            Ok(())
+        }
+
+        fn persist_event(
+            &mut self,
+            event: &rust_claude_core::session::SessionEvent,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            self.calls.lock().unwrap().push(PersistenceCall::Event(event.clone()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_session_persistence_receives_user_and_assistant_messages() {
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::from(vec![CreateMessageResponse {
+                id: "msg_1".to_string(),
+                response_type: "message".to_string(),
+                role: rust_claude_core::message::Role::Assistant,
+                content: vec![ContentBlock::text("hello back")],
+                model: "claude-test".to_string(),
+                stop_reason: Some(StopReason::EndTurn),
+                stop_sequence: None,
+                usage: usage(),
+            }])),
+        };
+
+        let tools = ToolRegistry::new();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mock = MockSessionPersistence::new(calls.clone());
+
+        let loop_runner = QueryLoop {
+            client,
+            tools,
+            max_rounds: 8,
+            output: None,
+            permission_ui: None,
+            user_question_ui: None,
+            compaction_config: None,
+            hook_runner: None,
+            agent_context: None,
+            session_persistence: Some(Arc::new(Mutex::new(
+                Box::new(mock) as Box<dyn crate::output::SessionPersistence>,
+            ))),
+        };
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.session.stream = false;
+        let app_state = Arc::new(Mutex::new(state));
+
+        loop_runner.run(app_state, "hello").await.unwrap();
+
+        let calls = calls.lock().unwrap();
+        // Expected calls: user message, assistant message, usage update event
+        let messages: Vec<_> = calls
+            .iter()
+            .filter_map(|c| match c {
+                PersistenceCall::Message(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        let events: Vec<_> = calls
+            .iter()
+            .filter_map(|c| match c {
+                PersistenceCall::Event(e) => Some(e),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, rust_claude_core::message::Role::User);
+        assert_eq!(messages[1].role, rust_claude_core::message::Role::Assistant);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            events[0],
+            rust_claude_core::session::SessionEvent::UsageUpdate { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_session_persistence_receives_tool_result_message() {
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                CreateMessageResponse {
+                    id: "msg_1".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::tool_use(
+                        "tool_1",
+                        "Bash",
+                        serde_json::json!({ "command": "printf tool-output" }),
+                    )],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_2".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("done")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+            ])),
+        };
+
+        let mut tools = ToolRegistry::new();
+        tools.register(BashTool::new());
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mock = MockSessionPersistence::new(calls.clone());
+        let loop_runner = QueryLoop::new(client, tools)
+            .with_session_persistence(Box::new(mock));
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.session.stream = false;
+        state.permission_mode = rust_claude_core::permission::PermissionMode::BypassPermissions;
+        let app_state = Arc::new(Mutex::new(state));
+
+        loop_runner.run(app_state, "hello").await.unwrap();
+
+        let calls = calls.lock().unwrap();
+        let messages: Vec<_> = calls
+            .iter()
+            .filter_map(|c| match c {
+                PersistenceCall::Message(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].role, rust_claude_core::message::Role::User);
+        assert_eq!(messages[1].role, rust_claude_core::message::Role::Assistant);
+        assert_eq!(messages[2].role, rust_claude_core::message::Role::User);
+        assert!(matches!(messages[2].content[0], ContentBlock::ToolResult { .. }));
+        assert_eq!(messages[3].role, rust_claude_core::message::Role::Assistant);
+    }
+
+    #[tokio::test]
+    async fn test_session_persistence_receives_max_tokens_continuation_message() {
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::from(vec![
+                CreateMessageResponse {
+                    id: "msg_1".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("partial")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::MaxTokens),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_2".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("done")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+            ])),
+        };
+
+        let tools = ToolRegistry::new();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mock = MockSessionPersistence::new(calls.clone());
+        let loop_runner = QueryLoop::new(client, tools)
+            .with_session_persistence(Box::new(mock));
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.session.stream = false;
+        let app_state = Arc::new(Mutex::new(state));
+
+        loop_runner.run(app_state, "hello").await.unwrap();
+
+        let calls = calls.lock().unwrap();
+        let messages: Vec<_> = calls
+            .iter()
+            .filter_map(|c| match c {
+                PersistenceCall::Message(m) => Some(m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[2], &Message::user(MAX_TOKENS_RECOVERY_MESSAGE));
     }
 }

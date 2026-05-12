@@ -194,7 +194,7 @@ mod tests {
         ToolContext {
             tool_use_id: "tool_1".to_string(),
             user_question_callback: Some(callback),
-            ..ToolContext::default()
+            ..Default::default()
         }
     }
 
@@ -213,7 +213,7 @@ mod tests {
                 base_input(),
                 ToolContext {
                     tool_use_id: "tool_1".to_string(),
-                    ..ToolContext::default()
+                    ..Default::default()
                 },
             )
             .await
@@ -294,7 +294,7 @@ mod tests {
                 }),
                 ToolContext {
                     tool_use_id: "tool_1".to_string(),
-                    ..ToolContext::default()
+                    ..Default::default()
                 },
             )
             .await

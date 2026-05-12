@@ -59,6 +59,10 @@ impl Tool for McpProxyTool {
         false
     }
 
+    fn should_defer(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         input: serde_json::Value,
@@ -84,7 +88,7 @@ impl Tool for McpProxyTool {
 }
 
 /// Register all discovered MCP tools from the manager into a `ToolRegistry`.
-pub fn register_mcp_tools(registry: &mut crate::registry::ToolRegistry, manager: &Arc<McpManager>) {
+pub fn register_mcp_tools(registry: &crate::registry::ToolRegistry, manager: &Arc<McpManager>) {
     for (qualified_name, tool_info) in manager.discovered_tools() {
         let proxy = McpProxyTool::new(
             qualified_name,
@@ -151,6 +155,7 @@ mod tests {
             app_state: None,
             agent_context: None,
             user_question_callback: None,
+            ..Default::default()
         };
 
         let result = tool.execute(serde_json::json!({}), context).await.unwrap();
@@ -174,9 +179,9 @@ mod tests {
     #[test]
     fn test_register_mcp_tools_empty_manager() {
         let manager = Arc::new(McpManager::empty());
-        let mut registry = crate::ToolRegistry::new();
+        let registry = crate::ToolRegistry::new();
 
-        register_mcp_tools(&mut registry, &manager);
+        register_mcp_tools(&registry, &manager);
 
         // No tools should be registered
         assert!(registry.names().is_empty());

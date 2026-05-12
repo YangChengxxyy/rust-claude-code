@@ -120,6 +120,7 @@ mod tests {
             app_state: None,
             agent_context: None,
             user_question_callback: None,
+            ..Default::default()
         }
     }
 

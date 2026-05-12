@@ -175,6 +175,7 @@ mod tests {
                     app_state: Some(app_state()),
                     agent_context: None,
                     user_question_callback: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -233,6 +234,7 @@ mod tests {
                                         text: "done".into(),
                                         input_tokens: 10,
                                         output_tokens: 5,
+                                        ..Default::default()
                                     })
                                 })
                             },
@@ -260,6 +262,7 @@ mod tests {
                     app_state: Some(app_state()),
                     agent_context: Some(AgentContext::default()),
                     user_question_callback: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -308,6 +311,7 @@ mod tests {
                                         text: "done".into(),
                                         input_tokens: 1,
                                         output_tokens: 2,
+                                        ..Default::default()
                                     })
                                 })
                             },
@@ -344,6 +348,7 @@ mod tests {
                                         text: "nested".into(),
                                         input_tokens: 1,
                                         output_tokens: 1,
+                                        ..Default::default()
                                     })
                                 })
                             },

@@ -153,6 +153,7 @@ mod tests {
                     app_state: None,
                     agent_context: None,
                     user_question_callback: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -177,6 +178,7 @@ mod tests {
                     app_state: None,
                     agent_context: None,
                     user_question_callback: None,
+        ..Default::default()
                 },
             )
             .await
@@ -201,6 +203,7 @@ mod tests {
                     app_state: None,
                     agent_context: None,
                     user_question_callback: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -243,6 +246,7 @@ mod tests {
                     app_state: Some(state),
                     agent_context: None,
                     user_question_callback: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -280,6 +284,7 @@ mod tests {
                     app_state: Some(state),
                     agent_context: None,
                     user_question_callback: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -317,6 +322,7 @@ mod tests {
                     app_state: Some(state.clone()),
                     agent_context: None,
                     user_question_callback: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -344,6 +350,7 @@ mod tests {
                     app_state: None,
                     agent_context: None,
                     user_question_callback: None,
+                    ..Default::default()
                 },
             )
             .await

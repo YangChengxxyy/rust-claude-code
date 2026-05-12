@@ -371,9 +371,7 @@ impl OutputSink for TuiBridge {
     }
 
     fn error(&self, message: &str) {
-        let _ = self
-            .event_tx
-            .try_send(AppEvent::Error(message.to_string()));
+        let _ = self.event_tx.try_send(AppEvent::Error(message.to_string()));
     }
 
     fn compaction_start(&self) {
@@ -381,11 +379,9 @@ impl OutputSink for TuiBridge {
     }
 
     fn compaction_complete(&self, result: &CompactionResult) {
-        let _ = self
-            .event_tx
-            .try_send(AppEvent::CompactionComplete {
-                result: result.clone(),
-            });
+        let _ = self.event_tx.try_send(AppEvent::CompactionComplete {
+            result: result.clone(),
+        });
     }
 
     fn hook_blocked(&self, tool_name: &str, reason: &str) {
@@ -420,10 +416,7 @@ impl PermissionUI for TuiBridge {
 
 #[async_trait::async_trait]
 impl UserQuestionUI for TuiBridge {
-    async fn ask(
-        &self,
-        request: AskUserQuestionRequest,
-    ) -> Option<AskUserQuestionResponse> {
+    async fn ask(&self, request: AskUserQuestionRequest) -> Option<AskUserQuestionResponse> {
         self.request_user_question(request).await
     }
 }

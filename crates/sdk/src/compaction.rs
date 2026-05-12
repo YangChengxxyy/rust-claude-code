@@ -378,7 +378,8 @@ impl<C: ModelClient> CompactionService<C> {
         &self,
         app_state: &Arc<Mutex<AppState>>,
     ) -> Result<MicroCompactionResult, CompactionError> {
-        self.micro_compact_with_window(app_state, MICRO_COMPACT_PRESERVE_TURNS).await
+        self.micro_compact_with_window(app_state, MICRO_COMPACT_PRESERVE_TURNS)
+            .await
     }
 
     /// Micro-compaction with a custom preservation window.
@@ -422,10 +423,7 @@ impl<C: ModelClient> CompactionService<C> {
                 } = block
                 {
                     // Skip already-cleared or empty blocks
-                    if content.is_empty()
-                        || *content == MICRO_COMPACT_PLACEHOLDER
-                        || *is_error
-                    {
+                    if content.is_empty() || *content == MICRO_COMPACT_PLACEHOLDER || *is_error {
                         continue;
                     }
 
@@ -926,9 +924,11 @@ mod tests {
             // Turn 6: user
             Message::user("One more thing"),
             // Turn 6: assistant (recent)
-            Message::assistant(vec![
-                ContentBlock::tool_use("tu_4", "Bash", serde_json::json!({"command": "cat"})),
-            ]),
+            Message::assistant(vec![ContentBlock::tool_use(
+                "tu_4",
+                "Bash",
+                serde_json::json!({"command": "cat"}),
+            )]),
             // Turn 7: user with tool result (recent)
             Message {
                 role: Role::User,

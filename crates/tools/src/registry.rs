@@ -1,51 +1,59 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 use rust_claude_core::tool_types::ToolInfo;
 
 use crate::tool::{InterruptBehavior, Tool, ToolContext, ToolError};
 
+#[derive(Clone)]
 pub struct RegisteredTool {
     pub info: ToolInfo,
     pub is_read_only: bool,
     pub is_concurrency_safe: bool,
+    pub should_defer: bool,
     pub interrupt_behavior: InterruptBehavior,
-    pub tool: Box<dyn Tool>,
+    pub tool: Arc<dyn Tool>,
 }
 
 pub struct ToolRegistry {
-    tools: HashMap<String, RegisteredTool>,
+    tools: RwLock<HashMap<String, RegisteredTool>>,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         ToolRegistry {
-            tools: HashMap::new(),
+            tools: RwLock::new(HashMap::new()),
         }
     }
 
-    pub fn register<T>(&mut self, tool: T)
+    pub fn register<T>(&self, tool: T)
     where
         T: Tool + 'static,
     {
         let info = tool.info();
-        self.tools.insert(
+        let mut map = self.tools.write().unwrap();
+        map.insert(
             info.name.clone(),
-                RegisteredTool {
-                    is_read_only: tool.is_read_only(),
-                    is_concurrency_safe: tool.is_concurrency_safe(),
-                    interrupt_behavior: tool.interrupt_behavior(),
-                    info,
-                    tool: Box::new(tool),
-                },
+            RegisteredTool {
+                is_read_only: tool.is_read_only(),
+                is_concurrency_safe: tool.is_concurrency_safe(),
+                should_defer: tool.should_defer(),
+                interrupt_behavior: tool.interrupt_behavior(),
+                info,
+                tool: Arc::new(tool),
+            },
         );
     }
 
-    pub fn get(&self, name: &str) -> Option<&RegisteredTool> {
-        self.tools.get(name)
+    pub fn get(&self, name: &str) -> Option<RegisteredTool> {
+        let map = self.tools.read().unwrap();
+        map.get(name).cloned()
     }
 
-    pub fn list(&self) -> Vec<&RegisteredTool> {
-        let mut tools: Vec<&RegisteredTool> = self.tools.values().collect();
+    pub fn list(&self) -> Vec<RegisteredTool> {
+        let map = self.tools.read().unwrap();
+        let mut tools: Vec<RegisteredTool> = map.values().cloned().collect();
         tools.sort_by(|a, b| a.info.name.cmp(&b.info.name));
         tools
     }
@@ -56,38 +64,160 @@ impl ToolRegistry {
         input: serde_json::Value,
         context: ToolContext,
     ) -> Result<rust_claude_core::tool_types::ToolResult, ToolError> {
-        let tool = self
-            .tools
-            .get(name)
-            .ok_or_else(|| ToolError::Execution(format!("unknown tool: {name}")))?;
+        let tool = {
+            let map = self.tools.read().unwrap();
+            map.get(name)
+                .cloned()
+                .ok_or_else(|| ToolError::Execution(format!("unknown tool: {name}")))?
+        };
 
         tool.tool.execute(input, context).await
     }
 
-    pub fn names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.tools.keys().map(|s| s.as_str()).collect();
+    pub fn names(&self) -> Vec<String> {
+        let map = self.tools.read().unwrap();
+        let mut names: Vec<String> = map.keys().cloned().collect();
         names.sort();
         names
     }
 
     pub fn is_concurrency_safe(&self, name: &str) -> bool {
-        self.tools
-            .get(name)
+        let map = self.tools.read().unwrap();
+        map.get(name)
             .map(|tool| tool.is_concurrency_safe)
             .unwrap_or(false)
     }
 
+    pub fn get_deferred_tools(&self) -> Vec<RegisteredTool> {
+        let map = self.tools.read().unwrap();
+        let mut tools: Vec<RegisteredTool> = map
+            .values()
+            .filter(|tool| tool.should_defer)
+            .cloned()
+            .collect();
+        tools.sort_by(|a, b| a.info.name.cmp(&b.info.name));
+        tools
+    }
+
+    pub fn get_non_deferred_tools(&self) -> Vec<RegisteredTool> {
+        let map = self.tools.read().unwrap();
+        let mut tools: Vec<RegisteredTool> = map
+            .values()
+            .filter(|tool| !tool.should_defer)
+            .cloned()
+            .collect();
+        tools.sort_by(|a, b| a.info.name.cmp(&b.info.name));
+        tools
+    }
+
+    pub fn search_tools(&self, query: &str, max: usize) -> Vec<RegisteredTool> {
+        // Exact selection mode: select:ToolName
+        if let Some(name) = query.strip_prefix("select:") {
+            let name_lower = name.to_lowercase();
+            let map = self.tools.read().unwrap();
+            return map
+                .values()
+                .filter(|tool| tool.should_defer)
+                .filter(|tool| tool.info.name.to_lowercase() == name_lower)
+                .take(max)
+                .cloned()
+                .collect();
+        }
+
+        let query_lower = query.to_lowercase();
+        let keywords: Vec<&str> = query_lower.split_whitespace().collect();
+
+        let map = self.tools.read().unwrap();
+        let mut scored: Vec<(i32, RegisteredTool)> = map
+            .values()
+            .filter(|tool| tool.should_defer)
+            .filter_map(|tool| {
+                let name_lower = tool.info.name.to_lowercase();
+                let desc_lower = tool.info.description.to_lowercase();
+
+                let name_tokens = tokenize_tool_name(&tool.info.name);
+                let name_tokens_lower: Vec<String> =
+                    name_tokens.iter().map(|s| s.to_lowercase()).collect();
+
+                let mut score = 0i32;
+                for kw in &keywords {
+                    if name_lower.contains(kw) {
+                        score += 2;
+                    } else if desc_lower.contains(kw) {
+                        score += 1;
+                    } else {
+                        // Check tokenized name parts
+                        for token in &name_tokens_lower {
+                            if token == kw {
+                                score += 2;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if score > 0 {
+                    Some((score, tool.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0) // higher score first
+                .then_with(|| a.1.info.name.cmp(&b.1.info.name)) // alphabetical tiebreak
+        });
+
+        scored.into_iter().map(|(_, tool)| tool).take(max).collect()
+    }
+
+    pub fn estimate_deferred_schema_tokens(&self) -> usize {
+        let map = self.tools.read().unwrap();
+        let total_chars: usize = map
+            .values()
+            .filter(|tool| tool.should_defer)
+            .map(|tool| {
+                let schema_str = serde_json::to_string(&tool.info.input_schema).unwrap_or_default();
+                schema_str.len()
+            })
+            .sum();
+        total_chars / 4
+    }
+
     /// Filter tools: keep only those in the allow list (if non-empty),
     /// then remove any in the deny list.
-    pub fn apply_tool_filters(&mut self, allowed: &[String], disallowed: &[String]) {
+    pub fn apply_tool_filters(&self, allowed: &[String], disallowed: &[String]) {
+        let mut map = self.tools.write().unwrap();
         if !allowed.is_empty() {
-            self.tools
-                .retain(|name, _| allowed.iter().any(|a| a == name));
+            map.retain(|name, _| allowed.iter().any(|a| a == name));
         }
         for name in disallowed {
-            self.tools.remove(name);
+            map.remove(name);
         }
     }
+}
+
+fn tokenize_tool_name(name: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+
+    // Split on __ first (MCP separator)
+    for part in name.split("__") {
+        // Then split on CamelCase boundaries
+        let mut current = String::new();
+        for ch in part.chars() {
+            if ch.is_uppercase() && !current.is_empty() {
+                tokens.push(current.clone());
+                current.clear();
+            }
+            current.push(ch);
+        }
+        if !current.is_empty() {
+            tokens.push(current);
+        }
+    }
+
+    tokens
 }
 
 impl Default for ToolRegistry {
@@ -103,7 +233,7 @@ mod tests {
     use crate::tool::InterruptBehavior;
     use crate::{
         EnterPlanModeTool, ExitPlanModeTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
-        GrepTool, MonitorTool, TodoWriteTool,
+        GrepTool, MonitorTool, TodoWriteTool, WebFetchTool, WebSearchTool,
     };
 
     struct BlockingTool;
@@ -136,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_register_and_get() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(BashTool::new());
 
         let tool = registry.get("Bash").unwrap();
@@ -148,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_register_preserves_explicit_interrupt_behavior() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(BlockingTool);
 
         let tool = registry.get("BlockingTool").unwrap();
@@ -157,22 +287,26 @@ mod tests {
 
     #[test]
     fn test_list_sorted() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(BashTool::new());
-        registry.tools.insert(
-            "FileWrite".to_string(),
-            RegisteredTool {
-                info: ToolInfo {
-                    name: "FileWrite".to_string(),
-                    description: "Write file".to_string(),
-                    input_schema: serde_json::json!({}),
+        {
+            let mut map = registry.tools.write().unwrap();
+            map.insert(
+                "FileWrite".to_string(),
+                RegisteredTool {
+                    info: ToolInfo {
+                        name: "FileWrite".to_string(),
+                        description: "Write file".to_string(),
+                        input_schema: serde_json::json!({}),
+                    },
+                    is_read_only: false,
+                    is_concurrency_safe: false,
+                    should_defer: false,
+                    interrupt_behavior: InterruptBehavior::Cancel,
+                    tool: Arc::new(BashTool::new()),
                 },
-                is_read_only: false,
-                is_concurrency_safe: false,
-                interrupt_behavior: InterruptBehavior::Cancel,
-                tool: Box::new(BashTool::new()),
-            },
-        );
+            );
+        }
 
         let names = registry.names();
         assert_eq!(names, vec!["Bash", "FileWrite"]);
@@ -180,7 +314,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_registered_tool() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(BashTool::new());
 
         let result = registry
@@ -202,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_register_all_core_tools() {
-        let mut registry = ToolRegistry::new();
+        let registry = ToolRegistry::new();
         registry.register(BashTool::new());
         registry.register(EnterPlanModeTool::new());
         registry.register(ExitPlanModeTool::new());
@@ -234,38 +368,194 @@ mod tests {
 
     #[test]
     fn test_apply_tool_filters_matches_mcp_tool_names_exactly() {
-        let mut registry = ToolRegistry::new();
-        registry.tools.insert(
-            "mcp__remote__lookup".to_string(),
-            RegisteredTool {
-                info: ToolInfo {
-                    name: "mcp__remote__lookup".to_string(),
-                    description: "Remote lookup".to_string(),
-                    input_schema: serde_json::json!({}),
+        let registry = ToolRegistry::new();
+        {
+            let mut map = registry.tools.write().unwrap();
+            map.insert(
+                "mcp__remote__lookup".to_string(),
+                RegisteredTool {
+                    info: ToolInfo {
+                        name: "mcp__remote__lookup".to_string(),
+                        description: "Remote lookup".to_string(),
+                        input_schema: serde_json::json!({}),
+                    },
+                    is_read_only: false,
+                    is_concurrency_safe: false,
+                    should_defer: true,
+                    interrupt_behavior: InterruptBehavior::Cancel,
+                    tool: Arc::new(BashTool::new()),
                 },
-                is_read_only: false,
-                is_concurrency_safe: false,
-                interrupt_behavior: InterruptBehavior::Cancel,
-                tool: Box::new(BashTool::new()),
-            },
-        );
-        registry.tools.insert(
-            "mcp__other__lookup".to_string(),
-            RegisteredTool {
-                info: ToolInfo {
-                    name: "mcp__other__lookup".to_string(),
-                    description: "Other lookup".to_string(),
-                    input_schema: serde_json::json!({}),
+            );
+            map.insert(
+                "mcp__other__lookup".to_string(),
+                RegisteredTool {
+                    info: ToolInfo {
+                        name: "mcp__other__lookup".to_string(),
+                        description: "Other lookup".to_string(),
+                        input_schema: serde_json::json!({}),
+                    },
+                    is_read_only: false,
+                    is_concurrency_safe: false,
+                    should_defer: true,
+                    interrupt_behavior: InterruptBehavior::Cancel,
+                    tool: Arc::new(BashTool::new()),
                 },
-                is_read_only: false,
-                is_concurrency_safe: false,
-                interrupt_behavior: InterruptBehavior::Cancel,
-                tool: Box::new(BashTool::new()),
-            },
-        );
+            );
+        }
 
         registry.apply_tool_filters(&["mcp__remote__lookup".to_string()], &[]);
 
         assert_eq!(registry.names(), vec!["mcp__remote__lookup"]);
+    }
+
+    #[test]
+    fn test_partition_deferred_and_non_deferred() {
+        let registry = ToolRegistry::new();
+        registry.register(BashTool::new());
+        registry.register(WebSearchTool::new());
+
+        let non_deferred = registry.get_non_deferred_tools();
+        let deferred = registry.get_deferred_tools();
+
+        assert_eq!(non_deferred.len(), 1);
+        assert_eq!(non_deferred[0].info.name, "Bash");
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].info.name, "WebSearch");
+    }
+
+    #[test]
+    fn test_empty_registry_partitions() {
+        let registry = ToolRegistry::new();
+        assert!(registry.get_deferred_tools().is_empty());
+        assert!(registry.get_non_deferred_tools().is_empty());
+    }
+
+    #[test]
+    fn test_search_tools_exact_selection() {
+        let registry = ToolRegistry::new();
+        registry.register(WebSearchTool::new());
+        registry.register(BashTool::new());
+
+        let results = registry.search_tools("select:WebSearch", 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].info.name, "WebSearch");
+
+        let none = registry.search_tools("select:Bash", 5);
+        assert!(none.is_empty()); // Bash is not deferred
+    }
+
+    #[test]
+    fn test_search_tools_keyword_match() {
+        let registry = ToolRegistry::new();
+        registry.register(WebSearchTool::new());
+        registry.register(WebFetchTool::new());
+        registry.register(BashTool::new());
+
+        let results = registry.search_tools("web", 5);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_search_tools_camelcase_tokenization() {
+        let registry = ToolRegistry::new();
+        registry.register(WebSearchTool::new());
+        registry.register(BashTool::new());
+
+        let results = registry.search_tools("search", 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].info.name, "WebSearch");
+    }
+
+    #[test]
+    fn test_search_tools_mcp_name_splitting() {
+        let registry = ToolRegistry::new();
+        {
+            let mut map = registry.tools.write().unwrap();
+            map.insert(
+                "mcp__remote__lookup".to_string(),
+                RegisteredTool {
+                    info: ToolInfo {
+                        name: "mcp__remote__lookup".to_string(),
+                        description: "Remote lookup".to_string(),
+                        input_schema: serde_json::json!({}),
+                    },
+                    is_read_only: false,
+                    is_concurrency_safe: false,
+                    should_defer: true,
+                    interrupt_behavior: InterruptBehavior::Cancel,
+                    tool: Arc::new(BashTool::new()),
+                },
+            );
+        }
+
+        let results = registry.search_tools("lookup", 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].info.name, "mcp__remote__lookup");
+    }
+
+    #[test]
+    fn test_search_tools_scoring_name_over_description() {
+        let registry = ToolRegistry::new();
+        {
+            let mut map = registry.tools.write().unwrap();
+            map.insert(
+                "WebSearch".to_string(),
+                RegisteredTool {
+                    info: ToolInfo {
+                        name: "WebSearch".to_string(),
+                        description: "Search the web".to_string(),
+                        input_schema: serde_json::json!({}),
+                    },
+                    is_read_only: false,
+                    is_concurrency_safe: false,
+                    should_defer: true,
+                    interrupt_behavior: InterruptBehavior::Cancel,
+                    tool: Arc::new(BashTool::new()),
+                },
+            );
+            map.insert(
+                "OtherTool".to_string(),
+                RegisteredTool {
+                    info: ToolInfo {
+                        name: "OtherTool".to_string(),
+                        description: "A tool that can search things".to_string(),
+                        input_schema: serde_json::json!({}),
+                    },
+                    is_read_only: false,
+                    is_concurrency_safe: false,
+                    should_defer: true,
+                    interrupt_behavior: InterruptBehavior::Cancel,
+                    tool: Arc::new(BashTool::new()),
+                },
+            );
+        }
+
+        let results = registry.search_tools("search", 5);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].info.name, "WebSearch"); // name match has higher score
+    }
+
+    #[test]
+    fn test_estimate_deferred_schema_tokens() {
+        let registry = ToolRegistry::new();
+        registry.register(BashTool::new());
+        registry.register(WebSearchTool::new());
+
+        let tokens = registry.estimate_deferred_schema_tokens();
+        // WebSearchTool is deferred; BashTool is not
+        // The schema string length / 4 should be > 0 for WebSearchTool
+        assert!(tokens > 0);
+    }
+
+    #[test]
+    fn test_tokenize_tool_name() {
+        assert_eq!(
+            tokenize_tool_name("WebSearchTool"),
+            vec!["Web", "Search", "Tool"]
+        );
+        assert_eq!(
+            tokenize_tool_name("mcp__remote__lookup"),
+            vec!["mcp", "remote", "lookup"]
+        );
     }
 }

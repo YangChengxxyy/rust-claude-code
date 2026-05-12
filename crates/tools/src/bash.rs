@@ -243,6 +243,7 @@ mod tests {
             app_state: Some(app_state),
             agent_context: None,
             user_question_callback: None,
+            ..Default::default()
         }
     }
 
@@ -257,6 +258,7 @@ mod tests {
                     app_state: None,
                     agent_context: None,
                     user_question_callback: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -277,6 +279,7 @@ mod tests {
                     app_state: None,
                     agent_context: None,
                     user_question_callback: None,
+                    ..Default::default()
                 },
             )
             .await
@@ -289,10 +292,7 @@ mod tests {
     async fn test_bash_abort_kills_child_process() {
         let marker = format!("rust-claude-bash-abort-{}", uuid::Uuid::new_v4());
         let path = std::env::temp_dir().join(&marker);
-        let command = format!(
-            "sleep 5; printf done > {}",
-            path.display()
-        );
+        let command = format!("sleep 5; printf done > {}", path.display());
         let tool = BashTool::new();
         let handle = tokio::spawn(async move {
             let _ = tool
@@ -303,6 +303,7 @@ mod tests {
                         app_state: None,
                         agent_context: None,
                         user_question_callback: None,
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -490,6 +491,7 @@ mod tests {
                     app_state: None,
                     agent_context: None,
                     user_question_callback: None,
+                    ..Default::default()
                 },
             )
             .await

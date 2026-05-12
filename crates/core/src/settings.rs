@@ -601,7 +601,10 @@ mod tests {
         assert_eq!(sse.timeout_ms, Some(10000));
 
         let http = &settings.mcp_servers["http-server"];
-        assert_eq!(http.transport_type, crate::mcp_config::McpTransportType::Http);
+        assert_eq!(
+            http.transport_type,
+            crate::mcp_config::McpTransportType::Http
+        );
         assert_eq!(http.url.as_deref(), Some("https://example.test/http"));
         let _ = fs::remove_dir_all(&dir);
     }

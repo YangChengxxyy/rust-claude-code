@@ -102,6 +102,10 @@ impl Tool for LspTool {
         true
     }
 
+    fn should_defer(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> ToolInfo {
         ToolInfo {
             name: "Lsp".to_string(),

@@ -16,7 +16,10 @@ pub enum TrustStatus {
 impl TrustStatus {
     /// Returns true if the directory is trusted (either explicitly or inherited).
     pub fn is_trusted(&self) -> bool {
-        matches!(self, TrustStatus::Trusted | TrustStatus::InheritedFromParent)
+        matches!(
+            self,
+            TrustStatus::Trusted | TrustStatus::InheritedFromParent
+        )
     }
 }
 
@@ -211,10 +214,7 @@ mod tests {
         let mut manager = TrustManager::with_trust_file(trust_file);
         manager.accept_trust(&parent_dir).unwrap();
 
-        assert_eq!(
-            manager.check_trust(&parent_dir),
-            TrustStatus::Trusted
-        );
+        assert_eq!(manager.check_trust(&parent_dir), TrustStatus::Trusted);
         assert_eq!(
             manager.check_trust(&child_dir),
             TrustStatus::InheritedFromParent
@@ -267,8 +267,7 @@ mod tests {
 
         // Verify file contents
         let content = fs::read_to_string(&trust_file).unwrap();
-        let parsed: HashMap<String, serde_json::Value> =
-            serde_json::from_str(&content).unwrap();
+        let parsed: HashMap<String, serde_json::Value> = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed.len(), 1);
         let canonical = project.canonicalize().unwrap();
         assert!(parsed.contains_key(&canonical.to_string_lossy().to_string()));

@@ -4,8 +4,8 @@
 //! and exposes a unified interface for tool lookup and invocation.
 
 use rust_claude_core::mcp_config::{
-    filter_supported_servers, McpServerConfig, McpServerState, McpServerStatus, McpServersConfig,
-    McpReconnectConfig, McpToolInfo, McpTransportType,
+    filter_supported_servers, McpReconnectConfig, McpServerConfig, McpServerState, McpServerStatus,
+    McpServersConfig, McpToolInfo, McpTransportType,
 };
 use std::collections::HashMap;
 use tokio::sync::Mutex;

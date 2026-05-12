@@ -71,10 +71,7 @@ pub trait UserQuestionUI: Send + Sync {
     /// Ask the user a structured question and await their response.
     ///
     /// Returns `None` if the UI is unavailable.
-    async fn ask(
-        &self,
-        request: AskUserQuestionRequest,
-    ) -> Option<AskUserQuestionResponse>;
+    async fn ask(&self, request: AskUserQuestionRequest) -> Option<AskUserQuestionResponse>;
 }
 
 // No-op implementations for headless mode
@@ -103,10 +100,7 @@ pub struct NoopUserQuestionUI;
 
 #[async_trait::async_trait]
 impl UserQuestionUI for NoopUserQuestionUI {
-    async fn ask(
-        &self,
-        _request: AskUserQuestionRequest,
-    ) -> Option<AskUserQuestionResponse> {
+    async fn ask(&self, _request: AskUserQuestionRequest) -> Option<AskUserQuestionResponse> {
         None
     }
 }
@@ -117,8 +111,14 @@ impl UserQuestionUI for NoopUserQuestionUI {
 /// Implementations handle the actual I/O (e.g., appending to a JSONL file).
 pub trait SessionPersistence: Send + Sync {
     /// Persist a message (user or assistant) to the session log.
-    fn persist_message(&mut self, msg: &Message) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn persist_message(
+        &mut self,
+        msg: &Message,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// Persist a session event (compaction boundary, permission change, etc.).
-    fn persist_event(&mut self, event: &SessionEvent) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    fn persist_event(
+        &mut self,
+        event: &SessionEvent,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 }

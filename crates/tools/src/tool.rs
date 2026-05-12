@@ -12,21 +12,14 @@ use crate::ToolRegistry;
 pub type AgentRunFuture = Pin<Box<dyn Future<Output = Result<AgentRunOutput, ToolError>> + Send>>;
 pub type UserQuestionFuture = Pin<Box<dyn Future<Output = Option<AskUserQuestionResponse>> + Send>>;
 pub type AgentContextRunSubagent = Arc<
-    dyn Fn(
-            String,
-            Vec<String>,
-            AgentRunOptions,
-            Arc<Mutex<AppState>>,
-            u32,
-            u32,
-        ) -> AgentRunFuture
+    dyn Fn(String, Vec<String>, AgentRunOptions, Arc<Mutex<AppState>>, u32, u32) -> AgentRunFuture
         + Send
         + Sync,
 >;
 pub type UserQuestionCallback =
     Arc<dyn Fn(AskUserQuestionRequest) -> UserQuestionFuture + Send + Sync>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AgentRunOutput {
     pub text: String,
     pub input_tokens: u64,
@@ -46,7 +39,7 @@ pub struct AgentRunOptions {
 #[derive(Clone)]
 pub struct AgentContext {
     /// Factory that produces a fresh ToolRegistry for the sub-agent.
-    pub tool_registry_factory: Arc<dyn Fn() -> ToolRegistry + Send + Sync>,
+    pub tool_registry_factory: Arc<dyn Fn() -> Arc<ToolRegistry> + Send + Sync>,
     /// CLI-provided callback that runs a sub-agent and returns its final output.
     pub run_subagent: AgentContextRunSubagent,
     pub custom_agents: Arc<CustomAgentRegistry>,
@@ -68,7 +61,7 @@ impl std::fmt::Debug for AgentContext {
 impl Default for AgentContext {
     fn default() -> Self {
         AgentContext {
-            tool_registry_factory: Arc::new(|| ToolRegistry::new()),
+            tool_registry_factory: Arc::new(|| Arc::new(ToolRegistry::new())),
             run_subagent: Arc::new(|_, _, _, _, _, _| {
                 Box::pin(async {
                     Err(ToolError::Execution(
@@ -162,6 +155,10 @@ pub trait Tool: Send + Sync {
 
     fn interrupt_behavior(&self) -> InterruptBehavior {
         InterruptBehavior::Cancel
+    }
+
+    fn should_defer(&self) -> bool {
+        false
     }
 
     async fn execute(

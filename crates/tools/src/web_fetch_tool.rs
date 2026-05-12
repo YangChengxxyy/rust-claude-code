@@ -48,6 +48,10 @@ impl Tool for WebFetchTool {
         true
     }
 
+    fn should_defer(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> ToolInfo {
         ToolInfo {
             name: "WebFetch".to_string(),

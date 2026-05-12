@@ -38,9 +38,7 @@ impl FileStateCache {
     /// Create a new cache with the given capacity.
     pub fn new(capacity: usize) -> Self {
         FileStateCache {
-            cache: LruCache::new(
-                NonZeroUsize::new(capacity).expect("capacity must be > 0"),
-            ),
+            cache: LruCache::new(NonZeroUsize::new(capacity).expect("capacity must be > 0")),
         }
     }
 

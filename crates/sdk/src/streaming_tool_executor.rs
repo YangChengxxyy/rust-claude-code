@@ -1,5 +1,5 @@
-use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use rust_claude_core::state::AppState;
 use rust_claude_core::tool_types::ToolResult;
@@ -87,7 +87,10 @@ impl StreamingToolExecutor {
         let task_input = input.clone();
         let handle = tokio::spawn(async move {
             if cancellation_token.is_cancelled() {
-                return Ok(ToolResult::error(tool_use_id, "Tool execution cancelled".to_string()));
+                return Ok(ToolResult::error(
+                    tool_use_id,
+                    "Tool execution cancelled".to_string(),
+                ));
             }
             if name == "Bash" && bash_cancelled.load(Ordering::SeqCst) {
                 return Ok(ToolResult::error(
@@ -115,6 +118,7 @@ impl StreamingToolExecutor {
                         app_state: Some(app_state),
                         agent_context,
                         user_question_callback,
+                        ..Default::default()
                     },
                 )
                 .await;
@@ -182,9 +186,12 @@ impl StreamingToolExecutor {
         let tasks = std::mem::take(&mut *self.tasks.lock().unwrap());
         for task in tasks {
             let (run_post_hook, result) = match task.handle {
-                PendingHandle::Running(handle) => (true, handle
-                    .await
-                    .map_err(|error| ToolError::Execution(error.to_string()))??),
+                PendingHandle::Running(handle) => (
+                    true,
+                    handle
+                        .await
+                        .map_err(|error| ToolError::Execution(error.to_string()))??,
+                ),
                 PendingHandle::Ready(result) => (false, result),
             };
             completed.push(StreamingToolOutput {
@@ -267,7 +274,10 @@ mod tests {
             self.started.notify_waiters();
             tokio::time::sleep(Duration::from_millis(20)).await;
             self.finished.store(true, Ordering::SeqCst);
-            Ok(ToolResult::success(context.tool_use_id, "blocked".to_string()))
+            Ok(ToolResult::success(
+                context.tool_use_id,
+                "blocked".to_string(),
+            ))
         }
     }
 

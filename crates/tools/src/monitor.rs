@@ -175,6 +175,10 @@ impl MonitorTool {
 
 #[async_trait]
 impl Tool for MonitorTool {
+    fn should_defer(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> ToolInfo {
         ToolInfo {
             name: "Monitor".to_string(),
@@ -273,6 +277,7 @@ mod tests {
             app_state: None,
             agent_context: None,
             user_question_callback: None,
+            ..Default::default()
         }
     }
 
@@ -301,7 +306,10 @@ mod tests {
         handle.abort();
         sleep(Duration::from_millis(200)).await;
 
-        assert!(!path.exists(), "aborted Monitor child should not keep running");
+        assert!(
+            !path.exists(),
+            "aborted Monitor child should not keep running"
+        );
         let _ = tokio::fs::remove_file(path).await;
     }
 

@@ -102,8 +102,12 @@ pub enum SystemPrompt {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiTool {
     name: String,
-    description: String,
-    input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(rename = "input_schema", skip_serializing_if = "Option::is_none")]
+    input_schema: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deferred: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,8 +124,18 @@ impl ApiTool {
     ) -> Self {
         ApiTool {
             name: name.into(),
-            description: description.into(),
-            input_schema,
+            description: Some(description.into()),
+            input_schema: Some(input_schema),
+            deferred: None,
+        }
+    }
+
+    pub fn deferred(name: impl Into<String>) -> Self {
+        ApiTool {
+            name: name.into(),
+            description: None,
+            input_schema: None,
+            deferred: Some(true),
         }
     }
 
@@ -129,12 +143,16 @@ impl ApiTool {
         &self.name
     }
 
-    pub fn description(&self) -> &str {
-        &self.description
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
     }
 
-    pub fn input_schema(&self) -> &serde_json::Value {
-        &self.input_schema
+    pub fn input_schema(&self) -> Option<&serde_json::Value> {
+        self.input_schema.as_ref()
+    }
+
+    pub fn is_deferred(&self) -> bool {
+        self.deferred == Some(true)
     }
 }
 
@@ -630,5 +648,59 @@ mod tests {
         let mut messages: Vec<serde_json::Value> = vec![];
         inject_cache_control_on_messages(&mut messages);
         assert!(messages.is_empty());
+    }
+
+    // -- ApiTool deferred serialization tests --
+
+    #[test]
+    fn test_api_tool_full_serialization() {
+        let tool = ApiTool::new(
+            "Bash",
+            "Execute a bash command",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"}
+                }
+            }),
+        );
+
+        let json = serde_json::to_string(&tool).unwrap();
+        assert!(json.contains("\"name\":\"Bash\""));
+        assert!(json.contains("\"description\":\"Execute a bash command\""));
+        assert!(json.contains("\"input_schema\""));
+        assert!(!json.contains("\"deferred\""));
+    }
+
+    #[test]
+    fn test_api_tool_deferred_serialization_omits_fields() {
+        let tool = ApiTool::deferred("WebSearch");
+
+        let json = serde_json::to_string(&tool).unwrap();
+        assert!(json.contains("\"name\":\"WebSearch\""));
+        assert!(json.contains("\"deferred\":true"));
+        assert!(!json.contains("\"description\""));
+        assert!(!json.contains("\"input_schema\""));
+    }
+
+    #[test]
+    fn test_api_tool_deferred_deserialization() {
+        let json = r#"{"name":"WebSearch","deferred":true}"#;
+        let tool: ApiTool = serde_json::from_str(json).unwrap();
+        assert_eq!(tool.name(), "WebSearch");
+        assert!(tool.is_deferred());
+        assert_eq!(tool.description(), None);
+        assert_eq!(tool.input_schema(), None);
+    }
+
+    #[test]
+    fn test_api_tool_full_deserialization() {
+        let json =
+            r#"{"name":"Bash","description":"Execute bash","input_schema":{"type":"object"}}"#;
+        let tool: ApiTool = serde_json::from_str(json).unwrap();
+        assert_eq!(tool.name(), "Bash");
+        assert!(!tool.is_deferred());
+        assert_eq!(tool.description(), Some("Execute bash"));
+        assert!(tool.input_schema().is_some());
     }
 }

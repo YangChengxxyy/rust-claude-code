@@ -341,7 +341,10 @@ impl McpTransport for StdioTransport {
 impl StdioTransport {
     /// Send a JSON-RPC request and wait for a matching response.
     /// Notifications from the server are silently skipped.
-    pub async fn send_request(&self, request: &JsonRpcRequest) -> Result<serde_json::Value, McpError> {
+    pub async fn send_request(
+        &self,
+        request: &JsonRpcRequest,
+    ) -> Result<serde_json::Value, McpError> {
         self.send_request_inner(request).await
     }
 
@@ -425,11 +428,8 @@ mod tests {
 
     #[test]
     fn test_parse_http_response_json_rpc_result() {
-        let value = parse_http_response(
-            br#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#,
-            1,
-        )
-        .unwrap();
+        let value =
+            parse_http_response(br#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#, 1).unwrap();
 
         assert_eq!(value, serde_json::json!({"ok": true}));
     }

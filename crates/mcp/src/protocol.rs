@@ -172,9 +172,7 @@ impl McpClient {
             McpError::InvalidJson(format!("failed to serialize initialized notification: {e}"))
         })?;
         {
-            self.transport
-                .send_notification(&json)
-                .await?;
+            self.transport.send_notification(&json).await?;
         }
 
         Ok(())
@@ -404,7 +402,10 @@ mod tests {
         );
 
         let tools = client.list_tools().await.unwrap();
-        let result = client.call_tool("lookup", serde_json::json!({})).await.unwrap();
+        let result = client
+            .call_tool("lookup", serde_json::json!({}))
+            .await
+            .unwrap();
 
         assert_eq!(tools[0].name, "lookup");
         assert_eq!(result.content, "ok");

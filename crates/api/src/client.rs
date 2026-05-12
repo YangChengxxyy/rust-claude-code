@@ -30,8 +30,13 @@ pub struct AnthropicClient {
 
 #[derive(Debug, Clone)]
 pub enum ProviderAdapter {
-    Anthropic { base_url: String },
-    Bedrock { region: String, model_id: String },
+    Anthropic {
+        base_url: String,
+    },
+    Bedrock {
+        region: String,
+        model_id: String,
+    },
     Vertex {
         project: String,
         location: String,
@@ -382,7 +387,10 @@ mod tests {
     fn test_provider_adapter_default_preserves_anthropic_endpoint() {
         let adapter = ProviderAdapter::anthropic("https://api.example.com");
 
-        assert_eq!(adapter.messages_endpoint(), "https://api.example.com/v1/messages");
+        assert_eq!(
+            adapter.messages_endpoint(),
+            "https://api.example.com/v1/messages"
+        );
     }
 
     #[test]
@@ -472,7 +480,9 @@ mod tests {
             StatusCode::BAD_REQUEST,
             r#"{"error":{"type":"invalid_request_error","message":"Input exceeds the maximum allowed length"}}"#,
         );
-        assert!(matches!(error, ApiError::PromptTooLong(msg) if msg.contains("exceeds the maximum")));
+        assert!(
+            matches!(error, ApiError::PromptTooLong(msg) if msg.contains("exceeds the maximum"))
+        );
     }
 
     #[test]

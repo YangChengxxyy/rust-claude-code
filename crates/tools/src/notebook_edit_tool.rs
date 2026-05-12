@@ -26,6 +26,10 @@ struct NotebookEditInput {
 
 #[async_trait]
 impl Tool for NotebookEditTool {
+    fn should_defer(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> ToolInfo {
         ToolInfo {
             name: "NotebookEdit".to_string(),
@@ -188,7 +192,7 @@ mod tests {
                 }),
                 ToolContext {
                     tool_use_id: "tool_1".to_string(),
-                    ..ToolContext::default()
+                    ..Default::default()
                 },
             )
             .await
@@ -218,7 +222,7 @@ mod tests {
                 }),
                 ToolContext {
                     tool_use_id: "tool_2".to_string(),
-                    ..ToolContext::default()
+                    ..Default::default()
                 },
             )
             .await

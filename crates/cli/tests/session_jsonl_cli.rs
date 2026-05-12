@@ -15,9 +15,12 @@ fn print_mode_writes_one_session_end_event() {
         let body = r#"{"id":"msg_mock_1","type":"message","role":"assistant","content":[{"type":"text","text":"mock pong"}],"model":"mock-model","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-            body.len(), body
+            body.len(),
+            body
         );
-        stream.write_all(response.as_bytes()).expect("write response");
+        stream
+            .write_all(response.as_bytes())
+            .expect("write response");
     });
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -56,7 +59,10 @@ fn print_mode_writes_one_session_end_event() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let sessions_dir = home.join(".config").join("rust-claude-code").join("sessions");
+    let sessions_dir = home
+        .join(".config")
+        .join("rust-claude-code")
+        .join("sessions");
     let files: Vec<_> = fs::read_dir(&sessions_dir)
         .expect("read sessions dir")
         .filter_map(Result::ok)
@@ -86,9 +92,12 @@ fn resume_completed_jsonl_appends_without_truncating_history() {
         let body = r#"{"id":"msg_mock_2","type":"message","role":"assistant","content":[{"type":"text","text":"resumed pong"}],"model":"mock-model","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":2,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-            body.len(), body
+            body.len(),
+            body
         );
-        stream.write_all(response.as_bytes()).expect("write response");
+        stream
+            .write_all(response.as_bytes())
+            .expect("write response");
     });
 
     let temp_root = std::env::temp_dir().join(format!(
@@ -101,7 +110,10 @@ fn resume_completed_jsonl_appends_without_truncating_history() {
     let home = temp_root.join("home");
     let claude_config = temp_root.join("claude");
     let project = temp_root.join("project");
-    let sessions_dir = home.join(".config").join("rust-claude-code").join("sessions");
+    let sessions_dir = home
+        .join(".config")
+        .join("rust-claude-code")
+        .join("sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     fs::create_dir_all(&claude_config).expect("create claude config");
     fs::create_dir_all(&project).expect("create project");
@@ -144,10 +156,19 @@ fn resume_completed_jsonl_appends_without_truncating_history() {
     );
 
     let content = fs::read_to_string(&session_path).expect("read session jsonl");
-    assert!(content.contains("original prompt"), "jsonl content:\n{content}");
-    assert!(content.contains("original answer"), "jsonl content:\n{content}");
+    assert!(
+        content.contains("original prompt"),
+        "jsonl content:\n{content}"
+    );
+    assert!(
+        content.contains("original answer"),
+        "jsonl content:\n{content}"
+    );
     assert!(content.contains("new prompt"), "jsonl content:\n{content}");
-    assert!(content.contains("resumed pong"), "jsonl content:\n{content}");
+    assert!(
+        content.contains("resumed pong"),
+        "jsonl content:\n{content}"
+    );
 
     let _ = fs::remove_dir_all(&temp_root);
 }

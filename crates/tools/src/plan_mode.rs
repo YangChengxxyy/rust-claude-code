@@ -79,6 +79,10 @@ impl Tool for EnterPlanModeTool {
 
 #[async_trait]
 impl Tool for ExitPlanModeTool {
+    fn should_defer(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> ToolInfo {
         ToolInfo {
             name: "ExitPlanMode".to_string(),
@@ -145,6 +149,7 @@ mod tests {
             app_state: Some(app_state),
             agent_context: None,
             user_question_callback: None,
+            ..Default::default()
         }
     }
 

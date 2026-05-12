@@ -22,14 +22,14 @@ use rust_claude_core::{
     trust::{TrustManager, TrustStatus},
 };
 use rust_claude_mcp::{McpManager, McpManagerConfig};
+use rust_claude_sdk::plugin::PluginManager;
 use rust_claude_tools::{
     register_mcp_tools, AgentContext, AgentTool, AskUserQuestionTool, AutoMemoryTool, BashTool,
     EnterPlanModeTool, ExitPlanModeTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
-    GrepTool, LspTool, MonitorTool, NotebookEditTool, TaskTool, ToolRegistry, WebFetchTool,
-    WebSearchTool,
+    GrepTool, LspTool, MonitorTool, NotebookEditTool, TaskTool, ToolRegistry, ToolSearchTool,
+    WebFetchTool, WebSearchTool,
 };
 use rust_claude_tui::{App, AppEvent, ChatMessage, TerminalGuard, TuiBridge, UserCommand};
-use rust_claude_sdk::plugin::{PluginManager};
 use tokio::sync::{mpsc, Mutex};
 
 use rust_claude_cli::compaction::CompactionService;
@@ -442,7 +442,8 @@ async fn main() -> Result<()> {
                     // Interactive mode: prompt for trust confirmation
                     let trusted = prompt_trust_confirmation(&cwd)?;
                     if trusted {
-                        trust_manager.accept_trust(&cwd)
+                        trust_manager
+                            .accept_trust(&cwd)
                             .map_err(|e| anyhow!("failed to persist trust: {e}"))?;
                         true
                     } else {
@@ -579,7 +580,8 @@ async fn main() -> Result<()> {
     }
 
     if state.session.id.is_empty() {
-        state.session.id = SessionFile::new(&state.session.model, &state.session.model_setting, &cwd).id;
+        state.session.id =
+            SessionFile::new(&state.session.model, &state.session.model_setting, &cwd).id;
     }
 
     // Create JSONL session writer for incremental persistence.
@@ -600,7 +602,7 @@ async fn main() -> Result<()> {
         };
         match writer_result {
             Ok(writer) => Some(Arc::new(Mutex::new(
-                Box::new(writer) as Box<dyn rust_claude_sdk::output::SessionPersistence>,
+                Box::new(writer) as Box<dyn rust_claude_sdk::output::SessionPersistence>
             ))),
             Err(e) => {
                 eprintln!("Warning: failed to create session writer: {e}");
@@ -720,12 +722,13 @@ async fn main() -> Result<()> {
                 });
             }
         }
-        custom_agents = Arc::new(rust_claude_core::custom_agents::CustomAgentRegistry::from_agents(all_agents));
+        custom_agents =
+            Arc::new(rust_claude_core::custom_agents::CustomAgentRegistry::from_agents(all_agents));
     }
 
     if resolved.system_prompt.is_none() {
-        let mut tools_for_prompt = build_tools();
-        register_mcp_tools(&mut tools_for_prompt, &mcp_manager);
+        let tools_for_prompt = build_tools();
+        register_mcp_tools(&tools_for_prompt, &mcp_manager);
         tools_for_prompt.apply_tool_filters(&resolved.allowed_tools, &resolved.disallowed_tools);
         let git_context = { app_state.lock().await.git_context.clone() };
         let relevant_memories = memory_store
@@ -753,8 +756,8 @@ async fn main() -> Result<()> {
             resolved.bearer_auth,
             resolved.provider,
         )?;
-        let mut tools = build_tools();
-        register_mcp_tools(&mut tools, &mcp_manager);
+        let tools = build_tools();
+        register_mcp_tools(&tools, &mcp_manager);
         tools.apply_tool_filters(&resolved.allowed_tools, &resolved.disallowed_tools);
         let agent_context = build_agent_context(Arc::new(client.clone()), custom_agents.clone());
 
@@ -883,7 +886,6 @@ async fn main() -> Result<()> {
 
         finish_session_writer(&session_writer).await;
 
-
         if let Some(runner) = &hook_runner {
             let session_id = { app_state.lock().await.session.id.clone() };
             let reason = if run_result.is_ok() {
@@ -893,7 +895,7 @@ async fn main() -> Result<()> {
             };
             runner.run_session_end(reason, &session_id).await;
         }
-    Ok(run_result?)
+        Ok(run_result?)
     } else {
         let allowed_tools = resolved.allowed_tools.clone();
         let disallowed_tools = resolved.disallowed_tools.clone();
@@ -916,12 +918,11 @@ async fn finish_session_writer(
     session_writer: &Option<Arc<Mutex<Box<dyn rust_claude_sdk::output::SessionPersistence>>>>,
 ) {
     if let Some(writer) = session_writer {
-        let _ = writer
-            .lock()
-            .await
-            .persist_event(&rust_claude_core::session::SessionEvent::SessionEnd {
+        let _ = writer.lock().await.persist_event(
+            &rust_claude_core::session::SessionEvent::SessionEnd {
                 updated_at: chrono::Local::now().to_rfc3339(),
-            });
+            },
+        );
     }
 }
 
@@ -999,18 +1000,18 @@ fn build_agent_context(
     client: Arc<dyn rust_claude_api::ModelClient>,
     custom_agents: Arc<CustomAgentRegistry>,
 ) -> AgentContext {
-    let run_subagent_cell = Arc::new(std::sync::Mutex::new(None::<rust_claude_tools::tool::AgentContextRunSubagent>));
+    let run_subagent_cell = Arc::new(std::sync::Mutex::new(
+        None::<rust_claude_tools::tool::AgentContextRunSubagent>,
+    ));
     let runner_custom_agents = custom_agents.clone();
     let runner_cell = run_subagent_cell.clone();
     let run_subagent: rust_claude_tools::tool::AgentContextRunSubagent = Arc::new(
-        move |
-            prompt: String,
-            allowed_tools: Vec<String>,
-            options: rust_claude_tools::AgentRunOptions,
-            app_state: Arc<Mutex<AppState>>,
-            current_depth: u32,
-            max_depth: u32,
-        | {
+        move |prompt: String,
+              allowed_tools: Vec<String>,
+              options: rust_claude_tools::AgentRunOptions,
+              app_state: Arc<Mutex<AppState>>,
+              current_depth: u32,
+              max_depth: u32| {
             let client = client.clone();
             let custom_agents = runner_custom_agents.clone();
             let nested_runner = runner_cell
@@ -1031,7 +1032,7 @@ fn build_agent_context(
                     }
                 }
 
-                let mut tools = build_tools();
+                let tools = build_tools();
                 if !allowed_tools.is_empty() {
                     tools.apply_tool_filters(&allowed_tools, &[]);
                 }
@@ -1524,26 +1525,29 @@ fn truncate_review_diff(diff: &str) -> (String, bool) {
     (diff[..end].to_string(), true)
 }
 
-fn build_tools() -> ToolRegistry {
-    let mut tools = ToolRegistry::new();
-    tools.register(AgentTool::new());
-    tools.register(AskUserQuestionTool::new());
-    tools.register(AutoMemoryTool::new());
-    tools.register(BashTool::new());
-    tools.register(EnterPlanModeTool::new());
-    tools.register(ExitPlanModeTool::new());
-    tools.register(FileReadTool::new());
-    tools.register(FileEditTool::new());
-    tools.register(FileWriteTool::new());
-    tools.register(GlobTool::new());
-    tools.register(GrepTool::new());
-    tools.register(LspTool::new());
-    tools.register(MonitorTool::new());
-    tools.register(NotebookEditTool::new());
-    tools.register(TaskTool::new());
-    tools.register(WebFetchTool::new());
-    tools.register(WebSearchTool::new());
-    tools
+fn build_tools() -> std::sync::Arc<ToolRegistry> {
+    std::sync::Arc::new_cyclic(|weak| {
+        let tools = ToolRegistry::new();
+        tools.register(AgentTool::new());
+        tools.register(AskUserQuestionTool::new());
+        tools.register(AutoMemoryTool::new());
+        tools.register(BashTool::new());
+        tools.register(EnterPlanModeTool::new());
+        tools.register(ExitPlanModeTool::new());
+        tools.register(FileReadTool::new());
+        tools.register(FileEditTool::new());
+        tools.register(FileWriteTool::new());
+        tools.register(GlobTool::new());
+        tools.register(GrepTool::new());
+        tools.register(LspTool::new());
+        tools.register(MonitorTool::new());
+        tools.register(NotebookEditTool::new());
+        tools.register(TaskTool::new());
+        tools.register(WebFetchTool::new());
+        tools.register(WebSearchTool::new());
+        tools.register(ToolSearchTool::new(weak.clone()));
+        tools
+    })
 }
 
 fn usage_to_u64(usage: &Usage) -> (u64, u64, u64, u64) {
@@ -1931,14 +1935,18 @@ async fn run_tui(
         while let Some(command) = user_rx.recv().await {
             match command {
                 UserCommand::Compact(strategy) => {
-                    let client =
-                        match build_client(&worker_config.api_key, base_url.clone(), bearer_auth, Provider::Anthropic) {
-                            Ok(client) => client,
-                            Err(error) => {
-                                worker_bridge.send_error(&error.to_string()).await;
-                                continue;
-                            }
-                        };
+                    let client = match build_client(
+                        &worker_config.api_key,
+                        base_url.clone(),
+                        bearer_auth,
+                        Provider::Anthropic,
+                    ) {
+                        Ok(client) => client,
+                        Err(error) => {
+                            worker_bridge.send_error(&error.to_string()).await;
+                            continue;
+                        }
+                    };
 
                     worker_bridge.send_compaction_start().await;
                     let compaction_config = strategy.config();
@@ -1950,22 +1958,31 @@ async fn run_tui(
                             if let Some(writer) = &worker_session_writer {
                                 let summary = {
                                     let state = worker_state.lock().await;
-                                    state.messages.first()
+                                    state
+                                        .messages
+                                        .first()
                                         .and_then(|m| m.content.first())
                                         .and_then(|b| match b {
                                             ContentBlock::Text { text } => Some(text.clone()),
                                             _ => None,
                                         })
-                                        .unwrap_or_else(|| format!(
-                                            "Compacted {} messages to {}",
-                                            result.original_message_count,
-                                            result.compacted_message_count
-                                        ))
+                                        .unwrap_or_else(|| {
+                                            format!(
+                                                "Compacted {} messages to {}",
+                                                result.original_message_count,
+                                                result.compacted_message_count
+                                            )
+                                        })
                                 };
-                                let event = rust_claude_core::session::SessionEvent::CompactBoundary { summary };
+                                let event =
+                                    rust_claude_core::session::SessionEvent::CompactBoundary {
+                                        summary,
+                                    };
                                 if let Err(e) = writer.lock().await.persist_event(&event) {
                                     worker_bridge
-                                        .send_error(&format!("Warning: failed to persist compaction: {e}"))
+                                        .send_error(&format!(
+                                            "Warning: failed to persist compaction: {e}"
+                                        ))
                                         .await;
                                 }
                             }
@@ -2111,8 +2128,13 @@ async fn run_tui(
                             git_branch.as_deref(),
                         )
                         .await;
-                    let message = match description.as_deref().filter(|value| !value.trim().is_empty()) {
-                        Some(description) => format!("Plan mode active. Context: {}", description.trim()),
+                    let message = match description
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        Some(description) => {
+                            format!("Plan mode active. Context: {}", description.trim())
+                        }
                         None => "Plan mode active.".to_string(),
                     };
                     worker_bridge.send_assistant_message(&message).await;
@@ -2128,7 +2150,11 @@ async fn run_tui(
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
                         .map(ToString::to_string)
-                        .unwrap_or_else(|| chrono::Local::now().format("branch-%Y%m%d-%H%M%S").to_string());
+                        .unwrap_or_else(|| {
+                            chrono::Local::now()
+                                .format("branch-%Y%m%d-%H%M%S")
+                                .to_string()
+                        });
                     worker_bridge
                         .send_assistant_message(&format!(
                             "Created conversation branch: {branch_name}"
@@ -2160,15 +2186,15 @@ async fn run_tui(
                             state.last_api_usage = None;
                             state.last_api_message_index = 0;
                         }
-                        (
-                            state.messages.clone(),
-                            state.total_usage.clone(),
-                            rewound,
-                        )
+                        (state.messages.clone(), state.total_usage.clone(), rewound)
                     };
                     if rewound {
-                        let (input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens) =
-                            usage_to_u64(&usage);
+                        let (
+                            input_tokens,
+                            output_tokens,
+                            cache_read_input_tokens,
+                            cache_creation_input_tokens,
+                        ) = usage_to_u64(&usage);
                         worker_bridge
                             .send_conversation_replaced(
                                 messages_to_chat_messages(&messages),
@@ -2187,7 +2213,11 @@ async fn run_tui(
                 }
                 UserCommand::AddDirectory { path } => {
                     let cwd = { worker_state.lock().await.cwd.clone() };
-                    let resolved = if path.is_absolute() { path } else { cwd.join(path) };
+                    let resolved = if path.is_absolute() {
+                        path
+                    } else {
+                        cwd.join(path)
+                    };
                     match resolved.canonicalize() {
                         Ok(path) if path.is_dir() => {
                             let added = {
@@ -2290,7 +2320,9 @@ async fn run_tui(
                         .await;
                 }
                 UserCommand::ShowKeybindings => {
-                    worker_bridge.send_assistant_message(keybindings_text()).await;
+                    worker_bridge
+                        .send_assistant_message(keybindings_text())
+                        .await;
                 }
                 UserCommand::SetTheme(theme) => {
                     let theme_str = match theme {
@@ -2647,17 +2679,21 @@ async fn run_tui(
                         }
                     };
 
-                    let client =
-                        match build_client(&worker_config.api_key, base_url.clone(), bearer_auth, Provider::Anthropic) {
-                            Ok(client) => client,
-                            Err(error) => {
-                                worker_bridge.send_error(&error.to_string()).await;
-                                continue;
-                            }
-                        };
+                    let client = match build_client(
+                        &worker_config.api_key,
+                        base_url.clone(),
+                        bearer_auth,
+                        Provider::Anthropic,
+                    ) {
+                        Ok(client) => client,
+                        Err(error) => {
+                            worker_bridge.send_error(&error.to_string()).await;
+                            continue;
+                        }
+                    };
 
-                    let mut tools = build_tools();
-                    register_mcp_tools(&mut tools, &worker_mcp_manager);
+                    let tools = build_tools();
+                    register_mcp_tools(&tools, &worker_mcp_manager);
                     tools.apply_tool_filters(&allowed_tools, &disallowed_tools);
                     let agent_context =
                         build_agent_context(Arc::new(client.clone()), worker_custom_agents.clone());
@@ -2849,17 +2885,21 @@ async fn run_tui(
                     if let Some(handle) = active_query_task.take() {
                         handle.abort();
                     }
-                    let client =
-                        match build_client(&worker_config.api_key, base_url.clone(), bearer_auth, Provider::Anthropic) {
-                            Ok(client) => client,
-                            Err(error) => {
-                                worker_bridge.send_error(&error.to_string()).await;
-                                continue;
-                            }
-                        };
+                    let client = match build_client(
+                        &worker_config.api_key,
+                        base_url.clone(),
+                        bearer_auth,
+                        Provider::Anthropic,
+                    ) {
+                        Ok(client) => client,
+                        Err(error) => {
+                            worker_bridge.send_error(&error.to_string()).await;
+                            continue;
+                        }
+                    };
 
-                    let mut tools = build_tools();
-                    register_mcp_tools(&mut tools, &worker_mcp_manager);
+                    let tools = build_tools();
+                    register_mcp_tools(&tools, &worker_mcp_manager);
                     tools.apply_tool_filters(&allowed_tools, &disallowed_tools);
                     let agent_context =
                         build_agent_context(Arc::new(client.clone()), worker_custom_agents.clone());
@@ -3012,37 +3052,40 @@ async fn run_tui(
             let pm_arc = app_plugin_manager.clone();
             let _bridge = app_worker_bridge.clone();
             app.slash_registry.register(rust_claude_tui::slash::command(
-                "/plugin", "/plugin list|install <path>|remove <name>",
+                "/plugin",
+                "/plugin list|install <path>|remove <name>",
                 "Manage plugins",
-                move |args, _user_tx| {
-                    match args {
-                        Some(args_str) if args_str.starts_with("list") => {
-                            let pm_lock = pm_arc.blocking_lock();
-                            let plugins = pm_lock.plugins();
-                            let mut lines = vec!["Installed plugins:".to_string()];
-                            if plugins.is_empty() {
-                                lines.push("  (none)".to_string());
-                            } else {
-                                for p in plugins {
-                                    lines.push(format!("  {} v{} - {} (from {})",
-                                        p.name, p.version, p.description,
-                                        if p.is_project { "project" } else { "user" }
-                                    ));
-                                }
+                move |args, _user_tx| match args {
+                    Some(args_str) if args_str.starts_with("list") => {
+                        let pm_lock = pm_arc.blocking_lock();
+                        let plugins = pm_lock.plugins();
+                        let mut lines = vec!["Installed plugins:".to_string()];
+                        if plugins.is_empty() {
+                            lines.push("  (none)".to_string());
+                        } else {
+                            for p in plugins {
+                                lines.push(format!(
+                                    "  {} v{} - {} (from {})",
+                                    p.name,
+                                    p.version,
+                                    p.description,
+                                    if p.is_project { "project" } else { "user" }
+                                ));
                             }
-                            rust_claude_tui::slash::SlashCommandResult::SystemMessage(lines.join("\n"))
                         }
-                        _ => {
-                            rust_claude_tui::slash::SlashCommandResult::SystemMessage(
-                                "Usage: /plugin list | /plugin install <path> | /plugin remove <name>".into()
-                            )
-                        }
+                        rust_claude_tui::slash::SlashCommandResult::SystemMessage(lines.join("\n"))
                     }
+                    _ => rust_claude_tui::slash::SlashCommandResult::SystemMessage(
+                        "Usage: /plugin list | /plugin install <path> | /plugin remove <name>"
+                            .into(),
+                    ),
                 },
             ));
         }
     }
-    let run_result = app.run(terminal_guard.terminal_mut(), event_rx, user_tx).await;
+    let run_result = app
+        .run(terminal_guard.terminal_mut(), event_rx, user_tx)
+        .await;
     finish_session_writer(&session_writer).await;
     if let Some(runner) = &hook_runner {
         let session_id = { app_state.lock().await.session.id.clone() };

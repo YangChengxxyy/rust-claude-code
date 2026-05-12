@@ -274,7 +274,8 @@ mod tests {
 
     #[test]
     fn test_discover_empty_dir() {
-        let dir = std::env::temp_dir().join(format!("rust-claude-plugin-empty-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rust-claude-plugin-empty-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let loader = PluginLoader::discover(Some(&dir));
         assert!(loader.discovered().is_empty());
@@ -283,7 +284,8 @@ mod tests {
 
     #[test]
     fn test_discover_with_invalid_manifest() {
-        let dir = std::env::temp_dir().join(format!("rust-claude-plugin-invalid-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("rust-claude-plugin-invalid-{}", std::process::id()));
         let plugins_dir = dir.join(".claude").join("plugins").join("bad-plugin");
         std::fs::create_dir_all(&plugins_dir).unwrap();
         std::fs::write(plugins_dir.join("plugin.json"), "not json").unwrap();
@@ -296,18 +298,33 @@ mod tests {
 
     #[test]
     fn test_project_overrides_user() {
-        let tmp = std::env::temp_dir().join(format!("rust-claude-plugin-override-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!(
+            "rust-claude-plugin-override-{}",
+            std::process::id()
+        ));
         // Create user plugin
         let user_dir = tmp.join("user-plugins");
         let user_plugin = user_dir.join("shared").join("plugin.json");
         std::fs::create_dir_all(user_plugin.parent().unwrap()).unwrap();
-        std::fs::write(&user_plugin, r#"{"name":"shared","version":"1.0.0","description":"user"}"#).unwrap();
+        std::fs::write(
+            &user_plugin,
+            r#"{"name":"shared","version":"1.0.0","description":"user"}"#,
+        )
+        .unwrap();
 
         // Create project plugin (same name)
         let project_dir = tmp.join("project-dir");
-        let project_plugin = project_dir.join(".claude").join("plugins").join("shared").join("plugin.json");
+        let project_plugin = project_dir
+            .join(".claude")
+            .join("plugins")
+            .join("shared")
+            .join("plugin.json");
         std::fs::create_dir_all(project_plugin.parent().unwrap()).unwrap();
-        std::fs::write(&project_plugin, r#"{"name":"shared","version":"2.0.0","description":"project"}"#).unwrap();
+        std::fs::write(
+            &project_plugin,
+            r#"{"name":"shared","version":"2.0.0","description":"project"}"#,
+        )
+        .unwrap();
 
         // We need to override HOME for the test
         let old_home = std::env::var("HOME").ok();
@@ -323,7 +340,11 @@ mod tests {
         }
 
         let plugins = loader.discovered();
-        assert_eq!(plugins.len(), 1, "should have 1 plugin (project overrides user)");
+        assert_eq!(
+            plugins.len(),
+            1,
+            "should have 1 plugin (project overrides user)"
+        );
         assert_eq!(plugins[0].name, "shared");
         assert_eq!(plugins[0].version, "2.0.0"); // project version wins
         assert_eq!(plugins[0].description, "project");

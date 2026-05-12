@@ -17,6 +17,7 @@ pub mod registry;
 pub mod task_tool;
 pub mod todo_write;
 pub mod tool;
+pub mod tool_search;
 pub mod web;
 pub mod web_fetch_tool;
 pub mod web_search_tool;
@@ -42,5 +43,6 @@ pub use tool::{
     AgentContext, AgentRunOptions, AskUserQuestionOption, AskUserQuestionRequest,
     AskUserQuestionResponse, InterruptBehavior, Tool, ToolContext, ToolError, UserQuestionCallback,
 };
+pub use tool_search::ToolSearchTool;
 pub use web_fetch_tool::WebFetchTool;
 pub use web_search_tool::WebSearchTool;

@@ -247,6 +247,10 @@ impl Tool for WebSearchTool {
         true
     }
 
+    fn should_defer(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> ToolInfo {
         ToolInfo {
             name: "WebSearch".to_string(),
@@ -394,7 +398,7 @@ mod tests {
                 serde_json::json!({ "query": "rust" }),
                 ToolContext {
                     tool_use_id: "tool_1".into(),
-                    ..ToolContext::default()
+                    ..Default::default()
                 },
             )
             .await
@@ -412,7 +416,7 @@ mod tests {
                 serde_json::json!({ "query": "rust" }),
                 ToolContext {
                     tool_use_id: "tool_1".into(),
-                    ..ToolContext::default()
+                    ..Default::default()
                 },
             )
             .await

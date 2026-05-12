@@ -510,9 +510,18 @@ mod tests {
 
     #[test]
     fn test_provider_config_serializes_supported_providers() {
-        assert_eq!(serde_json::to_string(&Provider::Anthropic).unwrap(), "\"anthropic\"");
-        assert_eq!(serde_json::to_string(&Provider::Bedrock).unwrap(), "\"bedrock\"");
-        assert_eq!(serde_json::to_string(&Provider::Vertex).unwrap(), "\"vertex\"");
+        assert_eq!(
+            serde_json::to_string(&Provider::Anthropic).unwrap(),
+            "\"anthropic\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Provider::Bedrock).unwrap(),
+            "\"bedrock\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Provider::Vertex).unwrap(),
+            "\"vertex\""
+        );
 
         let config: ProviderConfig = serde_json::from_str(r#"{"provider":"bedrock"}"#).unwrap();
         assert_eq!(config.provider, Provider::Bedrock);
@@ -744,8 +753,8 @@ mod tests {
     fn test_save_without_credential_omits_api_key() {
         let _guard = env_lock().lock().unwrap();
         let _env = TestEnv::new("save-without-credential");
-        let config = Config::with_credential("local-key".to_string(), false)
-            .with_model("claude-test");
+        let config =
+            Config::with_credential("local-key".to_string(), false).with_model("claude-test");
 
         config.save_without_credential().unwrap();
 

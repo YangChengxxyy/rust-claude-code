@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use futures_util::future::join_all;
@@ -25,7 +26,9 @@ const SESSION_MCP_TOOL_LIMIT: usize = 20;
 const SESSION_PERMISSION_DECISION_LIMIT: usize = 10;
 
 use crate::hooks::HookRunner;
-use crate::output::{OutputSink, PermissionDecision, PermissionUI, SessionPersistence, UserQuestionUI};
+use crate::output::{
+    OutputSink, PermissionDecision, PermissionUI, SessionPersistence, UserQuestionUI,
+};
 use crate::streaming_tool_executor::{StreamingToolExecutor, StreamingToolOutput};
 
 #[derive(Debug, thiserror::Error)]
@@ -89,16 +92,17 @@ pub struct QueryLoop<C> {
     hook_runner: Option<Arc<HookRunner>>,
     agent_context: Option<rust_claude_tools::AgentContext>,
     session_persistence: Option<Arc<Mutex<Box<dyn SessionPersistence>>>>,
+    discovered_tools: std::sync::Mutex<HashSet<String>>,
 }
 
 impl<C> QueryLoop<C>
 where
     C: ModelClient,
 {
-    pub fn new(client: C, tools: ToolRegistry) -> Self {
+    pub fn new(client: C, tools: Arc<ToolRegistry>) -> Self {
         Self {
             client,
-            tools: Arc::new(tools),
+            tools,
             max_rounds: 8,
             output: None,
             permission_ui: None,
@@ -107,6 +111,7 @@ where
             hook_runner: None,
             agent_context: None,
             session_persistence: None,
+            discovered_tools: std::sync::Mutex::new(HashSet::new()),
         }
     }
 
@@ -176,7 +181,9 @@ where
 
         // Fire UserPromptSubmit hooks
         if let Some(runner) = &self.hook_runner {
-            runner.run_user_prompt_submit(&user_input_str, &session_id).await;
+            runner
+                .run_user_prompt_submit(&user_input_str, &session_id)
+                .await;
         }
 
         // Discover & scan the memory store once at the start rather than on
@@ -223,24 +230,30 @@ where
                             // Extract the summary text from the first message after compaction
                             let summary = {
                                 let state = app_state.lock().await;
-                                state.messages.first()
+                                state
+                                    .messages
+                                    .first()
                                     .and_then(|m| m.content.first())
                                     .and_then(|b| match b {
                                         ContentBlock::Text { text } => Some(text.clone()),
                                         _ => None,
                                     })
-                                    .unwrap_or_else(|| format!(
-                                        "Compacted {} messages to {}",
-                                        result.original_message_count,
-                                        result.compacted_message_count
-                                    ))
+                                    .unwrap_or_else(|| {
+                                        format!(
+                                            "Compacted {} messages to {}",
+                                            result.original_message_count,
+                                            result.compacted_message_count
+                                        )
+                                    })
                             };
                             let event = rust_claude_core::session::SessionEvent::CompactBoundary {
                                 summary,
                             };
                             if let Err(e) = persistence.lock().await.persist_event(&event) {
                                 if let Some(output) = &self.output {
-                                    output.error(&format!("Failed to persist compaction boundary: {e}"));
+                                    output.error(&format!(
+                                        "Failed to persist compaction boundary: {e}"
+                                    ));
                                 }
                             }
                         }
@@ -262,14 +275,16 @@ where
                 state.session.stream
             };
             let streamed_response = if use_stream {
-                match self.collect_response_from_stream(&request, &app_state).await {
+                match self
+                    .collect_response_from_stream(&request, &app_state)
+                    .await
+                {
                     Ok(resp) => resp,
                     Err(e) => {
-                        if let Some(action) = self.handle_api_error(
-                            &e,
-                            &mut retry_state,
-                            &app_state,
-                        ).await {
+                        if let Some(action) = self
+                            .handle_api_error(&e, &mut retry_state, &app_state)
+                            .await
+                        {
                             match action {
                                 ErrorRecoveryAction::Retry => continue,
                                 ErrorRecoveryAction::Fail => return Err(e),
@@ -286,11 +301,10 @@ where
                     },
                     Err(e) => {
                         let e = QueryLoopError::Api(e);
-                        if let Some(action) = self.handle_api_error(
-                            &e,
-                            &mut retry_state,
-                            &app_state,
-                        ).await {
+                        if let Some(action) = self
+                            .handle_api_error(&e, &mut retry_state, &app_state)
+                            .await
+                        {
                             match action {
                                 ErrorRecoveryAction::Retry => continue,
                                 ErrorRecoveryAction::Fail => return Err(e),
@@ -356,7 +370,8 @@ where
                 // If the response has tool_use blocks, execute them first
                 if assistant_message.has_tool_use() {
                     if let Some(tool_outputs) = streamed_tool_outputs {
-                        self.append_streaming_tool_results(&app_state, tool_outputs).await?;
+                        self.append_streaming_tool_results(&app_state, tool_outputs)
+                            .await?;
                     } else {
                         self.execute_tool_uses(&app_state, &assistant_message)
                             .await?;
@@ -380,9 +395,14 @@ where
                         state.add_message(continuation_message.clone());
                     }
                     if let Some(persistence) = &self.session_persistence {
-                        if let Err(e) = persistence.lock().await.persist_message(&continuation_message) {
+                        if let Err(e) = persistence
+                            .lock()
+                            .await
+                            .persist_message(&continuation_message)
+                        {
                             if let Some(output) = &self.output {
-                                output.error(&format!("Failed to persist continuation message: {e}"));
+                                output
+                                    .error(&format!("Failed to persist continuation message: {e}"));
                             }
                         }
                     }
@@ -407,7 +427,8 @@ where
             }
 
             if let Some(tool_outputs) = streamed_tool_outputs {
-                self.append_streaming_tool_results(&app_state, tool_outputs).await?;
+                self.append_streaming_tool_results(&app_state, tool_outputs)
+                    .await?;
             } else {
                 self.execute_tool_uses(&app_state, &assistant_message)
                     .await?;
@@ -467,19 +488,26 @@ where
                             if let Some(persistence) = &self.session_persistence {
                                 let summary = {
                                     let state = app_state.lock().await;
-                                    state.messages.first()
+                                    state
+                                        .messages
+                                        .first()
                                         .and_then(|m| m.content.first())
                                         .and_then(|b| match b {
                                             ContentBlock::Text { text } => Some(text.clone()),
                                             _ => None,
                                         })
-                                        .unwrap_or_else(|| format!(
-                                            "Reactive compaction: {} -> {} messages",
-                                            result.original_message_count,
-                                            result.compacted_message_count
-                                        ))
+                                        .unwrap_or_else(|| {
+                                            format!(
+                                                "Reactive compaction: {} -> {} messages",
+                                                result.original_message_count,
+                                                result.compacted_message_count
+                                            )
+                                        })
                                 };
-                                let event = rust_claude_core::session::SessionEvent::CompactBoundary { summary };
+                                let event =
+                                    rust_claude_core::session::SessionEvent::CompactBoundary {
+                                        summary,
+                                    };
                                 let _ = persistence.lock().await.persist_event(&event);
                             }
                             return ErrorRecoveryAction::Retry;
@@ -492,15 +520,21 @@ where
                             }
                             // Fall through to stage 2
                             retry_state.prompt_too_long_stage = 2;
-                            return self.handle_prompt_too_long_stage2(retry_state, app_state).await;
+                            return self
+                                .handle_prompt_too_long_stage2(retry_state, app_state)
+                                .await;
                         }
                     }
                 }
                 // No compaction config — try micro-compaction directly
                 retry_state.prompt_too_long_stage = 2;
-                self.handle_prompt_too_long_stage2(retry_state, app_state).await
+                self.handle_prompt_too_long_stage2(retry_state, app_state)
+                    .await
             }
-            2 => self.handle_prompt_too_long_stage2(retry_state, app_state).await,
+            2 => {
+                self.handle_prompt_too_long_stage2(retry_state, app_state)
+                    .await
+            }
             _ => {
                 // Stage 3: Give up, report to user
                 if let Some(output) = &self.output {
@@ -524,10 +558,8 @@ where
             output.error("Attempting micro-compaction (clearing old tool results)...");
         }
         if let Some(compaction_config) = &self.compaction_config {
-            let service = crate::compaction::CompactionService::new(
-                &self.client,
-                compaction_config.clone(),
-            );
+            let service =
+                crate::compaction::CompactionService::new(&self.client, compaction_config.clone());
             match service.micro_compact(app_state).await {
                 Ok(result) if result.blocks_cleared > 0 => {
                     if let Some(output) = &self.output {
@@ -572,9 +604,7 @@ where
 
         if count > MAX_OVERLOAD_RETRIES && !retry_state.using_fallback_model {
             // Try to switch to fallback model
-            let fallback = {
-                app_state.lock().await.config.fallback_model.clone()
-            };
+            let fallback = { app_state.lock().await.config.fallback_model.clone() };
             if let Some(fallback_model) = fallback {
                 if let Some(output) = &self.output {
                     output.error(&format!(
@@ -705,30 +735,25 @@ where
                                 output.thinking_complete(thinking);
                             }
                         }
-                        if let ContentBlock::ToolUse {
-                            id,
-                            name,
-                            input,
-                        } = &block
-                        {
+                        if let ContentBlock::ToolUse { id, name, input } = &block {
                             if let Some(active_executor) = &executor {
-                                let schedule_result = self.schedule_streamed_tool(
-                                    app_state,
-                                    active_executor,
-                                    index,
-                                    id,
-                                    name,
-                                    input,
-                                )
-                                .await;
+                                let schedule_result = self
+                                    .schedule_streamed_tool(
+                                        app_state,
+                                        active_executor,
+                                        index,
+                                        id,
+                                        name,
+                                        input,
+                                    )
+                                    .await;
                                 match schedule_result {
                                     Ok(()) => streamed_tool_count += 1,
                                     Err(error) if streamed_tool_count == 0 => {
                                         if let Some(executor) = executor.take() {
-                                            executor
-                                                .discard()
-                                                .await
-                                                .map_err(|error| QueryLoopError::Tool(error.to_string()))?;
+                                            executor.discard().await.map_err(|error| {
+                                                QueryLoopError::Tool(error.to_string())
+                                            })?;
                                         }
                                         if let Some(output) = &self.output {
                                             output.error(&format!(
@@ -770,15 +795,15 @@ where
 
         Ok(StreamedResponse {
             response: CreateMessageResponse {
-            id: message_id,
-            response_type,
-            role,
-            content: content.into_iter().flatten().collect(),
-            model,
-            stop_reason,
-            stop_sequence,
-            usage: usage
-                .ok_or_else(|| QueryLoopError::Tool("missing streamed usage".to_string()))?,
+                id: message_id,
+                response_type,
+                role,
+                content: content.into_iter().flatten().collect(),
+                model,
+                stop_reason,
+                stop_sequence,
+                usage: usage
+                    .ok_or_else(|| QueryLoopError::Tool("missing streamed usage".to_string()))?,
             },
             tool_outputs,
         })
@@ -916,22 +941,54 @@ where
             )
         });
 
-        let tools = self
-            .tools
-            .list()
-            .into_iter()
-            .map(|tool| {
-                ApiTool::new(
+        let context_window = get_context_window_size(&runtime_model);
+        let deferred_tokens = self.tools.estimate_deferred_schema_tokens();
+        let enable_deferred = deferred_tokens > ((context_window as f64) * 0.10) as usize;
+        let discovered = self.discovered_tools.lock().unwrap().clone();
+
+        let tools = if enable_deferred {
+            let mut api_tools = Vec::new();
+            // Non-deferred tools always get full schema
+            for tool in self.tools.get_non_deferred_tools() {
+                api_tools.push(ApiTool::new(
                     tool.info.name.clone(),
                     tool.info.description.clone(),
                     tool.info.input_schema.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
+                ));
+            }
+            // Deferred tools: discovered ones get full schema, undiscovered get minimal
+            for tool in self.tools.get_deferred_tools() {
+                if discovered.contains(&tool.info.name) {
+                    api_tools.push(ApiTool::new(
+                        tool.info.name.clone(),
+                        tool.info.description.clone(),
+                        tool.info.input_schema.clone(),
+                    ));
+                } else {
+                    api_tools.push(ApiTool::deferred(&tool.info.name));
+                }
+            }
+            api_tools
+        } else {
+            self.tools
+                .list()
+                .into_iter()
+                .map(|tool| {
+                    ApiTool::new(
+                        tool.info.name.clone(),
+                        tool.info.description.clone(),
+                        tool.info.input_schema.clone(),
+                    )
+                })
+                .collect()
+        };
 
         // Determine thinking config based on model
-        let thinking_config =
-            get_thinking_config_for_model(&runtime_model, state.session.thinking_enabled, state.session.thinking_budget);
+        let thinking_config = get_thinking_config_for_model(
+            &runtime_model,
+            state.session.thinking_enabled,
+            state.session.thinking_budget,
+        );
         let max_tokens = state.session.max_tokens;
 
         let mut request =
@@ -1060,15 +1117,20 @@ where
                                     command.map(|value| value.to_string()),
                                     SESSION_PERMISSION_DECISION_LIMIT,
                                 );
-                                (state.permission_mode, state.always_allow_rules.clone(), state.always_deny_rules.clone())
+                                (
+                                    state.permission_mode,
+                                    state.always_allow_rules.clone(),
+                                    state.always_deny_rules.clone(),
+                                )
                             };
                             // Persist permission change to session log
                             if let Some(persistence) = &self.session_persistence {
-                                let event = rust_claude_core::session::SessionEvent::PermissionChange {
-                                    mode,
-                                    allow_rules,
-                                    deny_rules,
-                                };
+                                let event =
+                                    rust_claude_core::session::SessionEvent::PermissionChange {
+                                        mode,
+                                        allow_rules,
+                                        deny_rules,
+                                    };
                                 let _ = persistence.lock().await.persist_event(&event);
                             }
                             None
@@ -1099,15 +1161,20 @@ where
                                     command.map(|value| value.to_string()),
                                     SESSION_PERMISSION_DECISION_LIMIT,
                                 );
-                                (state.permission_mode, state.always_allow_rules.clone(), state.always_deny_rules.clone())
+                                (
+                                    state.permission_mode,
+                                    state.always_allow_rules.clone(),
+                                    state.always_deny_rules.clone(),
+                                )
                             };
                             // Persist permission change to session log
                             if let Some(persistence) = &self.session_persistence {
-                                let event = rust_claude_core::session::SessionEvent::PermissionChange {
-                                    mode,
-                                    allow_rules,
-                                    deny_rules,
-                                };
+                                let event =
+                                    rust_claude_core::session::SessionEvent::PermissionChange {
+                                        mode,
+                                        allow_rules,
+                                        deny_rules,
+                                    };
                                 let _ = persistence.lock().await.persist_event(&event);
                             }
                             Some(("Permission denied by user (always deny)".to_string(), true))
@@ -1234,6 +1301,7 @@ where
                                 app_state: Some(app_state.clone()),
                                 agent_context: self.agent_context.clone(),
                                 user_question_callback: user_question_callback.clone(),
+                                ..Default::default()
                             },
                         )
                         .await;
@@ -1262,6 +1330,14 @@ where
                     )
                     .await;
             }
+            if self
+                .tools
+                .get(&name)
+                .map(|t| t.should_defer)
+                .unwrap_or(false)
+            {
+                self.discovered_tools.lock().unwrap().insert(name.clone());
+            }
             tool_results.push((index, result.tool_use_id, result.content, result.is_error));
         }
 
@@ -1276,6 +1352,7 @@ where
                         app_state: Some(app_state.clone()),
                         agent_context: self.agent_context.clone(),
                         user_question_callback: user_question_callback.clone(),
+                        ..Default::default()
                     },
                 )
                 .await
@@ -1298,6 +1375,14 @@ where
                     )
                     .await;
             }
+            if self
+                .tools
+                .get(&name)
+                .map(|t| t.should_defer)
+                .unwrap_or(false)
+            {
+                self.discovered_tools.lock().unwrap().insert(name.clone());
+            }
             tool_results.push((index, result.tool_use_id, result.content, result.is_error));
         }
 
@@ -1313,7 +1398,11 @@ where
         state.add_message(tool_result_message.clone());
         drop(state);
         if let Some(persistence) = &self.session_persistence {
-            if let Err(e) = persistence.lock().await.persist_message(&tool_result_message) {
+            if let Err(e) = persistence
+                .lock()
+                .await
+                .persist_message(&tool_result_message)
+            {
                 if let Some(output) = &self.output {
                     output.error(&format!("Failed to persist tool result message: {e}"));
                 }
@@ -1332,25 +1421,32 @@ where
 
         for output in tool_outputs {
             if let Some(sink) = &self.output {
-                sink.tool_result(
-                    &output.name,
-                    &output.result.content,
-                    output.result.is_error,
-                );
+                sink.tool_result(&output.name, &output.result.content, output.result.is_error);
+            }
+            if self
+                .tools
+                .get(&output.name)
+                .map(|tool| tool.should_defer)
+                .unwrap_or(false)
+            {
+                self.discovered_tools
+                    .lock()
+                    .unwrap()
+                    .insert(output.name.clone());
             }
             if output.run_post_hook {
                 if let Some(runner) = &self.hook_runner {
-                let cwd = { app_state.lock().await.cwd.clone() };
-                runner
-                    .run_post_tool_use_with_cwd(
-                        &output.name,
-                        &output.input,
-                        &output.result.content,
-                        output.result.is_error,
-                        &session_id,
-                        &cwd,
-                    )
-                    .await;
+                    let cwd = { app_state.lock().await.cwd.clone() };
+                    runner
+                        .run_post_tool_use_with_cwd(
+                            &output.name,
+                            &output.input,
+                            &output.result.content,
+                            output.result.is_error,
+                            &session_id,
+                            &cwd,
+                        )
+                        .await;
                 }
             }
             tool_results.push((
@@ -1365,7 +1461,11 @@ where
         state.add_message(tool_result_message.clone());
         drop(state);
         if let Some(persistence) = &self.session_persistence {
-            if let Err(e) = persistence.lock().await.persist_message(&tool_result_message) {
+            if let Err(e) = persistence
+                .lock()
+                .await
+                .persist_message(&tool_result_message)
+            {
                 if let Some(output) = &self.output {
                     output.error(&format!("Failed to persist tool result message: {e}"));
                 }
@@ -1381,6 +1481,10 @@ fn ensure_index<T>(items: &mut Vec<Option<T>>, index: usize) {
     }
 }
 
+fn get_context_window_size(_model: &str) -> usize {
+    200_000
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1389,8 +1493,8 @@ mod tests {
     use rust_claude_core::hooks::{HookConfig, HookEventGroup};
     use rust_claude_core::message::{ContentBlock, Message};
     use rust_claude_tools::{
-        AskUserQuestionRequest, AskUserQuestionResponse, AskUserQuestionTool, BashTool, EnterPlanModeTool, FileReadTool,
-        MonitorTool, Tool, ToolContext, ToolError,
+        AskUserQuestionRequest, AskUserQuestionResponse, AskUserQuestionTool, BashTool,
+        EnterPlanModeTool, FileReadTool, MonitorTool, Tool, ToolContext, ToolError,
     };
     use std::collections::{HashMap, VecDeque};
     use std::path::PathBuf;
@@ -1516,7 +1620,7 @@ mod tests {
 
         let mut tools = ToolRegistry::new();
         tools.register(BashTool::new());
-        let loop_runner = QueryLoop::new(client, tools);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
 
         // BashTool is not read-only, so bypass permissions to let it execute.
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
@@ -1576,7 +1680,10 @@ mod tests {
 
         #[async_trait]
         impl UserQuestionUI for MockUserQuestionUI {
-            async fn ask(&self, _request: AskUserQuestionRequest) -> Option<AskUserQuestionResponse> {
+            async fn ask(
+                &self,
+                _request: AskUserQuestionRequest,
+            ) -> Option<AskUserQuestionResponse> {
                 Some(AskUserQuestionResponse {
                     selected_label: Some("B".into()),
                     answer: "Answer B".into(),
@@ -1587,7 +1694,7 @@ mod tests {
 
         let mut tools = ToolRegistry::new();
         tools.register(AskUserQuestionTool::new());
-        let loop_runner = QueryLoop::new(client, tools)
+        let loop_runner = QueryLoop::new(client, Arc::new(tools))
             .with_user_question_ui(Box::new(MockUserQuestionUI));
         let app_state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
 
@@ -1666,7 +1773,7 @@ mod tests {
             captured: Mutex::new(Vec::new()),
         };
         let tools = ToolRegistry::new();
-        let loop_runner = QueryLoop::new(client, tools);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.session.system_prompt = Some("You are concise".to_string());
         let app_state = Arc::new(Mutex::new(state));
@@ -1733,7 +1840,7 @@ mod tests {
 
         let mut tools = ToolRegistry::new();
         tools.register(BashTool::new());
-        let loop_runner = QueryLoop::new(client, tools).with_max_rounds(4);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools)).with_max_rounds(4);
 
         // BashTool is not read-only, so bypass permissions to let it execute.
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
@@ -1830,7 +1937,7 @@ mod tests {
             }],
         );
         let hook_runner = Arc::new(HookRunner::new(hooks, initial_dir.clone()));
-        let loop_runner = QueryLoop::new(client, tools)
+        let loop_runner = QueryLoop::new(client, Arc::new(tools))
             .with_max_rounds(4)
             .with_hook_runner(hook_runner);
 
@@ -1864,6 +1971,20 @@ mod tests {
     struct SlowReadTool;
 
     struct SlowWriteTool;
+
+    struct DeferredFixtureTool {
+        name: String,
+        schema_padding: usize,
+    }
+
+    impl DeferredFixtureTool {
+        fn new(name: impl Into<String>, schema_padding: usize) -> Self {
+            Self {
+                name: name.into(),
+                schema_padding,
+            }
+        }
+    }
 
     struct NotifyingReadTool {
         started: Arc<AtomicBool>,
@@ -1919,6 +2040,40 @@ mod tests {
             Ok(rust_claude_core::tool_types::ToolResult::success(
                 context.tool_use_id,
                 "ok",
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl Tool for DeferredFixtureTool {
+        fn info(&self) -> rust_claude_core::tool_types::ToolInfo {
+            rust_claude_core::tool_types::ToolInfo {
+                name: self.name.clone(),
+                description: "deferred fixture".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "payload": {
+                            "type": "string",
+                            "description": "x".repeat(self.schema_padding),
+                        }
+                    }
+                }),
+            }
+        }
+
+        fn should_defer(&self) -> bool {
+            true
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            context: ToolContext,
+        ) -> Result<rust_claude_core::tool_types::ToolResult, ToolError> {
+            Ok(rust_claude_core::tool_types::ToolResult::success(
+                context.tool_use_id,
+                "deferred ok",
             ))
         }
     }
@@ -1986,7 +2141,7 @@ mod tests {
 
         let mut tools = ToolRegistry::new();
         tools.register(SlowReadTool);
-        let loop_runner = QueryLoop::new(client, tools);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
         let app_state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
 
         let started = Instant::now();
@@ -2059,7 +2214,7 @@ mod tests {
         tools.register(NotifyingReadTool {
             started: tool_started,
         });
-        let loop_runner = QueryLoop::new(client, tools).with_max_rounds(1);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools)).with_max_rounds(1);
         let app_state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
 
         let result = loop_runner.run(app_state, "early").await;
@@ -2098,7 +2253,7 @@ mod tests {
 
         let mut tools = ToolRegistry::new();
         tools.register(SlowWriteTool);
-        let loop_runner = QueryLoop::new(client, tools);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
 
         // SlowWriteTool is not read-only, so we need BypassPermissions to let it execute.
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
@@ -2128,7 +2283,7 @@ mod tests {
         };
 
         let tools = ToolRegistry::new();
-        let loop_runner = QueryLoop::new(client, tools);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
         let app_state = Arc::new(Mutex::new(AppState::new(std::path::PathBuf::from("/tmp"))));
 
         let final_message = loop_runner.run(app_state, "hello").await.unwrap();
@@ -2172,7 +2327,7 @@ mod tests {
 
         let mut tools = ToolRegistry::new();
         tools.register(BashTool::new());
-        let loop_runner = QueryLoop::new(client, tools);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.permission_mode = rust_claude_core::permission::PermissionMode::Plan;
@@ -2236,7 +2391,7 @@ mod tests {
 
         let mut tools = ToolRegistry::new();
         tools.register(BashTool::new());
-        let loop_runner = QueryLoop::new(client, tools);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.permission_mode = rust_claude_core::permission::PermissionMode::BypassPermissions;
@@ -2292,7 +2447,7 @@ mod tests {
 
         let mut tools = ToolRegistry::new();
         tools.register(SlowWriteTool);
-        let loop_runner = QueryLoop::new(client, tools);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.permission_mode = rust_claude_core::permission::PermissionMode::Plan;
@@ -2355,7 +2510,7 @@ mod tests {
 
         let mut tools = ToolRegistry::new();
         tools.register(MonitorTool::new());
-        let loop_runner = QueryLoop::new(client, tools);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.permission_mode = rust_claude_core::permission::PermissionMode::Default;
@@ -2433,7 +2588,7 @@ mod tests {
         let mut tools = ToolRegistry::new();
         tools.register(EnterPlanModeTool::new());
         tools.register(SlowWriteTool);
-        let loop_runner = QueryLoop::new(client, tools).with_max_rounds(4);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools)).with_max_rounds(4);
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.permission_mode = rust_claude_core::permission::PermissionMode::BypassPermissions;
@@ -2494,7 +2649,7 @@ mod tests {
 
         let mut tools = ToolRegistry::new();
         tools.register(SlowReadTool);
-        let loop_runner = QueryLoop::new(client, tools);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.permission_mode = rust_claude_core::permission::PermissionMode::Plan;
@@ -2550,7 +2705,7 @@ mod tests {
 
         let mut tools = ToolRegistry::new();
         tools.register(SlowWriteTool);
-        let loop_runner = QueryLoop::new(client, tools);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
 
         // Default mode: non-read-only tools need confirmation
         let state = AppState::new(std::path::PathBuf::from("/tmp"));
@@ -2576,7 +2731,7 @@ mod tests {
             responses: Mutex::new(VecDeque::new()),
         };
         let tools = ToolRegistry::new();
-        let loop_runner = QueryLoop::new(client, tools);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.permission_mode = rust_claude_core::permission::PermissionMode::Plan;
@@ -2595,7 +2750,7 @@ mod tests {
             responses: Mutex::new(VecDeque::new()),
         };
         let tools = ToolRegistry::new();
-        let loop_runner = QueryLoop::new(client, tools);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.permission_mode = rust_claude_core::permission::PermissionMode::Plan;
@@ -2615,6 +2770,133 @@ mod tests {
 
         let request = loop_runner.build_request(&app_state, None).await;
         assert_eq!(request.model, "claude-sonnet-4-6");
+    }
+
+    #[tokio::test]
+    async fn test_build_request_sends_minimal_deferred_tools_when_threshold_exceeded() {
+        let client = MockClient {
+            responses: Mutex::new(VecDeque::new()),
+        };
+        let mut tools = ToolRegistry::new();
+        tools.register(BashTool::new());
+        for index in 0..20 {
+            tools.register(DeferredFixtureTool::new(
+                format!("DeferredTool{index}"),
+                4_500,
+            ));
+        }
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.add_message(Message::user("hello"));
+        let app_state = Arc::new(Mutex::new(state));
+
+        let request = loop_runner.build_request(&app_state, None).await;
+        let tools = request.tools.expect("request should include tools");
+        let bash = tools.iter().find(|tool| tool.name() == "Bash").unwrap();
+        let deferred = tools
+            .iter()
+            .find(|tool| tool.name() == "DeferredTool0")
+            .unwrap();
+
+        assert!(!bash.is_deferred());
+        assert!(bash.description().is_some());
+        assert!(bash.input_schema().is_some());
+        assert!(deferred.is_deferred());
+        assert!(deferred.description().is_none());
+        assert!(deferred.input_schema().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_invoked_deferred_tool_sends_full_schema_on_next_request() {
+        struct CaptureClient {
+            captured: Mutex<Vec<CreateMessageRequest>>,
+            responses: Mutex<VecDeque<CreateMessageResponse>>,
+        }
+
+        #[async_trait]
+        impl ModelClient for CaptureClient {
+            async fn create_message(
+                &self,
+                request: &CreateMessageRequest,
+            ) -> Result<CreateMessageResponse, ApiError> {
+                self.captured.lock().await.push(request.clone());
+                let mut responses = self.responses.lock().await;
+                Ok(responses.pop_front().expect("mock response should exist"))
+            }
+
+            async fn create_message_stream(
+                &self,
+                _request: &CreateMessageRequest,
+            ) -> Result<MessageStream, ApiError> {
+                unreachable!("non-stream path should be used")
+            }
+        }
+
+        let client = CaptureClient {
+            captured: Mutex::new(Vec::new()),
+            responses: Mutex::new(VecDeque::from(vec![
+                CreateMessageResponse {
+                    id: "msg_1".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::tool_use(
+                        "tool_1",
+                        "DeferredTool0",
+                        serde_json::json!({}),
+                    )],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::ToolUse),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+                CreateMessageResponse {
+                    id: "msg_2".to_string(),
+                    response_type: "message".to_string(),
+                    role: rust_claude_core::message::Role::Assistant,
+                    content: vec![ContentBlock::text("done")],
+                    model: "claude-test".to_string(),
+                    stop_reason: Some(StopReason::EndTurn),
+                    stop_sequence: None,
+                    usage: usage(),
+                },
+            ])),
+        };
+        let mut tools = ToolRegistry::new();
+        for index in 0..20 {
+            tools.register(DeferredFixtureTool::new(
+                format!("DeferredTool{index}"),
+                4_500,
+            ));
+        }
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
+
+        let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
+        state.session.stream = false;
+        state.permission_mode = rust_claude_core::permission::PermissionMode::BypassPermissions;
+        let app_state = Arc::new(Mutex::new(state));
+
+        let final_message = loop_runner.run(app_state, "use deferred").await.unwrap();
+        assert_eq!(final_message.content, vec![ContentBlock::text("done")]);
+
+        let captured = loop_runner.client.captured.lock().await;
+        assert_eq!(captured.len(), 2);
+        let first_tools = captured[0].tools.as_ref().unwrap();
+        let second_tools = captured[1].tools.as_ref().unwrap();
+        let first_deferred = first_tools
+            .iter()
+            .find(|tool| tool.name() == "DeferredTool0")
+            .unwrap();
+        let second_deferred = second_tools
+            .iter()
+            .find(|tool| tool.name() == "DeferredTool0")
+            .unwrap();
+
+        assert!(first_deferred.is_deferred());
+        assert!(first_deferred.description().is_none());
+        assert!(!second_deferred.is_deferred());
+        assert!(second_deferred.description().is_some());
+        assert!(second_deferred.input_schema().is_some());
     }
 
     #[tokio::test]
@@ -2654,7 +2936,7 @@ mod tests {
             }],
         );
         let runner = Arc::new(crate::hooks::HookRunner::new(hooks, PathBuf::from("/tmp")));
-        let loop_runner = QueryLoop::new(client, tools).with_hook_runner(runner);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools)).with_hook_runner(runner);
 
         let mut state = AppState::new(PathBuf::from("/tmp"));
         state.session.id = "session-xyz".into();
@@ -2682,9 +2964,7 @@ mod tests {
             _request: &CreateMessageRequest,
         ) -> Result<CreateMessageResponse, ApiError> {
             let mut results = self.results.lock().await;
-            results
-                .pop_front()
-                .expect("mock result should exist")
+            results.pop_front().expect("mock result should exist")
         }
 
         async fn create_message_stream(
@@ -2786,8 +3066,8 @@ mod tests {
             summary_max_tokens: 8192,
             ..Default::default()
         };
-        let loop_runner = QueryLoop::new(client, tools)
-            .with_compaction_config(compaction_config);
+        let loop_runner =
+            QueryLoop::new(client, Arc::new(tools)).with_compaction_config(compaction_config);
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.session.stream = false;
@@ -2826,7 +3106,7 @@ mod tests {
         };
         let tools = ToolRegistry::new();
         // No compaction config = no compaction available
-        let loop_runner = QueryLoop::new(client, tools);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools));
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.session.stream = false;
@@ -2851,7 +3131,7 @@ mod tests {
             ])),
         };
         let tools = ToolRegistry::new();
-        let loop_runner = QueryLoop::new(client, tools).with_max_rounds(10);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools)).with_max_rounds(10);
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.session.stream = false;
@@ -2886,7 +3166,7 @@ mod tests {
             ])),
         };
         let tools = ToolRegistry::new();
-        let loop_runner = QueryLoop::new(client, tools).with_max_rounds(10);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools)).with_max_rounds(10);
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.session.stream = false;
@@ -2918,7 +3198,7 @@ mod tests {
             ])),
         };
         let tools = ToolRegistry::new();
-        let loop_runner = QueryLoop::new(client, tools).with_max_rounds(10);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools)).with_max_rounds(10);
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.session.stream = false;
@@ -2952,7 +3232,7 @@ mod tests {
             ])),
         };
         let tools = ToolRegistry::new();
-        let loop_runner = QueryLoop::new(client, tools).with_max_rounds(10);
+        let loop_runner = QueryLoop::new(client, Arc::new(tools)).with_max_rounds(10);
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.session.stream = false;
@@ -2986,7 +3266,10 @@ mod tests {
             &mut self,
             msg: &Message,
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            self.calls.lock().unwrap().push(PersistenceCall::Message(msg.clone()));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(PersistenceCall::Message(msg.clone()));
             Ok(())
         }
 
@@ -2994,7 +3277,10 @@ mod tests {
             &mut self,
             event: &rust_claude_core::session::SessionEvent,
         ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-            self.calls.lock().unwrap().push(PersistenceCall::Event(event.clone()));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(PersistenceCall::Event(event.clone()));
             Ok(())
         }
     }
@@ -3029,8 +3315,9 @@ mod tests {
             hook_runner: None,
             agent_context: None,
             session_persistence: Some(Arc::new(Mutex::new(
-                Box::new(mock) as Box<dyn crate::output::SessionPersistence>,
+                Box::new(mock) as Box<dyn crate::output::SessionPersistence>
             ))),
+            discovered_tools: std::sync::Mutex::new(HashSet::new()),
         };
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
@@ -3101,8 +3388,8 @@ mod tests {
         tools.register(BashTool::new());
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mock = MockSessionPersistence::new(calls.clone());
-        let loop_runner = QueryLoop::new(client, tools)
-            .with_session_persistence(Box::new(mock));
+        let loop_runner =
+            QueryLoop::new(client, Arc::new(tools)).with_session_persistence(Box::new(mock));
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.session.stream = false;
@@ -3123,7 +3410,10 @@ mod tests {
         assert_eq!(messages[0].role, rust_claude_core::message::Role::User);
         assert_eq!(messages[1].role, rust_claude_core::message::Role::Assistant);
         assert_eq!(messages[2].role, rust_claude_core::message::Role::User);
-        assert!(matches!(messages[2].content[0], ContentBlock::ToolResult { .. }));
+        assert!(matches!(
+            messages[2].content[0],
+            ContentBlock::ToolResult { .. }
+        ));
         assert_eq!(messages[3].role, rust_claude_core::message::Role::Assistant);
     }
 
@@ -3157,8 +3447,8 @@ mod tests {
         let tools = ToolRegistry::new();
         let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mock = MockSessionPersistence::new(calls.clone());
-        let loop_runner = QueryLoop::new(client, tools)
-            .with_session_persistence(Box::new(mock));
+        let loop_runner =
+            QueryLoop::new(client, Arc::new(tools)).with_session_persistence(Box::new(mock));
 
         let mut state = AppState::new(std::path::PathBuf::from("/tmp"));
         state.session.stream = false;

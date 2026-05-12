@@ -72,6 +72,10 @@ impl Tool for TaskTool {
         false
     }
 
+    fn should_defer(&self) -> bool {
+        true
+    }
+
     async fn execute(
         &self,
         input: serde_json::Value,
@@ -169,6 +173,7 @@ mod tests {
             app_state: Some(app_state.clone()),
             agent_context: None,
             user_question_callback: None,
+            ..Default::default()
         }
     }
 
@@ -280,6 +285,7 @@ mod tests {
                     app_state: None,
                     agent_context: None,
                     user_question_callback: None,
+                    ..Default::default()
                 },
             )
             .await

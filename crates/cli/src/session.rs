@@ -172,7 +172,9 @@ impl SessionWriter {
         let file = OpenOptions::new()
             .append(true)
             .open(path)
-            .with_context(|| format!("failed to open session file for append: {}", path.display()))?;
+            .with_context(|| {
+                format!("failed to open session file for append: {}", path.display())
+            })?;
         let writer = BufWriter::new(file);
         Ok(SessionWriter {
             writer,
@@ -195,10 +197,11 @@ impl SessionWriter {
 
     /// Append an arbitrary session event.
     pub fn append_event(&mut self, event: &SessionEvent) -> Result<()> {
-        let line =
-            serde_json::to_string(event).context("failed to serialize session event")?;
+        let line = serde_json::to_string(event).context("failed to serialize session event")?;
         writeln!(self.writer, "{}", line).context("failed to write session event")?;
-        self.writer.flush().context("failed to flush session event")?;
+        self.writer
+            .flush()
+            .context("failed to flush session event")?;
         Ok(())
     }
 
@@ -463,8 +466,7 @@ fn load_latest_session_in_dir(dir: &Path) -> Result<Option<SessionFile>> {
     // Prefer interrupted .jsonl sessions (crash recovery)
     for entry in &entries {
         let path = entry.path();
-        if path.extension().map(|e| e == "jsonl").unwrap_or(false) && is_interrupted_jsonl(&path)
-        {
+        if path.extension().map(|e| e == "jsonl").unwrap_or(false) && is_interrupted_jsonl(&path) {
             if let Ok(session) = SessionFile::load(&path) {
                 return Ok(Some(session));
             }
@@ -1021,7 +1023,11 @@ mod tests {
         };
         writeln!(file, "{}", serde_json::to_string(&msg_event).unwrap()).unwrap();
         // Truncated line
-        writeln!(file, "{{\"type\":\"assistant_message\",\"message\":{{\"role\":\"as").unwrap();
+        writeln!(
+            file,
+            "{{\"type\":\"assistant_message\",\"message\":{{\"role\":\"as"
+        )
+        .unwrap();
         drop(file);
 
         let session = load_from_jsonl(&path).unwrap();
@@ -1068,8 +1074,9 @@ mod tests {
         let session = load_from_jsonl(&path).unwrap();
         // After CompactBoundary, old messages are replaced by summary + new message
         assert_eq!(session.messages.len(), 2);
-        assert!(session.messages[0].content[0]
-            .eq(&ContentBlock::text("[Compaction Summary] User discussed file structure.")));
+        assert!(session.messages[0].content[0].eq(&ContentBlock::text(
+            "[Compaction Summary] User discussed file structure."
+        )));
         assert_eq!(session.messages[1].role, Role::User);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -1259,7 +1266,8 @@ mod tests {
 
         // Resume by appending
         let mut sw = SessionWriter::open_append(&path).unwrap();
-        sw.append_message(&Message::user("resumed message")).unwrap();
+        sw.append_message(&Message::user("resumed message"))
+            .unwrap();
         sw.finish().unwrap();
 
         // Verify full content

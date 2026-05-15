@@ -69,12 +69,17 @@ For `Stop`, the input SHALL additionally include:
 For `Notification`, the input SHALL additionally include:
 - `message` (string): notification text
 
-For `SessionStart`, the input SHALL include:
+For `SessionStart`, the input SHALL additionally include:
 - `event` (string): `"SessionStart"`
+- `model` (string): active model name
+- `permission_mode` (string): active permission mode
 
-For `SessionEnd`, the input SHALL include:
+For `SessionEnd`, the input SHALL additionally include:
 - `event` (string): `"SessionEnd"`
-- session end reason
+- `reason` (string): session end reason
+- `duration_secs` (number): elapsed session duration in seconds
+- `total_cost_usd` (number): cumulative tracked session cost in USD
+- `messages_count` (number): number of messages in the session transcript
 
 #### Scenario: PreToolUse input format
 - **WHEN** a PreToolUse hook fires for tool "Bash" with input `{"command": "ls"}`
@@ -86,11 +91,11 @@ For `SessionEnd`, the input SHALL include:
 
 #### Scenario: SessionStart hook input format
 - **WHEN** a SessionStart hook fires for a session in `/workspace`
-- **THEN** stdin SHALL contain a JSON object with `cwd`, `session_id`, and `event: "SessionStart"`
+- **THEN** stdin SHALL contain a JSON object with `cwd`, `session_id`, `event: "SessionStart"`, `model`, and `permission_mode`
 
 #### Scenario: SessionEnd hook input format
 - **WHEN** a SessionEnd hook fires because a session completed normally
-- **THEN** stdin SHALL contain a JSON object with `cwd`, `session_id`, `event: "SessionEnd"`, and a session end reason
+- **THEN** stdin SHALL contain a JSON object with `cwd`, `session_id`, `event: "SessionEnd"`, `reason`, `duration_secs`, `total_cost_usd`, and `messages_count`
 
 ### Requirement: Hook timeout enforcement
 The system SHALL enforce a timeout on hook command execution. The default timeout SHALL be 10 seconds. If a hook config specifies a `timeout` field, that value (in seconds) SHALL be used instead. When a hook exceeds its timeout, the process SHALL be killed and the hook SHALL be treated as a non-blocking failure.
@@ -154,10 +159,18 @@ When multiple hooks match the same event, the system SHALL execute them sequenti
 - **THEN** hook A SHALL execute before hook B
 
 ### Requirement: Session lifecycle hook execution
-The `HookRunner` SHALL execute `SessionStart` and `SessionEnd` hooks using the same command execution, timeout, environment, and JSON stdin mechanisms as other hook events.
+The `HookRunner` SHALL execute `SessionStart` and `SessionEnd` hooks using the same command execution, timeout, environment, JSON stdin, and matcher handling mechanisms as other hook events. The CLI SHALL trigger `SessionStart` once after session configuration is resolved and SHALL trigger `SessionEnd` once on normal session shutdown.
+
+#### Scenario: CLI fires SessionStart
+- **WHEN** a CLI session begins and SessionStart hooks are configured
+- **THEN** the matching SessionStart hooks SHALL execute before user prompts are processed
+
+#### Scenario: CLI fires SessionEnd
+- **WHEN** a CLI session exits normally and SessionEnd hooks are configured
+- **THEN** the matching SessionEnd hooks SHALL execute with final session metadata
 
 ### Requirement: Once hook execution
-When a matching hook has `once: true`, the `HookRunner` SHALL execute that hook at most once per session. Subsequent matching events in the same session SHALL skip that hook.
+When a matching hook has `once: true`, the `HookRunner` SHALL execute that hook at most once per session. Subsequent matching events in the same session SHALL skip that hook. Once execution state SHALL be scoped to the `HookRunner` instance and SHALL not persist across process restarts.
 
 #### Scenario: Once hook runs once
 - **WHEN** a `SessionStart` hook with `once: true` matches twice in the same session

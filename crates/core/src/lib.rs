@@ -1,6 +1,7 @@
 pub mod claude_md;
 pub mod compaction;
 pub mod config;
+pub mod cost;
 pub mod custom_agents;
 pub mod file_state_cache;
 pub mod git;
@@ -8,6 +9,7 @@ pub mod hooks;
 pub mod mcp_config;
 pub mod memory;
 pub mod message;
+pub mod migration;
 pub mod model;
 pub mod permission;
 pub mod session;

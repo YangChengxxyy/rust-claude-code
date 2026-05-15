@@ -201,7 +201,7 @@ impl HookRunner {
         }
     }
 
-    pub async fn run_session_start(&self, session_id: &str) {
+    pub async fn run_session_start(&self, session_id: &str, model: &str, permission_mode: &str) {
         let matching = self.get_matching_hook_entries(&HookEvent::SessionStart, None);
         if matching.is_empty() {
             return;
@@ -213,6 +213,8 @@ impl HookRunner {
                 cwd: self.cwd.to_string_lossy().to_string(),
             },
             event: HookEvent::SessionStart.to_string(),
+            model: model.to_string(),
+            permission_mode: permission_mode.to_string(),
         })
         .unwrap_or_default();
 
@@ -223,7 +225,14 @@ impl HookRunner {
         }
     }
 
-    pub async fn run_session_end(&self, reason: &str, session_id: &str) {
+    pub async fn run_session_end(
+        &self,
+        reason: &str,
+        session_id: &str,
+        duration_secs: u64,
+        total_cost_usd: f64,
+        messages_count: usize,
+    ) {
         let matching = self.get_matching_hook_entries(&HookEvent::SessionEnd, None);
         if matching.is_empty() {
             return;
@@ -236,6 +245,9 @@ impl HookRunner {
             },
             event: HookEvent::SessionEnd.to_string(),
             reason: reason.to_string(),
+            duration_secs,
+            total_cost_usd,
+            messages_count,
         })
         .unwrap_or_default();
 
@@ -875,8 +887,12 @@ mod tests {
         );
         hooks.get_mut("SessionStart").unwrap()[0].hooks[0].once = true;
         let runner = HookRunner::new(hooks, PathBuf::from("/tmp"));
-        runner.run_session_start("").await;
-        runner.run_session_start("").await;
+        runner
+            .run_session_start("", "claude-sonnet-4-6", "Default")
+            .await;
+        runner
+            .run_session_start("", "claude-sonnet-4-6", "Default")
+            .await;
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "run");
@@ -918,8 +934,12 @@ mod tests {
             }],
         );
         let runner = HookRunner::new(hooks, PathBuf::from("/tmp"));
-        runner.run_session_start("session-123").await;
-        runner.run_session_end("completed", "session-123").await;
+        runner
+            .run_session_start("session-123", "claude-sonnet-4-6", "Default")
+            .await;
+        runner
+            .run_session_end("completed", "session-123", 42, 0.125, 7)
+            .await;
 
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "startend");

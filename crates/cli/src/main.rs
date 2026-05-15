@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
@@ -8,6 +9,7 @@ use rust_claude_api::AnthropicClient;
 use rust_claude_core::{
     claude_md,
     config::{Config, ConfigError, ConfigOverrides, ConfigSource, Provider, Theme},
+    cost::{calculate_cost, pricing_family, BudgetStatus, CostTracker},
     custom_agents::CustomAgentRegistry,
     git::collect_git_context,
     hooks::HooksConfig,
@@ -297,6 +299,19 @@ fn resolve_config(
     if cli.no_stream {
         overrides.stream.set(false, ConfigSource::Cli);
     }
+    if let Some(max_budget_usd) = merged_settings.max_budget_usd {
+        let source = if project_settings
+            .as_ref()
+            .and_then(|layer| layer.settings.max_budget_usd)
+            .is_some()
+        {
+            ConfigSource::ProjectSettings
+        } else {
+            ConfigSource::UserConfig
+        };
+        overrides.max_budget_usd.set(Some(max_budget_usd), source);
+    }
+
     if let Some(theme) = cli.theme.as_deref() {
         let theme = match theme {
             "dark" => Theme::Dark,
@@ -612,6 +627,7 @@ async fn main() -> Result<()> {
     };
 
     let app_state = Arc::new(Mutex::new(state));
+    let session_started_at = Instant::now();
 
     let claude_md_files = claude_md::discover_claude_md(&cwd);
     // Record discovered CLAUDE.md files as partial views in the file state cache.
@@ -654,8 +670,17 @@ async fn main() -> Result<()> {
         )))
     };
     if let Some(runner) = &hook_runner {
-        let session_id = { app_state.lock().await.session.id.clone() };
-        runner.run_session_start(&session_id).await;
+        let (session_id, model, permission_mode) = {
+            let state = app_state.lock().await;
+            (
+                state.session.id.clone(),
+                state.session.model.clone(),
+                format!("{:?}", state.permission_mode),
+            )
+        };
+        runner
+            .run_session_start(&session_id, &model, &permission_mode)
+            .await;
     }
 
     // Initialize MCP servers (if any configured)
@@ -884,16 +909,26 @@ async fn main() -> Result<()> {
             }
         };
 
+        warn_budget_if_needed_stderr(&app_state).await;
         finish_session_writer(&session_writer).await;
 
         if let Some(runner) = &hook_runner {
-            let session_id = { app_state.lock().await.session.id.clone() };
             let reason = if run_result.is_ok() {
                 "completed"
             } else {
                 "error"
             };
-            runner.run_session_end(reason, &session_id).await;
+            let (session_id, duration_secs, total_cost_usd, messages_count) =
+                session_end_metadata(&app_state, session_started_at).await;
+            runner
+                .run_session_end(
+                    reason,
+                    &session_id,
+                    duration_secs,
+                    total_cost_usd,
+                    messages_count,
+                )
+                .await;
         }
         Ok(run_result?)
     } else {
@@ -1559,6 +1594,112 @@ fn usage_to_u64(usage: &Usage) -> (u64, u64, u64, u64) {
     )
 }
 
+fn format_cost_report(usage: &Usage, model: &str, max_budget_usd: Option<f64>) -> String {
+    let pricing = rust_claude_core::cost::get_pricing(model);
+    let input_cost = (usage.input_tokens as f64 / 1_000_000.0) * pricing.input_per_million;
+    let output_cost = (usage.output_tokens as f64 / 1_000_000.0) * pricing.output_per_million;
+    let cache_read_cost =
+        (usage.cache_read_input_tokens as f64 / 1_000_000.0) * pricing.cache_read_per_million;
+    let cache_creation_cost = (usage.cache_creation_input_tokens as f64 / 1_000_000.0)
+        * pricing.cache_creation_per_million;
+    let total = calculate_cost(usage, model);
+    let mut text = format!(
+        "Session usage:
+  model: {} ({})
+  input_tokens: {} (${:.6})
+  output_tokens: {} (${:.6})
+  cache_read_input_tokens: {} (${:.6})
+  cache_creation_input_tokens: {} (${:.6})
+  estimated_cost_usd: ${:.6}",
+        model,
+        pricing_family(model),
+        usage.input_tokens,
+        input_cost,
+        usage.output_tokens,
+        output_cost,
+        usage.cache_read_input_tokens,
+        cache_read_cost,
+        usage.cache_creation_input_tokens,
+        cache_creation_cost,
+        total
+    );
+    if let Some(max_budget_usd) = max_budget_usd {
+        text.push_str(&format!(
+            "
+  max_budget_usd: ${max_budget_usd:.6}"
+        ));
+        match CostTracker::from_total(total, Some(max_budget_usd)).check_budget() {
+            BudgetStatus::Ok => text.push_str(
+                "
+  budget_status: ok",
+            ),
+            BudgetStatus::Warning { remaining_usd } => {
+                text.push_str(&format!(
+                    "
+  budget_status: warning (${remaining_usd:.6} remaining)"
+                ));
+            }
+            BudgetStatus::Exceeded { over_usd } => {
+                text.push_str(&format!(
+                    "
+  budget_status: exceeded (${over_usd:.6} over)"
+                ));
+            }
+        }
+    }
+    text
+}
+
+async fn session_end_metadata(
+    app_state: &Arc<Mutex<AppState>>,
+    started_at: Instant,
+) -> (String, u64, f64, usize) {
+    let state = app_state.lock().await;
+    let total_cost_usd = calculate_cost(&state.total_usage, &state.session.model);
+    (
+        state.session.id.clone(),
+        started_at.elapsed().as_secs(),
+        total_cost_usd,
+        state.messages.len(),
+    )
+}
+
+fn budget_warning_message(
+    usage: &Usage,
+    model: &str,
+    max_budget_usd: Option<f64>,
+) -> Option<String> {
+    let max_budget_usd = max_budget_usd?;
+    match CostTracker::from_total(calculate_cost(usage, model), Some(max_budget_usd)).check_budget()
+    {
+        BudgetStatus::Ok => None,
+        BudgetStatus::Warning { remaining_usd } => {
+            Some(format!("Budget warning: ${remaining_usd:.6} remaining"))
+        }
+        BudgetStatus::Exceeded { over_usd } => {
+            Some(format!("Budget exceeded: ${over_usd:.6} over limit"))
+        }
+    }
+}
+
+async fn budget_warning_for_state(app_state: &Arc<Mutex<AppState>>) -> Option<String> {
+    let (usage, model, max_budget_usd) = {
+        let state = app_state.lock().await;
+        (
+            state.total_usage.clone(),
+            state.session.model.clone(),
+            state.config.max_budget_usd,
+        )
+    };
+    budget_warning_message(&usage, &model, max_budget_usd)
+}
+
+async fn warn_budget_if_needed_stderr(app_state: &Arc<Mutex<AppState>>) {
+    if let Some(message) = budget_warning_for_state(app_state).await {
+        eprintln!("{message}");
+    }
+}
+
 fn sum_message_usage(messages: &[Message]) -> Usage {
     let mut usage = Usage {
         input_tokens: 0,
@@ -1891,6 +2032,7 @@ async fn run_tui(
     plugin_manager: Arc<Mutex<PluginManager>>,
     session_writer: Option<Arc<Mutex<Box<dyn rust_claude_sdk::output::SessionPersistence>>>>,
 ) -> Result<()> {
+    let session_started_at = Instant::now();
     let (model, model_setting, permission_mode, git_branch) = {
         let state = app_state.lock().await;
         (
@@ -2521,19 +2663,16 @@ async fn run_tui(
                     worker_bridge.send_config_info(&provenance).await;
                 }
                 UserCommand::ShowCost => {
-                    let state = worker_state.lock().await;
-                    let usage = &state.total_usage;
-                    let est = (usage.input_tokens as f64 * 0.000_003_f64)
-                        + (usage.output_tokens as f64 * 0.000_015_f64);
+                    let (usage, model, max_budget_usd) = {
+                        let state = worker_state.lock().await;
+                        (
+                            state.total_usage.clone(),
+                            state.session.model.clone(),
+                            state.config.max_budget_usd,
+                        )
+                    };
                     worker_bridge
-                        .send_assistant_message(&format!(
-                            "Session usage:\n  input_tokens: {}\n  output_tokens: {}\n  cache_read_input_tokens: {}\n  cache_creation_input_tokens: {}\n  estimated_cost_usd: ${:.4}",
-                            usage.input_tokens,
-                            usage.output_tokens,
-                            usage.cache_read_input_tokens,
-                            usage.cache_creation_input_tokens,
-                            est
-                        ))
+                        .send_assistant_message(&format_cost_report(&usage, &model, max_budget_usd))
                         .await;
                 }
                 UserCommand::ShowHooks => {
@@ -2728,6 +2867,11 @@ async fn run_tui(
                                     .join("\n");
                                 if !text.is_empty() {
                                     worker_bridge_clone.send_assistant_message(&text).await;
+                                }
+                                if let Some(message) =
+                                    budget_warning_for_state(&worker_state_clone).await
+                                {
+                                    worker_bridge_clone.send_assistant_message(&message).await;
                                 }
                             }
                             Err(error) => {
@@ -3088,13 +3232,22 @@ async fn run_tui(
         .await;
     finish_session_writer(&session_writer).await;
     if let Some(runner) = &hook_runner {
-        let session_id = { app_state.lock().await.session.id.clone() };
         let reason = if run_result.is_ok() {
             "tui_exit"
         } else {
             "error"
         };
-        runner.run_session_end(reason, &session_id).await;
+        let (session_id, duration_secs, total_cost_usd, messages_count) =
+            session_end_metadata(&app_state, session_started_at).await;
+        runner
+            .run_session_end(
+                reason,
+                &session_id,
+                duration_secs,
+                total_cost_usd,
+                messages_count,
+            )
+            .await;
     }
     Ok(run_result?)
 }
@@ -3927,5 +4080,31 @@ mod tests {
         }
         let error = collect_review_input(std::path::Path::new("."), Some("123")).unwrap_err();
         assert!(error.to_string().contains("PR lookup requires `gh`"));
+    }
+    #[test]
+    fn format_cost_report_includes_cache_pricing_details() {
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_creation_input_tokens: 1_000_000,
+            cache_read_input_tokens: 1_000_000,
+        };
+        let report = format_cost_report(&usage, "claude-haiku-4-5", None);
+        assert!(report.contains("model: claude-haiku-4-5 (haiku)"));
+        assert!(report.contains("cache_read_input_tokens: 1000000 ($0.030000)"));
+        assert!(report.contains("cache_creation_input_tokens: 1000000 ($0.300000)"));
+        assert!(report.contains("estimated_cost_usd: $1.830000"));
+    }
+
+    #[test]
+    fn budget_warning_message_reports_exceeded_budget() {
+        let usage = Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        };
+        let message = budget_warning_message(&usage, "claude-sonnet-4-6", Some(1.0)).unwrap();
+        assert_eq!(message, "Budget exceeded: $2.000000 over limit");
     }
 }

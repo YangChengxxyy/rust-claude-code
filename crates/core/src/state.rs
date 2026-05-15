@@ -472,6 +472,7 @@ mod tests {
             stream: true,
             theme: crate::config::Theme::Dark,
             fallback_model: None,
+            max_budget_usd: None,
             provenance: crate::config::ConfigProvenance::default(),
         };
 

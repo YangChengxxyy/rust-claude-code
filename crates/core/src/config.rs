@@ -52,6 +52,8 @@ pub struct Config {
     pub theme: Theme,
     #[serde(default)]
     pub fallback_model: Option<String>,
+    #[serde(default, rename = "maxBudgetUsd")]
+    pub max_budget_usd: Option<f64>,
     #[serde(default)]
     pub provenance: ConfigProvenance,
 }
@@ -104,6 +106,7 @@ pub struct ConfigProvenance {
     pub stream: ConfigSource,
     pub theme: ConfigSource,
     pub fallback_model: ConfigSource,
+    pub max_budget_usd: ConfigSource,
 }
 
 impl Default for ConfigProvenance {
@@ -120,6 +123,7 @@ impl Default for ConfigProvenance {
             stream: ConfigSource::Default,
             theme: ConfigSource::Default,
             fallback_model: ConfigSource::Default,
+            max_budget_usd: ConfigSource::Default,
         }
     }
 }
@@ -151,6 +155,7 @@ impl Config {
 
     pub fn load() -> Result<Self, ConfigError> {
         let config_path = Self::config_path()?;
+        crate::migration::MigrationRunner::default().run_pending(&config_path)?;
 
         if config_path.exists() {
             let content = std::fs::read_to_string(&config_path)?;
@@ -196,6 +201,9 @@ impl Config {
             if raw.fallback_model.is_some() {
                 provenance.fallback_model = ConfigSource::UserConfig;
             }
+            if raw.max_budget_usd.is_some() {
+                provenance.max_budget_usd = ConfigSource::UserConfig;
+            }
 
             Ok(Config {
                 api_key,
@@ -211,6 +219,7 @@ impl Config {
                 stream: raw.stream.unwrap_or_else(default_true),
                 theme: raw.theme.unwrap_or_default(),
                 fallback_model: raw.fallback_model,
+                max_budget_usd: raw.max_budget_usd,
                 provenance,
             })
         } else {
@@ -230,6 +239,7 @@ impl Config {
                 stream: true,
                 theme: Theme::Dark,
                 fallback_model: None,
+                max_budget_usd: None,
                 provenance: ConfigProvenance::default(),
             })
         }
@@ -288,6 +298,7 @@ impl Config {
             stream: Some(self.stream),
             theme: Some(self.theme),
             fallback_model: self.fallback_model.clone(),
+            max_budget_usd: self.max_budget_usd,
         };
         let content = serde_json::to_string_pretty(&raw)?;
         std::fs::write(&config_path, content)?;
@@ -318,6 +329,7 @@ impl Config {
             stream: true,
             theme: Theme::Dark,
             fallback_model: None,
+            max_budget_usd: None,
             provenance: ConfigProvenance::default(),
         }
     }
@@ -371,6 +383,7 @@ pub struct ConfigOverrides {
     pub stream: ResolvedField<bool>,
     pub theme: ResolvedField<Theme>,
     pub fallback_model: ResolvedField<Option<String>>,
+    pub max_budget_usd: ResolvedField<Option<f64>>,
 }
 
 impl Config {
@@ -441,6 +454,13 @@ impl Config {
                 .source
                 .unwrap_or(ConfigSource::Default);
         }
+        if let Some(value) = overrides.max_budget_usd.value {
+            self.max_budget_usd = value;
+            self.provenance.max_budget_usd = overrides
+                .max_budget_usd
+                .source
+                .unwrap_or(ConfigSource::Default);
+        }
         self
     }
 }
@@ -473,6 +493,12 @@ struct RawConfig {
     theme: Option<Theme>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fallback_model: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "maxBudgetUsd"
+    )]
+    max_budget_usd: Option<f64>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -485,6 +511,8 @@ pub enum ConfigError {
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("Migration error: {0}")]
+    Migration(#[from] crate::migration::MigrationError),
     #[error("Conflicting provider environment flags: CLAUDE_CODE_USE_BEDROCK and CLAUDE_CODE_USE_VERTEX are both enabled")]
     ConflictingProviderEnv,
 }
@@ -661,6 +689,7 @@ mod tests {
             stream: false,
             theme: Theme::Light,
             fallback_model: None,
+            max_budget_usd: None,
             provenance: ConfigProvenance::default(),
         };
 

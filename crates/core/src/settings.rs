@@ -34,6 +34,9 @@ pub struct ClaudeSettings {
     /// MCP server definitions keyed by server name.
     #[serde(default, rename = "mcpServers")]
     pub mcp_servers: McpServersConfig,
+
+    #[serde(default, rename = "maxBudgetUsd")]
+    pub max_budget_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -221,6 +224,7 @@ impl ClaudeSettings {
             permissions: SettingsPermissions { allow, deny },
             hooks,
             mcp_servers,
+            max_budget_usd: high.max_budget_usd.or(low.max_budget_usd),
         }
     }
 }

@@ -184,6 +184,8 @@ pub struct SessionStartInput {
     #[serde(flatten)]
     pub base: BaseHookInput,
     pub event: String,
+    pub model: String,
+    pub permission_mode: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -192,6 +194,9 @@ pub struct SessionEndInput {
     pub base: BaseHookInput,
     pub event: String,
     pub reason: String,
+    pub duration_secs: u64,
+    pub total_cost_usd: f64,
+    pub messages_count: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -419,11 +424,15 @@ mod tests {
                 cwd: "/repo".into(),
             },
             event: HookEvent::SessionStart.to_string(),
+            model: "claude-sonnet-4-6".into(),
+            permission_mode: "Default".into(),
         };
         let json = serde_json::to_value(&start).unwrap();
         assert_eq!(json["session_id"], "s");
         assert_eq!(json["cwd"], "/repo");
         assert_eq!(json["event"], "SessionStart");
+        assert_eq!(json["model"], "claude-sonnet-4-6");
+        assert_eq!(json["permission_mode"], "Default");
 
         let end = SessionEndInput {
             base: BaseHookInput {
@@ -432,9 +441,15 @@ mod tests {
             },
             event: HookEvent::SessionEnd.to_string(),
             reason: "completed".into(),
+            duration_secs: 42,
+            total_cost_usd: 0.125,
+            messages_count: 7,
         };
         let json = serde_json::to_value(&end).unwrap();
         assert_eq!(json["event"], "SessionEnd");
         assert_eq!(json["reason"], "completed");
+        assert_eq!(json["duration_secs"], 42);
+        assert_eq!(json["total_cost_usd"], 0.125);
+        assert_eq!(json["messages_count"], 7);
     }
 }

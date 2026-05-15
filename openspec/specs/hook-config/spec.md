@@ -98,3 +98,10 @@ The system SHALL recognize an optional `updatedInput` object in a `PreToolUse` h
 #### Scenario: Ignore non-object updatedInput
 - **WHEN** a PreToolUse hook outputs `{"decision": "approve", "updatedInput": "invalid"}`
 - **THEN** the system SHALL ignore `updatedInput` and treat the hook response as approved without input mutation
+
+### Requirement: Hook once default compatibility
+Hook configuration parsing SHALL treat a missing `once` field as `false` and SHALL preserve existing hook configurations that do not specify `once`.
+
+#### Scenario: Existing hook config without once
+- **WHEN** settings.json contains a command hook with no `once` field
+- **THEN** the parsed hook config SHALL set `once` to false

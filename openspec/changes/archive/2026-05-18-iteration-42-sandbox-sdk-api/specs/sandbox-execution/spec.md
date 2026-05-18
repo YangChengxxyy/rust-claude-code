@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Sandbox configuration controls tool isolation
 The system SHALL expose sandbox configuration with enabled state, allowed filesystem paths, network policy, and sandbox-aware Bash approval behavior. Sandboxing SHALL be disabled by default and SHALL be configurable through runtime config and CLI overrides.
@@ -57,6 +57,8 @@ The system SHALL apply sandbox network policy to sandboxed tool executions witho
 - **WHEN** sandboxing is enabled with network policy set to allow
 - **THEN** sandboxed Bash commands SHALL NOT be blocked by sandbox network policy solely because they attempt outbound network access
 
+## ADDED Requirements
+
 ### Requirement: Sandbox adapters are selected by platform
 The system SHALL provide platform-specific sandbox adapters and select the active adapter at runtime based on host platform and runtime availability.
 
@@ -82,14 +84,3 @@ The system SHALL store effective sandbox configuration in shared application/ses
 #### Scenario: Bash has no application state
 - **WHEN** Bash executes without application state in its `ToolContext`
 - **THEN** Bash SHALL preserve existing unsandboxed behavior unless a future direct sandbox context is explicitly supplied
-
-### Requirement: Sandbox-aware Bash auto-approval is configurable
-The system SHALL support `autoAllowBashIfSandboxed` so Bash commands running inside an active sandbox can skip normal confirmation when policy allows it.
-
-#### Scenario: Sandboxed Bash is auto-approved
-- **WHEN** sandboxing is active and `autoAllowBashIfSandboxed` is enabled
-- **THEN** Bash permission checks SHALL allow the command without prompting unless an explicit deny rule or Auto safety failure applies
-
-#### Scenario: Unsandboxed Bash is not auto-approved by sandbox setting
-- **WHEN** sandboxing is disabled and `autoAllowBashIfSandboxed` is enabled
-- **THEN** Bash permission checks SHALL use the normal permission mode behavior

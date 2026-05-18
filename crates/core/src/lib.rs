@@ -12,6 +12,7 @@ pub mod message;
 pub mod migration;
 pub mod model;
 pub mod permission;
+pub mod sandbox;
 pub mod session;
 pub mod settings;
 pub mod state;

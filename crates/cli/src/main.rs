@@ -18,6 +18,7 @@ use rust_claude_core::{
     message::{ContentBlock, Message, Role, Usage},
     model::get_runtime_main_loop_model,
     permission::PermissionMode,
+    sandbox::NetworkPolicy,
     session::{ContextSnapshot, SessionSummary},
     settings::{ClaudeSettings, ParsedPermissions, SettingsLayer},
     state::AppState,
@@ -107,6 +108,12 @@ struct Cli {
 
     #[arg(long = "no-stream")]
     no_stream: bool,
+
+    #[arg(long = "sandbox")]
+    sandbox: bool,
+
+    #[arg(long = "sandbox-no-network")]
+    sandbox_no_network: bool,
 
     #[arg(long = "theme", value_parser = ["dark", "light"])]
     theme: Option<String>,
@@ -298,6 +305,16 @@ fn resolve_config(
     }
     if cli.no_stream {
         overrides.stream.set(false, ConfigSource::Cli);
+    }
+    if cli.sandbox || cli.sandbox_no_network {
+        let mut sandbox = config.sandbox.clone();
+        if cli.sandbox {
+            sandbox.enabled = true;
+        }
+        if cli.sandbox_no_network {
+            sandbox.network = NetworkPolicy::Deny;
+        }
+        overrides.sandbox.set(sandbox, ConfigSource::Cli);
     }
     if let Some(max_budget_usd) = merged_settings.max_budget_usd {
         let source = if project_settings
@@ -528,6 +545,8 @@ async fn main() -> Result<()> {
         println!("model_setting: {}", resolved.model_setting);
         println!("max_tokens: {}", resolved.max_tokens);
         println!("stream: {}", resolved.stream);
+        println!("sandbox: {}", resolved.config.sandbox.enabled);
+        println!("sandbox_network: {:?}", resolved.config.sandbox.network);
         println!("permission_mode: {:?}", resolved.permission_mode);
         println!("max_turns: {:?}", resolved.max_turns);
         println!("model_source: {}", resolved.config.provenance.model);
@@ -3404,6 +3423,8 @@ mod tests {
             disallowed_tools: None,
             max_tokens: None,
             no_stream: false,
+            sandbox: false,
+            sandbox_no_network: false,
             theme: None,
             provider: None,
             thinking: false,
@@ -3441,6 +3462,25 @@ mod tests {
     }
 
     #[test]
+    fn resolve_config_cli_sandbox_overrides_defaults() {
+        let _g = env_lock();
+        let _reset = EnvReset::new();
+
+        let cli = Cli {
+            sandbox: true,
+            sandbox_no_network: true,
+            ..default_cli()
+        };
+        let config = Config::with_credential("test-key".to_string(), false);
+
+        let resolved = resolve_config(&cli, config, ClaudeSettings::default(), None).unwrap();
+
+        assert!(resolved.config.sandbox.enabled);
+        assert_eq!(resolved.config.sandbox.network, NetworkPolicy::Deny);
+        assert_eq!(resolved.config.provenance.sandbox, ConfigSource::Cli);
+    }
+
+    #[test]
     fn resolve_config_uses_project_permissions() {
         let _g = env_lock();
         let _reset = EnvReset::new();
@@ -3460,6 +3500,8 @@ mod tests {
             disallowed_tools: None,
             max_tokens: None,
             no_stream: false,
+            sandbox: false,
+            sandbox_no_network: false,
             theme: None,
             provider: None,
             thinking: false,
@@ -3507,6 +3549,8 @@ mod tests {
             disallowed_tools: None,
             max_tokens: None,
             no_stream: false,
+            sandbox: false,
+            sandbox_no_network: false,
             theme: None,
             provider: None,
             thinking: false,

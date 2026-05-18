@@ -14,6 +14,7 @@ pub mod monitor;
 pub mod notebook_edit_tool;
 pub mod plan_mode;
 pub mod registry;
+pub mod sandbox;
 pub mod task_tool;
 pub mod todo_write;
 pub mod tool;

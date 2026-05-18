@@ -473,6 +473,7 @@ mod tests {
             theme: crate::config::Theme::Dark,
             fallback_model: None,
             max_budget_usd: None,
+            sandbox: crate::sandbox::SandboxConfig::default(),
             provenance: crate::config::ConfigProvenance::default(),
         };
 

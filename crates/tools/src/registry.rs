@@ -31,6 +31,10 @@ impl ToolRegistry {
     where
         T: Tool + 'static,
     {
+        self.register_arc(Arc::new(tool));
+    }
+
+    pub fn register_arc(&self, tool: Arc<dyn Tool>) {
         let info = tool.info();
         let mut map = self.tools.write().unwrap();
         map.insert(
@@ -41,9 +45,13 @@ impl ToolRegistry {
                 should_defer: tool.should_defer(),
                 interrupt_behavior: tool.interrupt_behavior(),
                 info,
-                tool: Arc::new(tool),
+                tool,
             },
         );
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.read().unwrap().contains_key(name)
     }
 
     pub fn get(&self, name: &str) -> Option<RegisteredTool> {

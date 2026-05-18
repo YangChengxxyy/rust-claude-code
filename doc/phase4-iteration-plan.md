@@ -6,6 +6,10 @@
 >
 > 第四期核心目标：**补齐韧性和安全基础设施，提升性能关键路径，清扫遗留项。**
 
+> 最新核对: 2026-05-18
+>
+> 代码实现已超过本文最初规划状态。迭代 35-40 已基本落地；迭代 41 已移出当前系统范围，当前主要剩余工作集中在迭代 42-43。
+
 ---
 
 ## 0. 当前状态概览
@@ -16,6 +20,8 @@
 
 **第四期起点**：迭代 1-32 基本完成（90%+），功能覆盖原版约 55%。
 
+**2026-05-18 最新状态**：迭代 35-40 已基本完成或已有主体实现。迭代 41（OAuth / `@include`）已明确不纳入当前系统范围；第四期剩余主要集中在 Sandbox / SDK 公共 API、以及遗留项清扫。按当前代码口径，距离第四期计划收口约剩 **2 个主要迭代**。
+
 对比原版 Claude Code 后发现以下三类差距：
 
 | 差距类型 | 典型表现 | 影响 |
@@ -24,7 +30,7 @@
 | **安全差距** | 无信任对话框、无沙箱隔离、无文件状态过期检测 | 恶意 settings.json 可执行任意命令 |
 | **性能差距** | 工具等待完整响应后执行、所有工具 schema 占用 prompt、无文件缓存 | 多工具延迟高、prompt 空间浪费 |
 
-此外还有 Phase 2-3 中的零散遗留项（TUI Task 面板、Hook 补全等）和计划外缺失（OAuth、@include、成本追踪等）。
+此外还有 Phase 2-3 中的零散遗留项（TUI Task 面板、Hook 补全等）和计划外缺失（成本追踪等）。OAuth 与 `@include` 已从当前系统范围中移除，不作为后续交付目标。
 
 ---
 
@@ -35,7 +41,7 @@
 ```
 阶段 A（迭代 35-37）: 韧性与安全     — 让系统不崩溃、不被利用
 阶段 B（迭代 38-40）: 性能与补齐     — 让关键路径更快、功能更完整
-阶段 C（迭代 41-43）: 生态与清扫     — 补齐认证生态、清扫所有遗留
+阶段 C（迭代 42-43）: 安全/SDK 与清扫 — 补齐沙箱、SDK 公共 API，清扫遗留
 ```
 
 ---
@@ -46,7 +52,13 @@
 
 ### 迭代 35：响应式压缩 + 模型降级
 
-**状态**: 规划中
+**状态**: 基本完成
+
+**完成记录（2026-05-18 核对）**:
+
+- `api` crate 已新增 `ApiError::PromptTooLong` 与 `ApiError::Overloaded`，并解析 HTTP 400 `invalid_request_error` 与 HTTP 529。
+- `sdk/src/agent_loop.rs` 已接入 prompt-too-long 与 overloaded 场景的恢复/降级路径，并有对应测试覆盖。
+- `Config`/运行时路径已有 fallback model 相关处理。
 
 **问题**: 当前仅有主动压缩（请求前按阈值检查），但 token 估算基于 chars/4 启发式，可能不准确。API 返回 `prompt-too-long` 或 `invalid_request_error` 时，系统直接向用户报错并停止，无恢复能力。此外，当模型过载返回连续 529 时，系统也只能等待重试，没有降级到备用模型的能力。
 
@@ -96,7 +108,14 @@
 
 ### 迭代 36：信任对话框 + 文件状态缓存
 
-**状态**: 规划中
+**状态**: 基本完成
+
+**完成记录（2026-05-18 核对）**:
+
+- `core/src/trust.rs` 已实现 `TrustManager` 与目录信任状态持久化。
+- `cli/src/main.rs` 已在启动流程中接入信任检查。
+- `core/src/file_state_cache.rs` 已实现文件状态缓存，并通过 `AppState.file_state_cache` 挂载。
+- 文件工具已具备读取状态记录与过期检查的基础设施。
 
 **问题**: 当前在不受信任的目录中运行时，`.claude/settings.json` 中的 `apiKeyHelper` 会被无条件执行，可能被恶意项目利用执行任意命令。此外，FileEdit/FileWrite 不检查目标文件是否在上次读取后被外部修改，可能导致覆盖用户的并发编辑。
 
@@ -153,7 +172,14 @@
 
 ### 迭代 37：JSONL 会话格式 + 崩溃恢复
 
-**状态**: 规划中
+**状态**: 基本完成
+
+**完成记录（2026-05-18 核对）**:
+
+- `cli/src/session.rs` 已迁移为 JSONL 追加日志格式，新会话使用 `.jsonl`。
+- 保留旧 `.json` 会话读取兼容。
+- `SessionWriter` 支持 header、message、usage、permission、compact boundary、session end 等事件追加。
+- 会话摘要已包含 interrupted 标记，支持崩溃/中断会话识别。
 
 **问题**: 当前会话以 JSON 完整快照存储，每次保存需序列化整个消息历史。随着对话增长，保存开销线性增加。此外如果进程崩溃或被 kill，最后一轮交互完全丢失。
 
@@ -214,7 +240,14 @@
 
 ### 迭代 38：流式工具执行
 
-**状态**: 规划中
+**状态**: 基本完成
+
+**完成记录（2026-05-18 核对）**:
+
+- `sdk/src/streaming_tool_executor.rs` 已实现 `StreamingToolExecutor`。
+- 支持并发安全工具后台执行、非并发工具串行锁、按原始顺序返回结果。
+- 支持 `CancellationToken` 中断、Bash 失败后的同级 Bash 取消，以及 `InterruptBehavior`。
+- `agent_loop` 已接入流式工具执行路径。
 
 **问题**: 当前 `collect_response_from_stream()` 等待完整 API 响应后，才由 `execute_tool_uses()` 统一执行所有工具。在模型生成多个工具调用的场景下（如连续 3 个 FileRead），第一个工具块可能在响应开始后数秒就已完整，但仍需等待最后一个工具块完成后才开始执行。原版使用 `StreamingToolExecutor` 在工具块完成后立即执行。
 
@@ -266,7 +299,14 @@
 
 ### 迭代 39：工具延迟加载
 
-**状态**: 规划中
+**状态**: 基本完成
+
+**完成记录（2026-05-18 核对）**:
+
+- `tools/src/tool_search.rs` 已实现 `ToolSearchTool`。
+- `Tool` / `ToolRegistry` 已支持 `should_defer`、延迟工具集合、搜索与 schema 估算。
+- `api` 请求类型已支持 deferred tool 表达。
+- `cli/src/main.rs` 已注册 `ToolSearchTool`。
 
 **问题**: 当前所有注册工具的完整 JSON Schema 都在每次 API 请求中发送。随着 MCP 工具和内置工具增加，工具定义占用大量 prompt 空间。原版通过 `shouldDefer` 标记低频工具，仅发送名称，模型按需通过 `ToolSearchTool` 加载完整 schema。
 
@@ -326,7 +366,14 @@
 
 ### 迭代 40：成本追踪 + 设置迁移 + Hook 补全
 
-**状态**: 规划中
+**状态**: 基本完成
+
+**完成记录（2026-05-18 核对）**:
+
+- `core/src/cost.rs` 已实现分模型、分缓存 token 的成本计算与 `CostTracker`。
+- `core/src/migration.rs` 已实现版本化迁移框架和默认迁移。
+- `core/src/hooks.rs` 与 `sdk/src/hooks.rs` 已支持 `SessionStart` / `SessionEnd` 和 once hook。
+- `cli/src/main.rs` 已在会话启动/结束路径触发对应 hook。
 
 **问题**: 三个独立但都不大的功能缺失：(1) 成本追踪使用硬编码费率，不区分模型和缓存 token；(2) 配置格式变更只能靠 `#[serde(default)]`，无法做复杂迁移；(3) Hook 系统缺少 SessionStart/SessionEnd 事件和 once 标志。
 
@@ -392,17 +439,24 @@
 
 ---
 
-## 4. 阶段 C：生态与清扫（迭代 41-43）
+## 4. 阶段 C：安全/SDK 与清扫（迭代 42-43）
 
 > 目标：补齐认证和指令系统，完善 SDK 和沙箱，清扫所有遗留项。
 
 ### 迭代 41：OAuth 认证 + @include 指令
 
-**状态**: 规划中
+**状态**: 不纳入当前系统范围
+
+**范围决策（2026-05-18）**:
+
+- 当前系统不考虑实现 OAuth 认证流程。
+- 当前系统不考虑实现 CLAUDE.md `@include` 递归引用。
+- `/login` / `/logout` 可保留为命令入口或兼容占位，但不作为第四期交付目标。
+- 本迭代不计入剩余迭代数量。
 
 **问题**: 当前认证仅支持 API key 和 Bearer token，无法通过 claude.ai 账号登录。CLAUDE.md 不支持 `@include` 指令，无法模块化管理项目指令。
 
-**目标**: 实现 OAuth 认证流程和 CLAUDE.md @include 引用。
+**目标**: 已取消。不再作为当前系统目标。
 
 **产出**:
 
@@ -456,7 +510,13 @@
 
 ### 迭代 42：沙箱隔离 + SDK 公共 API
 
-**状态**: 规划中
+**状态**: 未实现
+
+**当前缺口（2026-05-18 核对）**:
+
+- 尚未看到 `SandboxConfig`、`SandboxAdapter`、`sandbox-exec` 或 `bubblewrap` 适配层。
+- `PermissionMode::Auto` 也尚未实现，自动审批仍未落地。
+- `sdk/src/lib.rs` 目前只导出内部模块，尚未提供 `Session::builder()`、`SessionBuilder`、`ResponseStream` 等稳定公共 API。
 
 **问题**: Bash 工具直接通过 `tokio::process::Command` 执行，无任何隔离。恶意或意外的命令可能访问任意文件系统和网络。SDK crate 已存在但缺少干净的公共 API，第三方无法嵌入使用。
 
@@ -539,7 +599,15 @@
 
 ### 迭代 43：遗留项清扫
 
-**状态**: 规划中
+**状态**: 待完成
+
+**当前缺口（2026-05-18 核对）**:
+
+- TUI Task 视图面板需要确认/补齐。
+- WebSearch 当前主体为 Brave 后端，Tavily / SearXNG 多后端仍未实现。
+- TypeScript/TSX 语法高亮需要进一步细化。
+- `PermissionMode::Auto` 未实现。
+- `/plugin list` 已可用，但 `/plugin install` / `/plugin remove` 当前仍停留在 usage 提示；`PluginManager` 尚未提供安装/删除实现。
 
 **问题**: Phase 2-3 遗留了若干小项。单独不值得一个迭代，但累积影响可用性。
 
@@ -592,22 +660,22 @@
 ## 5. 阶段验收清单
 
 ### Stage A 验收（韧性与安全）
-- [ ] 超长上下文 API 错误时自动压缩恢复
-- [ ] 连续模型过载时自动降级到备用模型
-- [ ] 首次运行显示信任对话框，阻止未信任状态下的 apiKeyHelper 执行
-- [ ] 文件被外部修改后 FileEdit 拒绝覆盖
-- [ ] 会话以 JSONL 增量写入，崩溃后可恢复
+- [x] 超长上下文 API 错误时自动压缩恢复
+- [x] 连续模型过载时自动降级到备用模型
+- [x] 首次运行显示信任对话框，阻止未信任状态下的 apiKeyHelper 执行
+- [x] 文件被外部修改后 FileEdit 拒绝覆盖
+- [x] 会话以 JSONL 增量写入，崩溃后可恢复
 
 ### Stage B 验收（性能与补齐）
-- [ ] 多工具调用时，第一个工具在流式响应中即开始执行
-- [ ] 大量 MCP 工具时，初始请求 prompt 显著减少
-- [ ] `/cost` 显示分模型、分缓存类型的精确成本
-- [ ] 设置格式变更时自动迁移
-- [ ] SessionStart/SessionEnd hook 正常触发
+- [x] 多工具调用时，第一个工具在流式响应中即开始执行
+- [x] 大量 MCP 工具时，初始请求 prompt 显著减少
+- [x] `/cost` 显示分模型、分缓存类型的精确成本
+- [x] 设置格式变更时自动迁移
+- [x] SessionStart/SessionEnd hook 正常触发
 
-### Stage C 验收（生态与清扫）
-- [ ] `/login` 可通过 OAuth 登录 claude.ai 账号
-- [ ] CLAUDE.md 中 `@include` 正确引入外部文件
+### Stage C 验收（安全/SDK 与清扫）
+- [x] `/login` 可通过 OAuth 登录 claude.ai 账号 — 不纳入当前系统范围
+- [x] CLAUDE.md 中 `@include` 正确引入外部文件 — 不纳入当前系统范围
 - [ ] `--sandbox` 模式下 Bash 命令受限
 - [ ] SDK `Session` API 可独立使用
 - [ ] 所有 Phase 2-3 遗留项清零
@@ -646,9 +714,12 @@
 迭代 39 (工具延迟加载) ← 无强依赖
 迭代 40 (成本/迁移/Hook) ← 无依赖
 
-迭代 41 (OAuth + @include) ← 无依赖
+迭代 41 (OAuth + @include) ← 不纳入当前系统范围
 迭代 42 (沙箱 + SDK) ← 无依赖
 迭代 43 (遗留清扫) ← 建议在其他迭代之后
 ```
 
-Stage A 的三个迭代可并行开发。Stage B 中迭代 38 建议在 35 之后（因为都修改 agent_loop）。迭代 43 建议放在最后。
+Stage A 与 Stage B 已基本完成。当前建议按以下顺序收口：
+
+1. 迭代 42：优先补 SDK 公共 API，必要时并行设计 Sandbox 边界。
+2. 迭代 43：最后集中清扫插件 install/remove、Auto mode、WebSearch 多后端、Task 面板等遗留项。

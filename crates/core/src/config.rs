@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::sandbox::SandboxConfig;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Theme {
@@ -55,6 +57,8 @@ pub struct Config {
     #[serde(default, rename = "maxBudgetUsd")]
     pub max_budget_usd: Option<f64>,
     #[serde(default)]
+    pub sandbox: SandboxConfig,
+    #[serde(default)]
     pub provenance: ConfigProvenance,
 }
 
@@ -107,6 +111,7 @@ pub struct ConfigProvenance {
     pub theme: ConfigSource,
     pub fallback_model: ConfigSource,
     pub max_budget_usd: ConfigSource,
+    pub sandbox: ConfigSource,
 }
 
 impl Default for ConfigProvenance {
@@ -124,6 +129,7 @@ impl Default for ConfigProvenance {
             theme: ConfigSource::Default,
             fallback_model: ConfigSource::Default,
             max_budget_usd: ConfigSource::Default,
+            sandbox: ConfigSource::Default,
         }
     }
 }
@@ -204,6 +210,9 @@ impl Config {
             if raw.max_budget_usd.is_some() {
                 provenance.max_budget_usd = ConfigSource::UserConfig;
             }
+            if raw.sandbox.is_some() {
+                provenance.sandbox = ConfigSource::UserConfig;
+            }
 
             Ok(Config {
                 api_key,
@@ -220,6 +229,7 @@ impl Config {
                 theme: raw.theme.unwrap_or_default(),
                 fallback_model: raw.fallback_model,
                 max_budget_usd: raw.max_budget_usd,
+                sandbox: raw.sandbox.unwrap_or_default(),
                 provenance,
             })
         } else {
@@ -240,6 +250,7 @@ impl Config {
                 theme: Theme::Dark,
                 fallback_model: None,
                 max_budget_usd: None,
+                sandbox: SandboxConfig::default(),
                 provenance: ConfigProvenance::default(),
             })
         }
@@ -299,6 +310,7 @@ impl Config {
             theme: Some(self.theme),
             fallback_model: self.fallback_model.clone(),
             max_budget_usd: self.max_budget_usd,
+            sandbox: Some(self.sandbox.clone()),
         };
         let content = serde_json::to_string_pretty(&raw)?;
         std::fs::write(&config_path, content)?;
@@ -330,6 +342,7 @@ impl Config {
             theme: Theme::Dark,
             fallback_model: None,
             max_budget_usd: None,
+            sandbox: SandboxConfig::default(),
             provenance: ConfigProvenance::default(),
         }
     }
@@ -384,6 +397,7 @@ pub struct ConfigOverrides {
     pub theme: ResolvedField<Theme>,
     pub fallback_model: ResolvedField<Option<String>>,
     pub max_budget_usd: ResolvedField<Option<f64>>,
+    pub sandbox: ResolvedField<SandboxConfig>,
 }
 
 impl Config {
@@ -461,6 +475,10 @@ impl Config {
                 .source
                 .unwrap_or(ConfigSource::Default);
         }
+        if let Some(value) = overrides.sandbox.value {
+            self.sandbox = value;
+            self.provenance.sandbox = overrides.sandbox.source.unwrap_or(ConfigSource::Default);
+        }
         self
     }
 }
@@ -499,6 +517,8 @@ struct RawConfig {
         rename = "maxBudgetUsd"
     )]
     max_budget_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sandbox: Option<SandboxConfig>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -690,6 +710,7 @@ mod tests {
             theme: Theme::Light,
             fallback_model: None,
             max_budget_usd: None,
+            sandbox: SandboxConfig::default(),
             provenance: ConfigProvenance::default(),
         };
 
@@ -716,6 +737,7 @@ mod tests {
         assert_eq!(config.max_tokens, 16384);
         assert!(config.stream);
         assert_eq!(config.theme, Theme::Dark);
+        assert!(!config.sandbox.enabled);
     }
 
     #[test]

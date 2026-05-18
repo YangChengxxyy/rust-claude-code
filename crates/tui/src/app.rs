@@ -2560,20 +2560,20 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
             .map(|s| truncate(s, 120))
             .unwrap_or_default(),
         "FileRead" => input
-            .get("file_path")
+            .get("path")
             .and_then(|v| v.as_str())
             .unwrap_or("(unknown)")
             .to_string(),
         "FileEdit" => {
             let path = input
-                .get("file_path")
+                .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("(unknown)");
             format!("{path} (edit)")
         }
         "FileWrite" => {
             let path = input
-                .get("file_path")
+                .get("path")
                 .and_then(|v| v.as_str())
                 .unwrap_or("(unknown)");
             format!("{path} (write)")
@@ -2754,7 +2754,7 @@ fn extract_diff_info(
     match tool_name {
         "FileEdit" => {
             let file_path = input
-                .get("file_path")
+                .get("path")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             let old_string = input
@@ -2774,7 +2774,7 @@ fn extract_diff_info(
         }
         "FileWrite" => {
             let file_path = input
-                .get("file_path")
+                .get("path")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -4197,10 +4197,27 @@ mod tests {
         let truncated = truncate(&input, 199);
         assert_eq!(truncated, format!("{}...", "a".repeat(198)));
     }
+
+    #[test]
+    fn test_summarize_tool_input_uses_path_field_for_file_tools() {
+        assert_eq!(
+            summarize_tool_input("FileRead", &serde_json::json!({ "path": "src/main.rs" })),
+            "src/main.rs"
+        );
+        assert_eq!(
+            summarize_tool_input("FileEdit", &serde_json::json!({ "path": "src/lib.rs" })),
+            "src/lib.rs (edit)"
+        );
+        assert_eq!(
+            summarize_tool_input("FileWrite", &serde_json::json!({ "path": "src/new.rs" })),
+            "src/new.rs (write)"
+        );
+    }
+
     #[test]
     fn test_extract_diff_info_file_edit() {
         let input = serde_json::json!({
-            "file_path": "src/main.rs",
+            "path": "src/main.rs",
             "old_string": "hello",
             "new_string": "world",
             "replace_all": false
@@ -4218,7 +4235,7 @@ mod tests {
     #[test]
     fn test_extract_diff_info_file_edit_replace_all() {
         let input = serde_json::json!({
-            "file_path": "src/lib.rs",
+            "path": "src/lib.rs",
             "old_string": "foo",
             "new_string": "bar",
             "replace_all": true
@@ -4230,7 +4247,7 @@ mod tests {
     #[test]
     fn test_extract_diff_info_file_write() {
         let input = serde_json::json!({
-            "file_path": "new_file.txt",
+            "path": "new_file.txt",
             "content": "line 1\nline 2\nline 3"
         });
         let (diff_lines, is_file_tool, file_path, replace_all) =
@@ -4635,7 +4652,7 @@ mod tests {
     #[test]
     fn test_permission_dialog_diff_scroll_bounds() {
         let input = serde_json::json!({
-            "file_path": "test.rs",
+            "path": "test.rs",
             "old_string": "a\nb\nc",
             "new_string": "x\ny\nz"
         });

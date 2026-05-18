@@ -58,8 +58,9 @@ impl std::str::FromStr for ModeArg {
             "bypass" => Ok(ModeArg(PermissionMode::BypassPermissions)),
             "plan" => Ok(ModeArg(PermissionMode::Plan)),
             "dont-ask" => Ok(ModeArg(PermissionMode::DontAsk)),
+            "auto" => Ok(ModeArg(PermissionMode::Auto)),
             other => Err(format!(
-                "unknown mode '{other}'; valid modes: default, accept-edits, bypass, plan, dont-ask"
+                "unknown mode '{other}'; valid modes: default, accept-edits, bypass, plan, dont-ask, auto"
             )),
         }
     }
@@ -2052,13 +2053,14 @@ async fn run_tui(
     session_writer: Option<Arc<Mutex<Box<dyn rust_claude_sdk::output::SessionPersistence>>>>,
 ) -> Result<()> {
     let session_started_at = Instant::now();
-    let (model, model_setting, permission_mode, git_branch) = {
+    let (model, model_setting, permission_mode, git_branch, project_dir) = {
         let state = app_state.lock().await;
         (
             get_runtime_main_loop_model(&state.session.model_setting, state.permission_mode, false),
             state.session.model_setting.clone(),
             format!("{:?}", state.permission_mode),
             state.git_context.as_ref().map(|g| g.branch.clone()),
+            state.cwd.clone(),
         )
     };
 
@@ -2182,6 +2184,7 @@ async fn run_tui(
                         "bypass" => PermissionMode::BypassPermissions,
                         "plan" => PermissionMode::Plan,
                         "dont-ask" => PermissionMode::DontAsk,
+                        "auto" => PermissionMode::Auto,
                         _ => {
                             worker_bridge.send_error("Unknown mode request").await;
                             continue;
@@ -3213,6 +3216,7 @@ async fn run_tui(
         // Register /plugin commands
         {
             let pm_arc = app_plugin_manager.clone();
+            let plugin_project_dir = project_dir.clone();
             let _bridge = app_worker_bridge.clone();
             app.slash_registry.register(rust_claude_tui::slash::command(
                 "/plugin",
@@ -3237,6 +3241,50 @@ async fn run_tui(
                             }
                         }
                         rust_claude_tui::slash::SlashCommandResult::SystemMessage(lines.join("\n"))
+                    }
+                    Some(args_str) if args_str.starts_with("install ") => {
+                        let path = args_str.trim_start_matches("install").trim();
+                        if path.is_empty() {
+                            return rust_claude_tui::slash::SlashCommandResult::SystemMessage(
+                                "Usage: /plugin install <path>".into(),
+                            );
+                        }
+                        let mut pm_lock = pm_arc.blocking_lock();
+                        match pm_lock.install_from_path(
+                            &PathBuf::from(path),
+                            Some(plugin_project_dir.as_path()),
+                        ) {
+                            Ok(plugin) => {
+                                rust_claude_tui::slash::SlashCommandResult::SystemMessage(format!(
+                                    "Installed plugin {} v{}",
+                                    plugin.name, plugin.version
+                                ))
+                            }
+                            Err(error) => {
+                                rust_claude_tui::slash::SlashCommandResult::SystemMessage(format!(
+                                    "Failed to install plugin: {error}"
+                                ))
+                            }
+                        }
+                    }
+                    Some(args_str) if args_str.starts_with("remove ") => {
+                        let name = args_str.trim_start_matches("remove").trim();
+                        if name.is_empty() {
+                            return rust_claude_tui::slash::SlashCommandResult::SystemMessage(
+                                "Usage: /plugin remove <name>".into(),
+                            );
+                        }
+                        let mut pm_lock = pm_arc.blocking_lock();
+                        match pm_lock.remove_installed(name, Some(plugin_project_dir.as_path())) {
+                            Ok(()) => rust_claude_tui::slash::SlashCommandResult::SystemMessage(
+                                format!("Removed plugin {name}"),
+                            ),
+                            Err(error) => {
+                                rust_claude_tui::slash::SlashCommandResult::SystemMessage(format!(
+                                    "Failed to remove plugin: {error}"
+                                ))
+                            }
+                        }
                     }
                     _ => rust_claude_tui::slash::SlashCommandResult::SystemMessage(
                         "Usage: /plugin list | /plugin install <path> | /plugin remove <name>"

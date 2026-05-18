@@ -64,7 +64,7 @@ TaskTool's `create` and `update` commands SHALL be treated as non-read-only sinc
 - **THEN** the system SHALL deny the operation (Plan mode blocks non-read-only tools)
 
 ### Requirement: TUI Task panel displays tasks
-The TUI SHALL display tasks in the side panel (replacing the todo panel). Each task SHALL show its status icon, priority indicator, and content text.
+The TUI SHALL display tasks in the side panel while preserving the existing Todo side panel behavior. Each task SHALL show its ID, status icon, priority indicator, and content text.
 
 #### Scenario: Task panel shows status icons
 - **WHEN** tasks exist with various statuses (Pending, InProgress, Completed)
@@ -73,6 +73,14 @@ The TUI SHALL display tasks in the side panel (replacing the todo panel). Each t
 #### Scenario: Empty task panel
 - **WHEN** no tasks exist
 - **THEN** the panel SHALL display a "No tasks" placeholder message
+
+#### Scenario: Ctrl+T switches panel content
+- **WHEN** the user presses `Ctrl+T`
+- **THEN** the side panel SHALL switch between Todo and Task content modes
+
+#### Scenario: Tab visibility behavior remains unchanged
+- **WHEN** the user presses `Tab`
+- **THEN** the side panel visibility SHALL continue to toggle as it did before Task panel mode was added
 
 ### Requirement: Task updates propagate to TUI
 When tasks are created or updated via TaskTool, the system SHALL emit an event to update the TUI's task panel display.

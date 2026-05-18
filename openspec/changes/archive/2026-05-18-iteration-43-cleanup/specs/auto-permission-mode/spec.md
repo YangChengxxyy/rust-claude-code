@@ -1,4 +1,4 @@
-## ADDED Requirements
+## MODIFIED Requirements
 
 ### Requirement: Auto permission mode is selectable
 The system SHALL support an Auto permission mode through runtime configuration and the `--mode auto` CLI argument.

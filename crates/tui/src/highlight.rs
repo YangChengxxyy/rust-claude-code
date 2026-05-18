@@ -324,8 +324,6 @@ pub fn new_highlight_state(highlighter: &Highlighter) -> syntect::highlighting::
 // Task 2.4: Language resolution
 /// Resolve a language identifier to a SyntaxReference.
 /// Supports common aliases and falls back through multiple lookup strategies.
-/// For languages not in syntect defaults (e.g., TypeScript, TOML), maps to the
-/// closest available syntax (TypeScript→JavaScript).
 pub fn resolve_syntax<'a>(
     language: &str,
     syntax_set: &'a SyntaxSet,
@@ -335,7 +333,8 @@ pub fn resolve_syntax<'a>(
     // Map aliases to file-extension tokens that syntect knows about.
     // syntect's default set uses file extensions for token lookup.
     let token = match normalized.as_str() {
-        "ts" | "tsx" | "typescript" => "js", // TypeScript not in defaults, use JS
+        "ts" | "typescript" => "ts",
+        "tsx" | "typescriptreact" => "tsx",
         "py" | "python" => "py",
         "sh" | "shell" => "sh",
         "bash" | "zsh" => "bash",
@@ -356,6 +355,16 @@ pub fn resolve_syntax<'a>(
         .or_else(|| syntax_set.find_syntax_by_name(&normalized))
         // Then try by extension with original input
         .or_else(|| syntax_set.find_syntax_by_extension(&normalized))
+        // TypeScript/TSX are not guaranteed in older syntect defaults. Fall
+        // back to JavaScript only after all dedicated lookups fail.
+        .or_else(|| {
+            matches!(
+                normalized.as_str(),
+                "ts" | "typescript" | "tsx" | "typescriptreact"
+            )
+            .then(|| syntax_set.find_syntax_by_token("js"))
+            .flatten()
+        })
 }
 
 // Task 2.5: Full code block API
@@ -482,12 +491,24 @@ mod tests {
     }
 
     #[test]
-    fn test_alias_ts_to_javascript() {
-        // TypeScript not in syntect defaults, falls back to JavaScript
+    fn test_alias_ts_resolves_to_typescript_or_javascript_fallback() {
         let ss = syntax_set();
         let syntax = resolve_syntax("ts", ss);
         assert!(syntax.is_some());
-        assert_eq!(syntax.unwrap().name, "JavaScript");
+        let name = syntax.unwrap().name.as_str();
+        assert!(name.contains("TypeScript") || name == "JavaScript");
+    }
+
+    #[test]
+    fn test_typescript_code_has_highlighting() {
+        let palette = Palette::dark();
+        let code = "const value: string = 'rust';";
+        let lines = highlight_code_block(code, Some("typescript"), &palette);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].len() > 1,
+            "Expected TypeScript code to be highlighted, got plain fallback"
+        );
     }
 
     #[test]
@@ -547,12 +568,24 @@ mod tests {
     }
 
     #[test]
-    fn test_alias_tsx_to_javascript() {
-        // TypeScript not in syntect defaults, falls back to JavaScript
+    fn test_alias_tsx_resolves_to_tsx_typescript_or_javascript_fallback() {
         let ss = syntax_set();
         let syntax = resolve_syntax("tsx", ss);
         assert!(syntax.is_some());
-        assert_eq!(syntax.unwrap().name, "JavaScript");
+        let name = syntax.unwrap().name.as_str();
+        assert!(name.contains("TSX") || name.contains("TypeScript") || name == "JavaScript");
+    }
+
+    #[test]
+    fn test_tsx_code_has_highlighting() {
+        let palette = Palette::dark();
+        let code = "const node: JSX.Element = <div>{name}</div>;";
+        let lines = highlight_code_block(code, Some("tsx"), &palette);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].len() > 1,
+            "Expected TSX code to be highlighted, got plain fallback"
+        );
     }
 
     #[test]

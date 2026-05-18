@@ -59,6 +59,21 @@ pub struct SuggestionItem {
     match_text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidePanelMode {
+    Todo,
+    Task,
+}
+
+impl SidePanelMode {
+    fn toggle(self) -> Self {
+        match self {
+            SidePanelMode::Todo => SidePanelMode::Task,
+            SidePanelMode::Task => SidePanelMode::Todo,
+        }
+    }
+}
+
 impl SuggestionItem {
     pub fn new(
         kind: SuggestionKind,
@@ -695,6 +710,7 @@ pub struct App {
 
     // -- task panel --
     pub todo_visible: bool,
+    pub side_panel_mode: SidePanelMode,
     pub tasks: Vec<TodoItem>,
 
     // -- history --
@@ -768,6 +784,7 @@ impl App {
                 r
             },
             todo_visible: false,
+            side_panel_mode: SidePanelMode::Todo,
             tasks: Vec::new(),
             history,
             history_index: None,
@@ -1333,6 +1350,12 @@ impl App {
             return;
         }
 
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
+            self.side_panel_mode = self.side_panel_mode.toggle();
+            self.todo_visible = true;
+            return;
+        }
+
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             if self.is_streaming {
                 let _ = user_tx.send(UserCommand::CancelStream).await;
@@ -1837,7 +1860,7 @@ impl App {
             "/mode" => {
                 if let Some(mode_str) = arg {
                     match mode_str {
-                        "default" | "accept-edits" | "bypass" | "plan" | "dont-ask" => {
+                        "default" | "accept-edits" | "bypass" | "plan" | "dont-ask" | "auto" => {
                             match user_tx
                                 .send(UserCommand::SetMode(mode_str.to_string()))
                                 .await
@@ -1853,14 +1876,14 @@ impl App {
                         }
                         _ => {
                             self.messages.push(ChatMessage::System(
-                                "Unknown mode. Valid modes: default, accept-edits, bypass, plan, dont-ask".into(),
+                                "Unknown mode. Valid modes: default, accept-edits, bypass, plan, dont-ask, auto".into(),
                             ));
                             self.sync_chat_viewport();
                         }
                     }
                 } else {
                     self.messages.push(ChatMessage::System(format!(
-                        "Current mode: {}. Usage: /mode <default|accept-edits|bypass|plan|dont-ask>",
+                        "Current mode: {}. Usage: /mode <default|accept-edits|bypass|plan|dont-ask|auto>",
                         self.permission_mode
                     )));
                     self.sync_chat_viewport();
@@ -2070,7 +2093,10 @@ impl App {
                     self.sync_chat_viewport();
                 }
             },
-            "/todo" => self.todo_visible = !self.todo_visible,
+            "/todo" => {
+                self.side_panel_mode = SidePanelMode::Todo;
+                self.todo_visible = !self.todo_visible;
+            }
             "/config" => {
                 let _ = user_tx.send(UserCommand::ShowConfig).await;
             }
@@ -3468,6 +3494,66 @@ mod tests {
 
         let sent = rx.recv().await.unwrap();
         assert_eq!(sent, UserCommand::SetMode("plan".into()));
+    }
+
+    #[tokio::test]
+    async fn test_mode_command_accepts_auto() {
+        let mut app = App::new(
+            "claude-sonnet-4-6".into(),
+            "opusplan".into(),
+            "Default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, mut rx) = mpsc::channel(1);
+        app.input_buffer = InputBuffer::from_text("/mode auto");
+        app.handle_key_event(key(KeyCode::Enter), &tx).await;
+
+        let sent = rx.recv().await.unwrap();
+        assert_eq!(sent, UserCommand::SetMode("auto".into()));
+    }
+
+    #[tokio::test]
+    async fn test_ctrl_t_switches_to_task_panel() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, _rx) = mpsc::channel(1);
+
+        app.handle_key_event(key_ctrl(KeyCode::Char('t')), &tx)
+            .await;
+
+        assert!(app.todo_visible);
+        assert_eq!(app.side_panel_mode, SidePanelMode::Task);
+
+        app.handle_key_event(key_ctrl(KeyCode::Char('t')), &tx)
+            .await;
+        assert_eq!(app.side_panel_mode, SidePanelMode::Todo);
+    }
+
+    #[test]
+    fn test_task_updates_refresh_panel_state() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+
+        app.handle_app_event(AppEvent::TodoUpdate(vec![TodoItem {
+            id: "task_1".into(),
+            content: "Implement cleanup".into(),
+            status: rust_claude_core::state::TodoStatus::InProgress,
+            priority: rust_claude_core::state::TodoPriority::High,
+        }]));
+
+        assert_eq!(app.tasks.len(), 1);
+        assert_eq!(app.tasks[0].id, "task_1");
     }
 
     #[tokio::test]

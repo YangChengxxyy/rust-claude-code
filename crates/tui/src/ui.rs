@@ -8,10 +8,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
-use rust_claude_core::state::TodoStatus;
+use rust_claude_core::state::{TodoPriority, TodoStatus};
 use unicode_width::UnicodeWidthStr;
 
-use crate::app::{App, CursorPosition, SuggestionKind};
+use crate::app::{App, CursorPosition, SidePanelMode, SuggestionKind};
 use crate::events::ChatMessage;
 use crate::theme::{self, Palette};
 
@@ -221,7 +221,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_status_bar(f, app, areas[3]);
 
     if let Some(todo_area) = todo_area {
-        draw_todo_panel(f, app, todo_area);
+        draw_side_panel(f, app, todo_area);
     }
 
     if app.trust_dialog.is_some() {
@@ -1558,10 +1558,14 @@ fn draw_session_picker(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(paragraph, inner);
 }
 
-fn draw_todo_panel(f: &mut Frame, app: &App, area: Rect) {
+fn draw_side_panel(f: &mut Frame, app: &App, area: Rect) {
     let palette = app.palette();
+    let title = match app.side_panel_mode {
+        SidePanelMode::Todo => " Todo ",
+        SidePanelMode::Task => " Tasks ",
+    };
     let block = Block::default()
-        .title(" Tasks ")
+        .title(title)
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_set(border::ROUNDED)
@@ -1571,7 +1575,10 @@ fn draw_todo_panel(f: &mut Frame, app: &App, area: Rect) {
         let paragraph = Paragraph::new(Text::from(vec![
             Line::from(""),
             Line::from(Span::styled(
-                "  No tasks",
+                match app.side_panel_mode {
+                    SidePanelMode::Todo => "  No todos",
+                    SidePanelMode::Task => "  No tasks",
+                },
                 Style::default().fg(palette.subtle),
             )),
         ]))
@@ -1581,19 +1588,43 @@ fn draw_todo_panel(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let mut lines = Vec::new();
-    for todo in &app.tasks {
-        let (icon, style) = match todo.status {
+    for task in &app.tasks {
+        let (icon, style) = match task.status {
             TodoStatus::Pending => ("○", Style::default().fg(palette.inactive)),
             TodoStatus::InProgress => ("◐", Style::default().fg(palette.claude)),
             TodoStatus::Completed => ("●", Style::default().fg(palette.success)),
             TodoStatus::Cancelled => ("✕", Style::default().fg(palette.inactive)),
         };
 
-        let content = truncate_display(&todo.content, (area.width as usize).saturating_sub(6));
-        lines.push(Line::from(vec![
-            Span::styled(format!(" {icon} "), style),
-            Span::styled(content, style),
-        ]));
+        match app.side_panel_mode {
+            SidePanelMode::Todo => {
+                let content =
+                    truncate_display(&task.content, (area.width as usize).saturating_sub(6));
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {icon} "), style),
+                    Span::styled(content, style),
+                ]));
+            }
+            SidePanelMode::Task => {
+                let priority = match task.priority {
+                    TodoPriority::High => "H",
+                    TodoPriority::Medium => "M",
+                    TodoPriority::Low => "L",
+                };
+                let id = truncate_display(&task.id, 8);
+                let reserved = 10usize.saturating_add(display_width(&id));
+                let content = truncate_display(
+                    &task.content,
+                    (area.width as usize).saturating_sub(reserved),
+                );
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {icon} "), style),
+                    Span::styled(format!("[{priority}] "), style.add_modifier(Modifier::BOLD)),
+                    Span::styled(format!("{id} "), Style::default().fg(palette.subtle)),
+                    Span::styled(content, style),
+                ]));
+            }
+        }
     }
 
     let paragraph = Paragraph::new(Text::from(lines))

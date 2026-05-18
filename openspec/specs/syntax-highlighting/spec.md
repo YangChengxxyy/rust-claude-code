@@ -60,6 +60,18 @@ The syntax highlighting engine SHALL support at minimum the following languages:
 - **WHEN** a code block uses common aliases (`ts` for TypeScript, `py` for Python, `sh` for Shell, `bash` for Bash, `js` for JavaScript, `yml` for YAML)
 - **THEN** the alias SHALL resolve to the correct language syntax definition
 
+#### Scenario: TypeScript code fence is highlighted
+- **WHEN** a Markdown code block is fenced as `ts` or `typescript`
+- **THEN** the renderer SHALL resolve a TypeScript syntax and highlight type annotations distinctly from plain text fallback
+
+#### Scenario: TSX code fence is highlighted
+- **WHEN** a Markdown code block is fenced as `tsx` or `typescriptreact`
+- **THEN** the renderer SHALL resolve a TSX-capable syntax and highlight JSX markup and TypeScript constructs
+
+#### Scenario: Missing syntax has graceful fallback
+- **WHEN** a syntax definition cannot be loaded for a code fence
+- **THEN** the renderer SHALL fall back to the existing plain-code rendering without crashing
+
 ### Requirement: Highlighting performance
 The syntax highlighting engine SHALL highlight a single line in under 1ms on average and a 500-line code block in under 100ms total.
 

@@ -41,24 +41,50 @@ impl WebSearchTool {
     }
 
     pub fn configured(config: WebSearchConfig) -> Self {
-        if !config.provider.eq_ignore_ascii_case("brave") {
-            return Self {
-                backend: Arc::new(UnavailableSearchBackend {
-                    reason: format!("unsupported web search provider '{}'", config.provider),
-                }),
-            };
-        }
-
-        match config.brave_api_key {
-            Some(api_key) if !api_key.trim().is_empty() => Self {
-                backend: Arc::new(BraveSearchBackend::new(
-                    api_key,
-                    config.brave_base_url.unwrap_or_else(BraveSearchBackend::default_base_url),
-                )),
+        match config.provider.to_ascii_lowercase().as_str() {
+            "brave" => match config.brave_api_key {
+                Some(api_key) if !api_key.trim().is_empty() => Self {
+                    backend: Arc::new(BraveSearchBackend::new(
+                        api_key,
+                        config
+                            .brave_base_url
+                            .unwrap_or_else(BraveSearchBackend::default_base_url),
+                    )),
+                },
+                _ => Self {
+                    backend: Arc::new(UnavailableSearchBackend {
+                        reason: "missing Brave Search credentials; set BRAVE_SEARCH_API_KEY or RUST_CLAUDE_BRAVE_SEARCH_API_KEY".to_string(),
+                    }),
+                },
             },
-            _ => Self {
+            "tavily" => match config.tavily_api_key {
+                Some(api_key) if !api_key.trim().is_empty() => Self {
+                    backend: Arc::new(TavilySearchBackend::new(
+                        api_key,
+                        config
+                            .tavily_base_url
+                            .unwrap_or_else(TavilySearchBackend::default_base_url),
+                    )),
+                },
+                _ => Self {
+                    backend: Arc::new(UnavailableSearchBackend {
+                        reason: "missing Tavily credentials; set TAVILY_API_KEY or RUST_CLAUDE_TAVILY_API_KEY".to_string(),
+                    }),
+                },
+            },
+            "searxng" => match config.searxng_url {
+                Some(base_url) if !base_url.trim().is_empty() => Self {
+                    backend: Arc::new(SearxngSearchBackend::new(base_url)),
+                },
+                _ => Self {
+                    backend: Arc::new(UnavailableSearchBackend {
+                        reason: "missing SearXNG URL; set SEARXNG_URL or RUST_CLAUDE_SEARXNG_URL".to_string(),
+                    }),
+                },
+            },
+            provider => Self {
                 backend: Arc::new(UnavailableSearchBackend {
-                    reason: "missing Brave Search credentials; set BRAVE_SEARCH_API_KEY or RUST_CLAUDE_BRAVE_SEARCH_API_KEY".to_string(),
+                    reason: format!("unsupported web search provider '{provider}'"),
                 }),
             },
         }
@@ -107,6 +133,9 @@ pub struct WebSearchConfig {
     pub provider: String,
     pub brave_api_key: Option<String>,
     pub brave_base_url: Option<String>,
+    pub tavily_api_key: Option<String>,
+    pub tavily_base_url: Option<String>,
+    pub searxng_url: Option<String>,
 }
 
 impl WebSearchConfig {
@@ -120,11 +149,23 @@ impl WebSearchConfig {
         let brave_base_url = std::env::var("RUST_CLAUDE_BRAVE_SEARCH_BASE_URL")
             .or_else(|_| std::env::var("BRAVE_SEARCH_BASE_URL"))
             .ok();
+        let tavily_api_key = std::env::var("RUST_CLAUDE_TAVILY_API_KEY")
+            .or_else(|_| std::env::var("TAVILY_API_KEY"))
+            .ok();
+        let tavily_base_url = std::env::var("RUST_CLAUDE_TAVILY_BASE_URL")
+            .or_else(|_| std::env::var("TAVILY_BASE_URL"))
+            .ok();
+        let searxng_url = std::env::var("RUST_CLAUDE_SEARXNG_URL")
+            .or_else(|_| std::env::var("SEARXNG_URL"))
+            .ok();
 
         Self {
             provider,
             brave_api_key,
             brave_base_url,
+            tavily_api_key,
+            tavily_base_url,
+            searxng_url,
         }
     }
 }
@@ -235,6 +276,158 @@ impl SearchBackend for BraveSearchBackend {
             .map_err(|error| format!("Brave Search response was not valid JSON: {error}"))?;
         Self::parse_response(value)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct TavilySearchBackend {
+    api_key: String,
+    base_url: String,
+    client: reqwest::Client,
+}
+
+impl TavilySearchBackend {
+    fn new(api_key: String, base_url: String) -> Self {
+        Self {
+            api_key,
+            base_url,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    fn default_base_url() -> String {
+        "https://api.tavily.com/search".to_string()
+    }
+
+    fn parse_response(value: serde_json::Value) -> Result<Vec<SearchResult>, String> {
+        let results = value
+            .get("results")
+            .and_then(|results| results.as_array())
+            .ok_or_else(|| "Tavily response missing results".to_string())?;
+
+        normalize_result_array(results, "Tavily", &["content", "snippet", "description"])
+    }
+}
+
+#[async_trait]
+impl SearchBackend for TavilySearchBackend {
+    fn name(&self) -> &str {
+        "tavily"
+    }
+
+    async fn search(&self, query: &str) -> Result<Vec<SearchResult>, String> {
+        let response = self
+            .client
+            .post(&self.base_url)
+            .json(&serde_json::json!({
+                "api_key": self.api_key,
+                "query": query,
+                "max_results": 10,
+            }))
+            .send()
+            .await
+            .map_err(|error| format!("Tavily request failed: {error}"))?;
+
+        if !response.status().is_success() {
+            return Err(format!("Tavily returned HTTP status {}", response.status()));
+        }
+
+        let value = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|error| format!("Tavily response was not valid JSON: {error}"))?;
+        Self::parse_response(value)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SearxngSearchBackend {
+    base_url: String,
+    client: reqwest::Client,
+}
+
+impl SearxngSearchBackend {
+    fn new(base_url: String) -> Self {
+        Self {
+            base_url,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    fn parse_response(value: serde_json::Value) -> Result<Vec<SearchResult>, String> {
+        let results = value
+            .get("results")
+            .and_then(|results| results.as_array())
+            .ok_or_else(|| "SearXNG response missing results".to_string())?;
+
+        normalize_result_array(results, "SearXNG", &["content", "snippet", "description"])
+    }
+}
+
+#[async_trait]
+impl SearchBackend for SearxngSearchBackend {
+    fn name(&self) -> &str {
+        "searxng"
+    }
+
+    async fn search(&self, query: &str) -> Result<Vec<SearchResult>, String> {
+        let response = self
+            .client
+            .get(&self.base_url)
+            .query(&[("q", query), ("format", "json")])
+            .send()
+            .await
+            .map_err(|error| format!("SearXNG request failed: {error}"))?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "SearXNG returned HTTP status {}",
+                response.status()
+            ));
+        }
+
+        let value = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|error| format!("SearXNG response was not valid JSON: {error}"))?;
+        Self::parse_response(value)
+    }
+}
+
+fn normalize_result_array(
+    results: &[serde_json::Value],
+    provider: &str,
+    summary_fields: &[&str],
+) -> Result<Vec<SearchResult>, String> {
+    results
+        .iter()
+        .map(|item| {
+            let title = item
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            let url = item
+                .get("url")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string();
+            let summary = summary_fields
+                .iter()
+                .find_map(|field| item.get(field).and_then(|value| value.as_str()))
+                .unwrap_or("")
+                .to_string();
+
+            if title.is_empty() || url.is_empty() {
+                return Err(format!("{provider} result missing title or url"));
+            }
+
+            Ok(SearchResult {
+                title,
+                url,
+                summary,
+            })
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -353,6 +546,8 @@ mod tests {
         let old_provider = std::env::var("RUST_CLAUDE_WEB_SEARCH_PROVIDER").ok();
         let old_key = std::env::var("RUST_CLAUDE_BRAVE_SEARCH_API_KEY").ok();
         let old_base = std::env::var("RUST_CLAUDE_BRAVE_SEARCH_BASE_URL").ok();
+        let old_tavily = std::env::var("TAVILY_API_KEY").ok();
+        let old_searxng = std::env::var("SEARXNG_URL").ok();
         unsafe {
             std::env::set_var("RUST_CLAUDE_WEB_SEARCH_PROVIDER", "brave");
             std::env::set_var("RUST_CLAUDE_BRAVE_SEARCH_API_KEY", "test-key");
@@ -360,6 +555,8 @@ mod tests {
                 "RUST_CLAUDE_BRAVE_SEARCH_BASE_URL",
                 "http://localhost/search",
             );
+            std::env::set_var("TAVILY_API_KEY", "tavily-key");
+            std::env::set_var("SEARXNG_URL", "http://localhost/searxng");
         }
 
         let config = WebSearchConfig::from_env();
@@ -376,12 +573,25 @@ mod tests {
             Some(value) => unsafe { std::env::set_var("RUST_CLAUDE_BRAVE_SEARCH_BASE_URL", value) },
             None => unsafe { std::env::remove_var("RUST_CLAUDE_BRAVE_SEARCH_BASE_URL") },
         }
+        match old_tavily {
+            Some(value) => unsafe { std::env::set_var("TAVILY_API_KEY", value) },
+            None => unsafe { std::env::remove_var("TAVILY_API_KEY") },
+        }
+        match old_searxng {
+            Some(value) => unsafe { std::env::set_var("SEARXNG_URL", value) },
+            None => unsafe { std::env::remove_var("SEARXNG_URL") },
+        }
 
         assert_eq!(config.provider, "brave");
         assert_eq!(config.brave_api_key.as_deref(), Some("test-key"));
         assert_eq!(
             config.brave_base_url.as_deref(),
             Some("http://localhost/search")
+        );
+        assert_eq!(config.tavily_api_key.as_deref(), Some("tavily-key"));
+        assert_eq!(
+            config.searxng_url.as_deref(),
+            Some("http://localhost/searxng")
         );
     }
 
@@ -472,12 +682,75 @@ mod tests {
         assert!(error.contains("web.results"));
     }
 
+    #[test]
+    fn tavily_response_normalizes_results() {
+        let results = TavilySearchBackend::parse_response(serde_json::json!({
+            "results": [
+                {
+                    "title": "Rust",
+                    "url": "https://www.rust-lang.org/",
+                    "content": "Rust language"
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            results,
+            vec![SearchResult {
+                title: "Rust".into(),
+                url: "https://www.rust-lang.org/".into(),
+                summary: "Rust language".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn malformed_tavily_response_returns_error() {
+        let error = TavilySearchBackend::parse_response(serde_json::json!({ "unexpected": true }))
+            .unwrap_err();
+        assert!(error.contains("results"));
+    }
+
+    #[test]
+    fn searxng_response_normalizes_results() {
+        let results = SearxngSearchBackend::parse_response(serde_json::json!({
+            "results": [
+                {
+                    "title": "Rust",
+                    "url": "https://www.rust-lang.org/",
+                    "content": "Rust language"
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            results,
+            vec![SearchResult {
+                title: "Rust".into(),
+                url: "https://www.rust-lang.org/".into(),
+                summary: "Rust language".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn malformed_searxng_response_returns_error() {
+        let error = SearxngSearchBackend::parse_response(serde_json::json!({ "unexpected": true }))
+            .unwrap_err();
+        assert!(error.contains("results"));
+    }
+
     #[tokio::test]
     async fn missing_credentials_return_clear_error() {
         let error = WebSearchTool::configured(WebSearchConfig {
             provider: "brave".into(),
             brave_api_key: None,
             brave_base_url: None,
+            tavily_api_key: None,
+            tavily_base_url: None,
+            searxng_url: None,
         })
         .execute(
             serde_json::json!({ "query": "rust" }),
@@ -489,6 +762,48 @@ mod tests {
         assert!(
             matches!(error, ToolError::Execution(message) if message.contains("BRAVE_SEARCH_API_KEY"))
         );
+    }
+
+    #[tokio::test]
+    async fn missing_tavily_credentials_return_clear_error() {
+        let error = WebSearchTool::configured(WebSearchConfig {
+            provider: "tavily".into(),
+            brave_api_key: None,
+            brave_base_url: None,
+            tavily_api_key: None,
+            tavily_base_url: None,
+            searxng_url: None,
+        })
+        .execute(
+            serde_json::json!({ "query": "rust" }),
+            ToolContext::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, ToolError::Execution(message) if message.contains("TAVILY_API_KEY"))
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_searxng_url_returns_clear_error() {
+        let error = WebSearchTool::configured(WebSearchConfig {
+            provider: "searxng".into(),
+            brave_api_key: None,
+            brave_base_url: None,
+            tavily_api_key: None,
+            tavily_base_url: None,
+            searxng_url: None,
+        })
+        .execute(
+            serde_json::json!({ "query": "rust" }),
+            ToolContext::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ToolError::Execution(message) if message.contains("SEARXNG_URL")));
     }
 
     #[tokio::test]

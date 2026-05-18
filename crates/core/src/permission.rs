@@ -21,6 +21,7 @@ pub enum PermissionMode {
     BypassPermissions,
     Plan,
     DontAsk,
+    Auto,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,6 +403,7 @@ fn mode_to_str(mode: PermissionMode) -> String {
         PermissionMode::BypassPermissions => "bypass".to_string(),
         PermissionMode::Plan => "plan".to_string(),
         PermissionMode::DontAsk => "dont-ask".to_string(),
+        PermissionMode::Auto => "auto".to_string(),
     }
 }
 
@@ -412,6 +414,7 @@ fn mode_from_str(s: &str) -> Result<PermissionMode, PermissionError> {
         "bypass" => Ok(PermissionMode::BypassPermissions),
         "plan" => Ok(PermissionMode::Plan),
         "dont-ask" => Ok(PermissionMode::DontAsk),
+        "auto" => Ok(PermissionMode::Auto),
         other => Err(PermissionError::Parse(format!(
             "unknown permission mode: {other}"
         ))),
@@ -516,6 +519,7 @@ impl PermissionMode {
                     }
                 }
             }
+            PermissionMode::Auto => auto_check_tool(tool_name, None, is_read_only, None, &[]),
         }
     }
 
@@ -542,8 +546,130 @@ impl PermissionMode {
             }
         }
 
-        self.check_tool(tool_name, is_read_only, &[])
+        if matches!(self, PermissionMode::Auto) {
+            auto_check_tool(tool_name, command, is_read_only, None, &[])
+        } else {
+            self.check_tool(tool_name, is_read_only, &[])
+        }
     }
+}
+
+pub fn check_auto_permission(
+    request: PermissionRequest<'_>,
+    safe_roots: &[PathBuf],
+) -> PermissionCheck {
+    auto_check_tool(
+        request.tool_name,
+        request.command,
+        request.is_read_only,
+        request.file_path,
+        safe_roots,
+    )
+}
+
+fn auto_check_tool(
+    tool_name: &str,
+    command: Option<&str>,
+    is_read_only: bool,
+    file_path: Option<&str>,
+    safe_roots: &[PathBuf],
+) -> PermissionCheck {
+    if is_read_only && file_path_is_safe(file_path, safe_roots) {
+        return PermissionCheck::Allowed;
+    }
+
+    if matches!(tool_name, "FileRead" | "Glob" | "Grep") && file_path_is_safe(file_path, safe_roots)
+    {
+        return PermissionCheck::Allowed;
+    }
+
+    if matches!(tool_name, "FileEdit" | "FileWrite") && !file_path_is_safe(file_path, safe_roots) {
+        return PermissionCheck::NeedsConfirmation {
+            prompt: format!("Allow {tool_name} to access a path outside the safe workspace?"),
+        };
+    }
+
+    if matches!(tool_name, "Bash" | "Monitor") {
+        let Some(command) = command else {
+            return PermissionCheck::NeedsConfirmation {
+                prompt: format!("Allow {tool_name} to execute?"),
+            };
+        };
+
+        if is_dangerous_bash_command(command) || is_network_bash_command(command) {
+            return PermissionCheck::NeedsConfirmation {
+                prompt: format!("Allow {tool_name} to run a potentially risky command?"),
+            };
+        }
+
+        if is_known_safe_bash_command(command) {
+            return PermissionCheck::Allowed;
+        }
+    }
+
+    PermissionCheck::NeedsConfirmation {
+        prompt: format!("Allow {tool_name} to execute?"),
+    }
+}
+
+fn file_path_is_safe(file_path: Option<&str>, safe_roots: &[PathBuf]) -> bool {
+    let Some(file_path) = file_path else {
+        return true;
+    };
+    if safe_roots.is_empty() {
+        return true;
+    }
+
+    let path = Path::new(file_path);
+    safe_roots.iter().any(|root| path.starts_with(root))
+}
+
+fn is_known_safe_bash_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    let first = trimmed
+        .split([' ', '\t', '\n', ';', '&', '|'])
+        .find(|part| !part.is_empty())
+        .unwrap_or("");
+
+    matches!(
+        first,
+        "git" | "ls" | "pwd" | "cat" | "rg" | "grep" | "find" | "wc" | "head" | "tail"
+    ) && !is_dangerous_bash_command(trimmed)
+        && !is_network_bash_command(trimmed)
+}
+
+fn is_dangerous_bash_command(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    let dangerous_tokens = [
+        "rm ",
+        "rm\t",
+        "rm -",
+        "chmod ",
+        "chown ",
+        "sudo ",
+        "su ",
+        "dd ",
+        "mkfs",
+        "mount ",
+        "umount ",
+        ">",
+        ">>",
+        "tee ",
+        "truncate ",
+        "kill ",
+        "pkill ",
+        "launchctl ",
+        "systemctl ",
+    ];
+    dangerous_tokens.iter().any(|token| lower.contains(token))
+}
+
+fn is_network_bash_command(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    let network_tokens = [
+        "curl", "wget", "ssh", "scp", "rsync", "nc ", "netcat", "telnet", "ftp", "sftp",
+    ];
+    network_tokens.iter().any(|token| lower.contains(token))
 }
 
 impl RuleType {
@@ -613,6 +739,72 @@ mod tests {
 
         let mode: PermissionMode = serde_json::from_str("\"plan\"").unwrap();
         assert_eq!(mode, PermissionMode::Plan);
+
+        let mode: PermissionMode = serde_json::from_str("\"auto\"").unwrap();
+        assert_eq!(mode, PermissionMode::Auto);
+    }
+
+    #[test]
+    fn test_auto_mode_allows_readonly() {
+        let check = PermissionMode::Auto.check_tool("FileRead", true, &[]);
+        assert_eq!(check, PermissionCheck::Allowed);
+    }
+
+    #[test]
+    fn test_auto_mode_allows_safe_bash() {
+        let check = PermissionMode::Auto.check_tool_with_command(
+            "Bash",
+            Some("git status --short"),
+            false,
+            &[],
+        );
+        assert_eq!(check, PermissionCheck::Allowed);
+    }
+
+    #[test]
+    fn test_auto_mode_requires_confirmation_for_dangerous_bash() {
+        let check =
+            PermissionMode::Auto.check_tool_with_command("Bash", Some("rm -rf target"), false, &[]);
+        assert!(matches!(check, PermissionCheck::NeedsConfirmation { .. }));
+    }
+
+    #[test]
+    fn test_auto_mode_requires_confirmation_for_network_bash() {
+        let check = PermissionMode::Auto.check_tool_with_command(
+            "Bash",
+            Some("curl https://example.com"),
+            false,
+            &[],
+        );
+        assert!(matches!(check, PermissionCheck::NeedsConfirmation { .. }));
+    }
+
+    #[test]
+    fn test_auto_permission_rejects_unsafe_file_path() {
+        let root = PathBuf::from("/tmp/project");
+        let request = PermissionRequest {
+            tool_name: "FileWrite",
+            command: None,
+            is_read_only: false,
+            file_path: Some("/etc/passwd"),
+        };
+
+        let check = check_auto_permission(request, &[root]);
+        assert!(matches!(check, PermissionCheck::NeedsConfirmation { .. }));
+    }
+
+    #[test]
+    fn test_auto_permission_allows_safe_read_path() {
+        let root = PathBuf::from("/tmp/project");
+        let request = PermissionRequest {
+            tool_name: "FileRead",
+            command: None,
+            is_read_only: true,
+            file_path: Some("/tmp/project/src/main.rs"),
+        };
+
+        let check = check_auto_permission(request, &[root]);
+        assert_eq!(check, PermissionCheck::Allowed);
     }
 
     #[test]

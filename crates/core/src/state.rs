@@ -5,7 +5,9 @@ use crate::config::{Config, ConfigProvenance};
 use crate::file_state_cache::FileStateCache;
 use crate::git::GitContextSnapshot;
 use crate::message::{Message, Usage};
-use crate::permission::{PermissionCheck, PermissionMode, PermissionRequest, PermissionRule};
+use crate::permission::{
+    check_auto_permission, PermissionCheck, PermissionMode, PermissionRequest, PermissionRule,
+};
 
 /// A task with status tracking. Replaces the previous TodoItem type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +203,41 @@ impl AppState {
     }
 
     pub fn check_permission(&self, request: PermissionRequest<'_>) -> PermissionCheck {
+        if self.permission_mode == PermissionMode::Auto {
+            if let Some(check) = self
+                .always_deny_rules
+                .iter()
+                .find(|rule| rule.tool_name == request.tool_name || rule.tool_name == "*")
+                .and_then(|rule| {
+                    let command_matches = match (&rule.pattern, request.command) {
+                        (None, _) => true,
+                        (Some(pattern), Some(command)) => {
+                            command.starts_with(pattern.trim_end_matches('*'))
+                        }
+                        (Some(_), None) => false,
+                    };
+                    command_matches.then_some(PermissionCheck::Denied {
+                        reason: "Denied by rule".to_string(),
+                    })
+                })
+            {
+                return check;
+            }
+
+            if self
+                .always_allow_rules
+                .iter()
+                .any(|rule| rule.tool_name == request.tool_name || rule.tool_name == "*")
+            {
+                return PermissionCheck::Allowed;
+            }
+
+            let mut safe_roots = Vec::with_capacity(1 + self.extra_cwds.len());
+            safe_roots.push(self.cwd.clone());
+            safe_roots.extend(self.extra_cwds.iter().cloned());
+            return check_auto_permission(request, &safe_roots);
+        }
+
         self.permission_mode
             .check(request, &self.always_deny_rules, &self.always_allow_rules)
     }

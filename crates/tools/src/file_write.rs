@@ -11,6 +11,7 @@ pub struct FileWriteTool;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct FileWriteInput {
+    #[serde(alias = "file_path")]
     path: PathBuf,
     content: String,
 }
@@ -31,9 +32,14 @@ impl Tool for FileWriteTool {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
+                    "file_path": { "type": "string" },
                     "content": { "type": "string" }
                 },
-                "required": ["path", "content"]
+                "required": ["content"],
+                "anyOf": [
+                    { "required": ["path"] },
+                    { "required": ["file_path"] }
+                ]
             }),
         }
     }
@@ -193,5 +199,42 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "hello");
+    }
+
+    #[tokio::test]
+    async fn test_file_write_accepts_file_path_alias() {
+        let base = std::env::temp_dir().join(format!("write-alias-tool-{}", std::process::id()));
+        let path = base.join("alias.txt");
+
+        let result = FileWriteTool::new()
+            .execute(
+                serde_json::json!({ "file_path": path, "content": "hello alias" }),
+                ToolContext {
+                    tool_use_id: "tool_alias".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let content = fs::read_to_string(base.join("alias.txt")).await.unwrap();
+        assert_eq!(content, "hello alias");
+    }
+
+    #[tokio::test]
+    async fn test_file_write_rejects_missing_path_alias() {
+        let error = FileWriteTool::new()
+            .execute(
+                serde_json::json!({ "content": "hello" }),
+                ToolContext {
+                    tool_use_id: "tool_missing".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ToolError::InvalidInput(message) if message.contains("path")));
     }
 }

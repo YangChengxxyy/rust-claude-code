@@ -111,7 +111,7 @@ mod tests {
 
     fn make_registry() -> Arc<ToolRegistry> {
         Arc::new_cyclic(|weak| {
-            let mut registry = ToolRegistry::new();
+            let registry = ToolRegistry::new();
             registry.register(BashTool::new());
             registry.register(WebSearchTool::new());
             registry.register(ToolSearchTool::new(weak.clone()));

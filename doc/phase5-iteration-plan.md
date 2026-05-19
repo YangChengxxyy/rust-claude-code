@@ -158,7 +158,14 @@ cargo test -p rust-claude-tui summarize_tool_input
 
 ### 迭代 45：工具 schema 契约测试
 
-**状态**：规划中
+**状态**：已完成
+
+**完成记录（2026-05-19）**：
+
+- `FileRead` / `FileEdit` / `FileWrite` 已同时接受 `path` 与 `file_path` 输入字段，内部继续使用统一路径值。
+- 已新增内置工具 schema 摘要契约测试，覆盖工具名、deferred 标记、required 字段和顶层属性集合。
+- 已新增 deferred tool schema 暴露测试，覆盖 `ToolSearch` 返回完整 schema 与非 deferred 工具排除行为。
+- 已通过 `cargo test -p rust-claude-tools schema` 与 `cargo test -p rust-claude-tools registry`。
 
 **目标**：建立内置工具 schema 的快照/契约测试，防止后续改动意外破坏工具输入协议。
 
@@ -874,7 +881,7 @@ cargo check --workspace
 ### 阶段 A 完成标准
 
 - [ ] 文件工具同时兼容 `path` 与 `file_path`。
-- [ ] 工具 schema 有契约测试保护。
+- [x] 工具 schema 有契约测试保护。
 - [ ] `--output-format stream-json` 可输出合法 NDJSON。
 
 ### 阶段 B 完成标准

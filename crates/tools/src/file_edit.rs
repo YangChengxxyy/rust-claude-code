@@ -11,6 +11,7 @@ pub struct FileEditTool;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct FileEditInput {
+    #[serde(alias = "file_path")]
     path: PathBuf,
     old_string: String,
     new_string: String,
@@ -34,11 +35,16 @@ impl Tool for FileEditTool {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
+                    "file_path": { "type": "string" },
                     "old_string": { "type": "string" },
                     "new_string": { "type": "string" },
                     "replace_all": { "type": "boolean" }
                 },
-                "required": ["path", "old_string", "new_string"]
+                "required": ["old_string", "new_string"],
+                "anyOf": [
+                    { "required": ["path"] },
+                    { "required": ["file_path"] }
+                ]
             }),
         }
     }
@@ -360,5 +366,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(content, "hello");
+    }
+
+    #[tokio::test]
+    async fn test_file_edit_accepts_file_path_alias() {
+        let base = std::env::temp_dir().join(format!("edit-alias-tool-{}", std::process::id()));
+        fs::create_dir_all(&base).await.unwrap();
+        let path = base.join("alias.txt");
+        fs::write(&path, "hello world").await.unwrap();
+
+        let result = FileEditTool::new()
+            .execute(
+                serde_json::json!({ "file_path": path, "old_string": "world", "new_string": "rust" }),
+                ToolContext {
+                    tool_use_id: "tool_alias".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.is_error);
+        let content = fs::read_to_string(base.join("alias.txt")).await.unwrap();
+        assert_eq!(content, "hello rust");
+    }
+
+    #[tokio::test]
+    async fn test_file_edit_rejects_missing_path_alias() {
+        let error = FileEditTool::new()
+            .execute(
+                serde_json::json!({ "old_string": "world", "new_string": "rust" }),
+                ToolContext {
+                    tool_use_id: "tool_missing".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ToolError::InvalidInput(message) if message.contains("path")));
     }
 }

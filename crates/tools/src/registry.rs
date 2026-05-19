@@ -241,8 +241,65 @@ mod tests {
     use crate::tool::InterruptBehavior;
     use crate::{
         EnterPlanModeTool, ExitPlanModeTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
-        GrepTool, MonitorTool, TodoWriteTool, WebFetchTool, WebSearchTool,
+        GrepTool, MonitorTool, TodoWriteTool, ToolSearchTool, WebFetchTool, WebSearchTool,
     };
+
+    fn schema_contract_registry() -> Arc<ToolRegistry> {
+        Arc::new_cyclic(|weak| {
+            let registry = ToolRegistry::new();
+            registry.register(BashTool::new());
+            registry.register(FileReadTool::new());
+            registry.register(FileEditTool::new());
+            registry.register(FileWriteTool::new());
+            registry.register(GlobTool::new());
+            registry.register(GrepTool::new());
+            registry.register(WebFetchTool::new());
+            registry.register(WebSearchTool::new());
+            registry.register(ToolSearchTool::new(weak.clone()));
+            registry
+        })
+    }
+
+    fn schema_string_array(schema: &serde_json::Value, key: &str) -> Vec<String> {
+        let mut values = schema
+            .get(key)
+            .and_then(|value| value.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str().map(ToString::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        values.sort();
+        values
+    }
+
+    fn schema_property_names(schema: &serde_json::Value) -> Vec<String> {
+        let mut names = schema
+            .get("properties")
+            .and_then(|value| value.as_object())
+            .map(|properties| properties.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    fn tool_schema_summary(registry: &ToolRegistry) -> String {
+        registry
+            .list()
+            .into_iter()
+            .map(|tool| {
+                let required = schema_string_array(&tool.info.input_schema, "required").join(",");
+                let properties = schema_property_names(&tool.info.input_schema).join(",");
+                format!(
+                    "{}|deferred:{}|required:[{}]|properties:[{}]",
+                    tool.info.name, tool.should_defer, required, properties
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     struct BlockingTool;
 
@@ -269,6 +326,40 @@ mod tests {
                 context.tool_use_id,
                 "ok".to_string(),
             ))
+        }
+    }
+
+    #[test]
+    fn test_schema_contract_summary_for_builtin_tools() {
+        let registry = schema_contract_registry();
+
+        let summary = tool_schema_summary(&registry);
+
+        let expected = [
+            "Bash|deferred:false|required:[command]|properties:[command,timeout_ms,workdir]",
+            "FileEdit|deferred:false|required:[new_string,old_string]|properties:[file_path,new_string,old_string,path,replace_all]",
+            "FileRead|deferred:false|required:[]|properties:[file_path,limit,offset,path]",
+            "FileWrite|deferred:false|required:[content]|properties:[content,file_path,path]",
+            "Glob|deferred:false|required:[pattern]|properties:[path,pattern]",
+            "Grep|deferred:false|required:[pattern]|properties:[-A,-B,-C,-i,glob,head_limit,output_mode,path,pattern,type]",
+            "ToolSearch|deferred:false|required:[query]|properties:[max_results,query]",
+            "WebFetch|deferred:true|required:[url]|properties:[prompt,url]",
+            "WebSearch|deferred:true|required:[query]|properties:[allowed_domains,blocked_domains,query]",
+        ]
+        .join("\n");
+        assert_eq!(summary, expected);
+    }
+
+    #[test]
+    fn test_schema_contract_file_tools_expose_path_aliases() {
+        let registry = schema_contract_registry();
+
+        for tool_name in ["FileRead", "FileEdit", "FileWrite"] {
+            let tool = registry.get(tool_name).unwrap();
+            let properties = schema_property_names(&tool.info.input_schema);
+            assert!(properties.contains(&"path".to_string()));
+            assert!(properties.contains(&"file_path".to_string()));
+            assert!(tool.info.input_schema.get("anyOf").is_some());
         }
     }
 
@@ -318,6 +409,49 @@ mod tests {
 
         let names = registry.names();
         assert_eq!(names, vec!["Bash", "FileWrite"]);
+    }
+
+    #[tokio::test]
+    async fn test_schema_contract_tool_search_exposes_deferred_schema() {
+        let registry = schema_contract_registry();
+        let tool = registry.get("ToolSearch").unwrap();
+        let result = tool
+            .tool
+            .execute(
+                serde_json::json!({ "query": "select:WebFetch" }),
+                ToolContext {
+                    tool_use_id: "tool_schema".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let value: serde_json::Value = serde_json::from_str(&result.content).unwrap();
+        let entries = value.as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "WebFetch");
+        assert!(entries[0]["description"].is_string());
+        assert_eq!(entries[0]["input_schema"]["required"][0], "url");
+    }
+
+    #[tokio::test]
+    async fn test_schema_contract_tool_search_excludes_non_deferred_tools() {
+        let registry = schema_contract_registry();
+        let tool = registry.get("ToolSearch").unwrap();
+        let result = tool
+            .tool
+            .execute(
+                serde_json::json!({ "query": "select:Bash" }),
+                ToolContext {
+                    tool_use_id: "tool_schema".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.content, "[]");
     }
 
     #[tokio::test]

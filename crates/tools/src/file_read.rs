@@ -11,6 +11,7 @@ pub struct FileReadTool;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 struct FileReadInput {
+    #[serde(alias = "file_path")]
     path: PathBuf,
     #[serde(default)]
     offset: Option<usize>,
@@ -86,10 +87,14 @@ impl Tool for FileReadTool {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
+                    "file_path": { "type": "string" },
                     "offset": { "type": "integer", "minimum": 0 },
                     "limit": { "type": "integer", "minimum": 1 }
                 },
-                "required": ["path"]
+                "anyOf": [
+                    { "required": ["path"] },
+                    { "required": ["file_path"] }
+                ]
             }),
         }
     }
@@ -205,5 +210,42 @@ mod tests {
 
         assert!(result.content.contains("file.txt"));
         assert!(result.content.contains("nested/"));
+    }
+
+    #[tokio::test]
+    async fn test_file_read_accepts_file_path_alias() {
+        let temp_dir = std::env::temp_dir().join(format!("read-alias-tool-{}", std::process::id()));
+        fs::create_dir_all(&temp_dir).await.unwrap();
+        let path = temp_dir.join("alias.txt");
+        fs::write(&path, "alias\n").await.unwrap();
+
+        let result = FileReadTool::new()
+            .execute(
+                serde_json::json!({ "file_path": path }),
+                ToolContext {
+                    tool_use_id: "tool_alias".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.content, "1: alias");
+    }
+
+    #[tokio::test]
+    async fn test_file_read_rejects_missing_path_alias() {
+        let error = FileReadTool::new()
+            .execute(
+                serde_json::json!({ "offset": 0 }),
+                ToolContext {
+                    tool_use_id: "tool_missing".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ToolError::InvalidInput(message) if message.contains("path")));
     }
 }

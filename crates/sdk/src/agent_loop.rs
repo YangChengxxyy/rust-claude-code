@@ -825,7 +825,7 @@ where
             .unwrap_or(false);
 
         if let Some(output) = &self.output {
-            output.tool_use(name, input);
+            output.tool_use_with_id(tool_use_id, name, input);
         }
 
         if let Some((denial_msg, is_error)) = self
@@ -860,7 +860,7 @@ where
                     let msg = format!("Hook blocked: {}", reason);
                     if let Some(output) = &self.output {
                         output.hook_blocked(name, &reason);
-                        output.tool_result(name, &msg, true);
+                        output.tool_result_with_id(tool_use_id, name, &msg, true);
                     }
                     let result = rust_claude_core::tool_types::ToolResult::error(
                         tool_use_id.to_string(),
@@ -1229,7 +1229,7 @@ where
 
             // Notify output about tool use start
             if let Some(output) = &self.output {
-                output.tool_use(name, input);
+                output.tool_use_with_id(tool_use_id, name, input);
             }
 
             // Check permission before scheduling execution.
@@ -1238,7 +1238,7 @@ where
                 .await
             {
                 if let Some(output) = &self.output {
-                    output.tool_result(name, &denial_msg, is_error);
+                    output.tool_result_with_id(tool_use_id, name, &denial_msg, is_error);
                 }
                 tool_results.push((index, tool_use_id.to_string(), denial_msg, is_error));
                 continue;
@@ -1266,7 +1266,7 @@ where
                         let msg = format!("Hook blocked: {}", reason);
                         if let Some(output) = &self.output {
                             output.hook_blocked(name, &reason);
-                            output.tool_result(name, &msg, true);
+                            output.tool_result_with_id(tool_use_id, name, &msg, true);
                         }
                         tool_results.push((index, tool_use_id.to_string(), msg, true));
                         continue;
@@ -1314,7 +1314,7 @@ where
         for (index, name, input, result) in concurrent_results {
             let result = result.map_err(|error| QueryLoopError::Tool(error.to_string()))?;
             if let Some(output) = &self.output {
-                output.tool_result(&name, &result.content, result.is_error);
+                output.tool_result_with_id(&result.tool_use_id, &name, &result.content, result.is_error);
             }
             // Fire PostToolUse hooks
             if let Some(runner) = &self.hook_runner {
@@ -1359,7 +1359,7 @@ where
                 .map_err(|error| QueryLoopError::Tool(error.to_string()))?;
 
             if let Some(output) = &self.output {
-                output.tool_result(&name, &result.content, result.is_error);
+                output.tool_result_with_id(&result.tool_use_id, &name, &result.content, result.is_error);
             }
             // Fire PostToolUse hooks (serial)
             if let Some(runner) = &self.hook_runner {
@@ -1421,7 +1421,7 @@ where
 
         for output in tool_outputs {
             if let Some(sink) = &self.output {
-                sink.tool_result(&output.name, &output.result.content, output.result.is_error);
+                sink.tool_result_with_id(&output.result.tool_use_id, &output.name, &output.result.content, output.result.is_error);
             }
             if self
                 .tools

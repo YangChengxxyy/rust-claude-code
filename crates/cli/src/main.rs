@@ -80,7 +80,7 @@ struct Cli {
     #[arg(short = 'p', long = "print")]
     print: bool,
 
-    #[arg(long = "output-format", value_parser = ["text", "json"])]
+    #[arg(long = "output-format", value_parser = ["text", "json", "stream-json"])]
     output_format: Option<String>,
 
     #[arg(long = "max-turns")]
@@ -160,6 +160,7 @@ struct ResolvedConfig {
     verbose: bool,
     print_mode: bool,
     output_json: bool,
+    output_stream_json: bool,
     allowed_tools: Vec<String>,
     disallowed_tools: Vec<String>,
     always_allow: Vec<rust_claude_core::permission::PermissionRule>,
@@ -406,6 +407,7 @@ fn resolve_config(
 
     let print_mode = cli.print || !cli.prompt.is_empty();
     let output_json = cli.output_format.as_deref() == Some("json");
+    let output_stream_json = cli.output_format.as_deref() == Some("stream-json");
     let allowed_tools = cli.allowed_tools.clone().unwrap_or_default();
     let disallowed_tools = cli.disallowed_tools.clone().unwrap_or_default();
     let (provider, _) = Config::resolve_provider(
@@ -427,6 +429,7 @@ fn resolve_config(
         verbose: cli.verbose,
         print_mode,
         output_json,
+        output_stream_json,
         allowed_tools,
         disallowed_tools,
         always_allow: config.always_allow.clone(),
@@ -823,7 +826,28 @@ async fn main() -> Result<()> {
         }
 
         // For streaming print mode, attach a bridge that streams to stdout
-        let run_result = if stream_enabled && !output_json {
+        let run_result = if resolved.output_stream_json {
+            // stream-json: emit one JSON object per line to stdout (NDJSON) for
+            // SDK / headless consumers. Force streaming on so incremental text
+            // and thinking deltas actually reach the sink; without it the final
+            // assistant text would never be forwarded.
+            app_state.lock().await.session.stream = true;
+            let session_id = app_state.lock().await.session.id.clone();
+            let sink = rust_claude_sdk::output::StreamJsonOutputSink::new(
+                session_id,
+                Box::new(std::io::stdout()),
+            );
+            query_loop = query_loop.with_output(Box::new(sink.clone()));
+            let result = query_loop.run(app_state.clone(), prompt).await;
+            match &result {
+                Ok(_) => sink.emit_done(),
+                Err(error) => {
+                    sink.emit_error(&error.to_string());
+                    sink.emit_done();
+                }
+            }
+            result.map(|_| ())
+        } else if stream_enabled && !output_json {
             let (print_tx, mut print_rx) = tokio::sync::mpsc::channel::<AppEvent>(256);
             let bridge = rust_claude_tui::TuiBridge::new(print_tx);
             query_loop = query_loop
@@ -3332,6 +3356,31 @@ mod tests {
     fn env_lock() -> MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn stream_json_output_format_is_accepted() {
+        // `--output-format stream-json` must parse and land on the Cli field.
+        let cli =
+            Cli::try_parse_from(["rust-claude", "--output-format", "stream-json", "-p", "hi"])
+                .expect("stream-json should be an accepted output format");
+        assert_eq!(cli.output_format.as_deref(), Some("stream-json"));
+    }
+
+    #[test]
+    fn text_and_json_output_formats_still_parse() {
+        // Acceptance: normal text/json output must be unaffected by the new option.
+        for fmt in ["text", "json"] {
+            let cli = Cli::try_parse_from(["rust-claude", "--output-format", fmt, "-p", "hi"])
+                .unwrap_or_else(|e| panic!("{fmt} should still parse: {e}"));
+            assert_eq!(cli.output_format.as_deref(), Some(fmt));
+        }
+    }
+
+    #[test]
+    fn unknown_output_format_is_rejected() {
+        // The value parser must still reject formats outside the allowed set.
+        assert!(Cli::try_parse_from(["rust-claude", "--output-format", "xml", "-p", "hi"]).is_err());
     }
 
     #[test]

@@ -209,7 +209,16 @@ cargo test -p rust-claude-tools registry
 
 ### 迭代 46：`stream-json` 输出协议第一版
 
-**状态**：规划中
+**状态**：已完成
+
+**完成记录（2026-05-19）**：
+
+- 新增 `StreamJsonOutputSink`（`crates/sdk/src/output.rs`），实现 `OutputSink`，每行输出一个 JSON 对象（NDJSON）。
+- 事件覆盖草案：`message_start`（含 `session_id`）、`content_block_delta`（`text_delta`）、`thinking_delta`、`tool_use`（含 `id`）、`tool_result`（含 `tool_use_id`）、`usage`、`error`、`done`。
+- 为 `OutputSink` 增加 `tool_use_with_id` / `tool_result_with_id` 两个默认方法（默认委托旧方法，`NoopOutputSink` / `ChannelOutputSink` / `TuiBridge` 行为不变），并在 `agent_loop.rs` 全部 8 个工具事件回调点改用带 id 版本，保证 tool_use ↔ tool_result 的 id 关联。
+- CLI 接受 `--output-format stream-json`；在 print 模式下走独立分支，强制开启 streaming 以便增量文本/thinking 进入 sink，运行结束后由 CLI 发出终态 `done`（失败时先 `error` 再 `done`）。
+- 已通过 `cargo test -p rust-claude-sdk output`（6 条新增 NDJSON 事件顺序/可解析性测试）、`cargo test -p rust-claude-cli stream_json`（参数解析测试）与 `cargo check --workspace`。
+- 偏差：未实现原版 SDK 协议 1:1，未做 remote transport、二进制附件/图片事件；`output.error()`（如压缩失败、truncated 续写）统一映射为 `error` 事件，与草案一致。
 
 **目标**：为 headless/SDK 场景增加 `--output-format stream-json`，输出 NDJSON 事件流，先覆盖文本、thinking、tool_use、tool_result、usage、done、error。
 
@@ -882,7 +891,7 @@ cargo check --workspace
 
 - [ ] 文件工具同时兼容 `path` 与 `file_path`。
 - [x] 工具 schema 有契约测试保护。
-- [ ] `--output-format stream-json` 可输出合法 NDJSON。
+- [x] `--output-format stream-json` 可输出合法 NDJSON。
 
 ### 阶段 B 完成标准
 

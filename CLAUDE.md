@@ -77,7 +77,7 @@ Options:
   -m, --mode <MODE>                  Permission mode: default, accept-edits, bypass, plan, dont-ask
       --model <MODEL>                Model to use
   -p, --print                        Print response and exit (non-interactive mode)
-      --output-format <FORMAT>       Output format: text, json
+      --output-format <FORMAT>       Output format: text, json, stream-json (NDJSON event stream)
       --max-turns <N>                Maximum agentic turns
       --system-prompt <TEXT>         Override system prompt
       --system-prompt-file <PATH>    Read system prompt from file

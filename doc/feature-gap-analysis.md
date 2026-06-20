@@ -56,7 +56,7 @@ Rust 版当前运行时注册的核心工具集中在 `crates/cli/src/main.rs` �
 |---|---|---|
 | `--model` / `--mode` / `--max-turns` | 已实现 | `--mode` 额外支持 `auto` |
 | `--print` | 已实现 | 非交互模式 |
-| `--output-format text/json` | 已实现 | 尚无原版 `stream-json` |
+| `--output-format text/json/stream-json` | 已实现 | `stream-json` 输出 NDJSON 事件流（迭代 46） |
 | system prompt 参数 | 已实现 | 支持覆盖与追加、文件输入 |
 | allowed/disallowed tools | 已实现 | 工具名精确过滤 |
 | `--sandbox` / `--sandbox-no-network` | 部分实现 | 参数与配置层已有，真正 OS-level sandbox 仍不足 |
@@ -268,7 +268,7 @@ Rust 当前有 sandbox 配置和命令包装基础，但原版还有：
 |---|---|---|---|
 | 文件工具字段 | 多数文件工具使用 `file_path` | Rust 使用 `path` | 与原版 schema 不兼容，但 Rust 内部一致 |
 | 默认 max rounds | 原版更接近用户可中断的长循环 | Rust `QueryLoop::new` 默认 8 轮 | 复杂任务可能提前停止，除非设置 `--max-turns` |
-| `--output-format` | text/json/stream-json | text/json | 无法直接兼容原版 SDK/NDJSON 流协议 |
+| `--output-format` | text/json/stream-json | text/json/stream-json | `stream-json` 为第一版 NDJSON 事件流，未做原版 SDK 协议 1:1（迭代 46） |
 | Task 工具 | 多个独立工具 + 共享 task list + owner/dependency | 单个 `Task` 工具，状态存在 app_state | 多代理协作不可等价 |
 | Plugin 系统 | marketplace、policy、autoupdate、bundled plugins | 本地 manifest 基础加载 | 生态能力差距大 |
 | Skills | Markdown skill 系统 + bundled skills + `SkillTool` | 缺失 | slash skill 和工具 skill 不兼容 |
@@ -311,9 +311,9 @@ Rust 当前有 sandbox 配置和命令包装基础，但原版还有：
    - `ListMcpResources`、`ReadMcpResource`、`McpAuth`。
    - 支持 resources/prompts 浏览、MCP 协议层 OAuth/Auth、step-up auth、token revoke 和 elicitation UI。
 
-7. **`stream-json` 输出协议**
-   - 对齐原版 headless/SDK 事件流。
-   - 支撑外部集成和测试 harness。
+7. **`stream-json` 输出协议** ✅ 已完成（迭代 46）
+   - 第一版 NDJSON 事件流已落地（`message_start`/`content_block_delta`/`thinking_delta`/`tool_use`/`tool_result`/`usage`/`error`/`done`）。
+   - 后续可继续对齐原版 SDK 协议细节（完整事件字段、附件、remote transport）。
 
 8. **完善 `/resume` 交互式选择器**
    - 列表、搜索、预览、恢复指定 session。
@@ -381,4 +381,4 @@ Rust 当前有 sandbox 配置和命令包装基础，但原版还有：
 3. 对照原版 `SkillTool` 和 `skills/loadSkillsDir.ts`，实现最小 skill loader。
 4. 对照原版 worktree 工具，实现 `EnterWorktree` / `ExitWorktree`。
 5. 对照原版 MCP resources/auth/elicitation，实现 `ListMcpResources`、`ReadMcpResource`、`McpAuth`。
-6. 增加 `stream-json` output format，优先对齐原版 headless 事件流。
+6. ~~增加 `stream-json` output format，优先对齐原版 headless 事件流。~~ 已在迭代 46 完成第一版 NDJSON 输出。

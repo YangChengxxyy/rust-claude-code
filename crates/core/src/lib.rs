@@ -15,6 +15,7 @@ pub mod permission;
 pub mod sandbox;
 pub mod session;
 pub mod settings;
+pub mod skills;
 pub mod state;
 pub mod task_list;
 pub mod team;

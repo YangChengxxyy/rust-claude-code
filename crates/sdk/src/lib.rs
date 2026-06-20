@@ -4,6 +4,7 @@ pub mod hooks;
 pub mod output;
 pub mod plugin;
 pub mod session;
+pub mod skill;
 pub mod streaming_tool_executor;
 pub mod system_prompt;
 

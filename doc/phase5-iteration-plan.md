@@ -460,7 +460,14 @@ cargo check --workspace
 
 ### 迭代 50：Skills 目录发现与 frontmatter 解析
 
-**状态**：规划中
+**状态**：已完成
+
+**完成记录（2026-06-21）**：
+
+- 新增 `crates/core/src/skills.rs`：`Skill`（name/description/allowed_tools/trigger/source/path/body）、`SkillSource`（User/Project）、`SkillLoadError`、`SkillRegistry`。frontmatter 解析用 `serde_yaml`（core 既有依赖，与 custom_agents 一致），支持 `allowed-tools` 为 YAML 列表 / 单值 / 逗号字符串三种形态（`#[serde(untagged)]` 归一化）。`SkillRegistry::load_from_dirs(&[(dir, source)])` 接收显式目录列表，便于用临时目录做确定性测试（不依赖 `$HOME`）；按目录顺序处理，**后加载的同名 skill 覆盖先加载的**（调用方 user 在前、project 在后 → project 覆盖 user，镜像 plugin/agent 优先级）。单个文件解析失败收入 `errors`，**不中断**扫描。候选文件支持目录形式 `<name>/SKILL.md` 与扁平 `<name>.md`。
+- 新增 `crates/sdk/src/skill.rs`：`SkillLoader::discover(project_dir)` 解析默认目录 `~/.claude/skills`（user）+ `.claude/skills`（project），委托 core 的 `SkillRegistry`，project 覆盖 user（镜像 `PluginLoader`）。暴露 `skills()`/`get()`/`errors()`/`len()` 供 slash suggestion 与后续 SkillTool（迭代 51）消费。
+- 本迭代**不执行** skill、不安装远程 skill、不做 conditional activation、不接 SkillTool（均为迭代 51/边界外）。
+- 已通过 `cargo test -p rust-claude-core skill`（11 passed）、`cargo test -p rust-claude-sdk skill`（4 passed）、`cargo check --workspace`，以及 `cargo test --workspace`（全 crate 0 失败；core 341→352、sdk 128→132）。
 
 **目标**：实现最小 skills loader，支持从本地目录发现 Markdown skill，不执行 skill。
 

@@ -269,7 +269,7 @@ Rust 当前有 sandbox 配置和命令包装基础，但原版还有：
 | 文件工具字段 | 多数文件工具使用 `file_path` | Rust 使用 `path` | 与原版 schema 不兼容，但 Rust 内部一致 |
 | 默认 max rounds | 原版更接近用户可中断的长循环 | Rust `QueryLoop::new` 默认 8 轮 | 复杂任务可能提前停止，除非设置 `--max-turns` |
 | `--output-format` | text/json/stream-json | text/json/stream-json | `stream-json` 为第一版 NDJSON 事件流，未做原版 SDK 协议 1:1（迭代 46） |
-| Task 工具 | 多个独立工具 + 共享 task list + owner/dependency | 单个 `Task` 工具，状态存在 app_state | 多代理协作不可等价 |
+| Task 工具 | 多个独立工具 + 共享 task list + owner/dependency | 单个 `Task` 工具，状态存在 app_state；独立的持久化 task-list 模型（`core/task_list.rs`，迭代 47）已就绪，待迭代 48 接入 `TaskCreate/Get/List/Update` | 多代理协作不可等价 |
 | Plugin 系统 | marketplace、policy、autoupdate、bundled plugins | 本地 manifest 基础加载 | 生态能力差距大 |
 | Skills | Markdown skill 系统 + bundled skills + `SkillTool` | 缺失 | slash skill 和工具 skill 不兼容 |
 | MCP | transport + auth + resources + elicitation + UI | transport + tools 基础调用 | MCP 复杂服务不可完整使用 |

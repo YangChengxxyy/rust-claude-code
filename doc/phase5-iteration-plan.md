@@ -282,7 +282,14 @@ cargo check --workspace
 
 ### 迭代 47：Task 数据模型与本地存储
 
-**状态**：规划中
+**状态**：已完成
+
+**完成记录（2026-05-19）**：
+
+- 新增 `crates/core/src/task_list.rs`：`TaskListEntry`（id / subject / description / status / owner / blocked_by / blocks / metadata，复用 `state::TaskStatus`）、`TaskList` 集合（CRUD + 按 id 稳定排序 + 顺序数字 id）、`TaskUpdate` 补丁（`owner` 用 `Option<Option<String>>` 表达“设置/清除/不动”）、`TaskStore` 按 scope 持久化、`TaskStoreError`。
+- 持久化路径明确：`<root>/<sanitized-scope>.json`，默认根目录 `~/.config/rust-claude-code/tasks`；scope 做文件名安全化并防路径穿越；写入采用 tmp+rename 原子替换。
+- 与现有 `state::Task` / `AppState.tasks` / `TaskTool` 完全解耦，未改动既有代码。
+- 已通过 `cargo test -p rust-claude-core task`（14 条新增：CRUD、serde 往返、顺序 id、owner 清除、scope 隔离、路径安全化、缺失文件返回空）与 `cargo test -p rust-claude-tools task`（既有 TaskTool 测试不受影响）。
 
 **目标**：建立独立于 `AppState.tasks` 的任务列表模型，为原版 Task 工具族、Team 和 Agent 协作打基础。
 
@@ -895,7 +902,7 @@ cargo check --workspace
 
 ### 阶段 B 完成标准
 
-- [ ] 独立 Task 数据模型和本地存储可用。
+- [x] 独立 Task 数据模型和本地存储可用。
 - [ ] `TaskCreate/Get/List/Update` 可用。
 - [ ] 本地 `SendMessage`、`TeamCreate`、`TeamDelete` 骨架可用。
 

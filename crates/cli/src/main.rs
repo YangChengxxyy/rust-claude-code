@@ -29,8 +29,9 @@ use rust_claude_sdk::plugin::PluginManager;
 use rust_claude_tools::{
     register_mcp_tools, AgentContext, AgentTool, AskUserQuestionTool, AutoMemoryTool, BashTool,
     EnterPlanModeTool, ExitPlanModeTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
-    GrepTool, LspTool, MonitorTool, NotebookEditTool, TaskCreateTool, TaskGetTool, TaskListTool,
-    TaskTool, TaskUpdateTool, ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool,
+    GrepTool, LspTool, MonitorTool, NotebookEditTool, SendMessageTool, TaskCreateTool, TaskGetTool,
+    TaskListTool, TaskTool, TaskUpdateTool, TeamCreateTool, TeamDeleteTool, ToolRegistry,
+    ToolSearchTool, WebFetchTool, WebSearchTool,
 };
 use rust_claude_tui::{App, AppEvent, ChatMessage, TerminalGuard, TuiBridge, UserCommand};
 use tokio::sync::{mpsc, Mutex};
@@ -1626,6 +1627,9 @@ fn build_tools() -> std::sync::Arc<ToolRegistry> {
         tools.register(TaskGetTool::new());
         tools.register(TaskListTool::new());
         tools.register(TaskUpdateTool::new());
+        tools.register(TeamCreateTool::new());
+        tools.register(TeamDeleteTool::new());
+        tools.register(SendMessageTool::new());
         tools.register(WebFetchTool::new());
         tools.register(WebSearchTool::new());
         tools.register(ToolSearchTool::new(weak.clone()));

@@ -17,6 +17,7 @@ pub mod registry;
 pub mod sandbox;
 pub mod task_tool;
 pub mod task_tools;
+pub mod team_tools;
 pub mod todo_write;
 pub mod tool;
 pub mod tool_search;
@@ -41,6 +42,7 @@ pub use plan_mode::{EnterPlanModeTool, ExitPlanModeTool};
 pub use registry::{RegisteredTool, ToolRegistry};
 pub use task_tool::TaskTool;
 pub use task_tools::{TaskCreateTool, TaskGetTool, TaskListTool, TaskUpdateTool};
+pub use team_tools::{SendMessageTool, TeamCreateTool, TeamDeleteTool};
 pub use todo_write::TodoWriteTool;
 pub use tool::{
     AgentContext, AgentRunOptions, AskUserQuestionOption, AskUserQuestionRequest,

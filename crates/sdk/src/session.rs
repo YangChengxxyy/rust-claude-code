@@ -15,8 +15,9 @@ use rust_claude_core::{
 use rust_claude_tools::{
     AgentTool, AskUserQuestionTool, AutoMemoryTool, BashTool, EnterPlanModeTool, ExitPlanModeTool,
     FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, LspTool, MonitorTool,
-    NotebookEditTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskTool, TaskUpdateTool, Tool,
-    ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool,
+    NotebookEditTool, SendMessageTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskTool,
+    TaskUpdateTool, TeamCreateTool, TeamDeleteTool, Tool, ToolRegistry, ToolSearchTool,
+    WebFetchTool, WebSearchTool,
 };
 use tokio::sync::{mpsc, Mutex};
 
@@ -393,6 +394,9 @@ fn default_tool_registry() -> Arc<ToolRegistry> {
         tools.register(TaskGetTool::new());
         tools.register(TaskListTool::new());
         tools.register(TaskUpdateTool::new());
+        tools.register(TeamCreateTool::new());
+        tools.register(TeamDeleteTool::new());
+        tools.register(SendMessageTool::new());
         tools.register(WebFetchTool::new());
         tools.register(WebSearchTool::new());
         tools.register(ToolSearchTool::new(weak.clone()));

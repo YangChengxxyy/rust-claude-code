@@ -399,7 +399,15 @@ cargo check --workspace
 
 ### 迭代 49：本地 SendMessage 与 Team 骨架
 
-**状态**：规划中
+**状态**：已完成
+
+**完成记录（2026-06-20）**：
+
+- 新增 `crates/core/src/team.rs`：`Team`（name / members / agent_type / task_list 绑定）、`MailboxMessage`（`seq` + `from` + `content`，`seq` 由 store 按追加顺序赋值，确定性、不存墙钟时间）、`TeamStore`。存储布局为每个 team 一个子目录 `<root>/<sanitized-team>/team.json` + `<root>/<sanitized-team>/mailboxes/<sanitized-member>.json`，默认根 `$HOME/.config/rust-claude-code/teams`。`load→改→save` 走 temp-file + rename 原子往返，`sanitize_name` 防路径穿越（镜像迭代 47 的 `TaskStore` 模式）。
+- 新增 `crates/tools/src/team_tools.rs`：`TeamCreateTool` / `TeamDeleteTool` / `SendMessageTool` 三个独立工具。真实逻辑放同步 `run(&store, …)` 辅助函数，`execute()` 只解析默认 store + 反序列化输入（team 工具以 team 名为 key，不需要 `app_state`/scope）。`SendMessage` 校验 team 与 member 存在后写入 mailbox，`from` 缺省为 `orchestrator`。
+- 已注册到 CLI（`build_tools`）和 SDK（`default_tool_registry`）默认工具集。
+- 已通过 `cargo test -p rust-claude-tools team`（9 passed）、`cargo test -p rust-claude-tools send_message`（4 passed）、`cargo check --workspace`，以及 `cargo test --workspace`（全 crate 0 失败）。
+- 本地纯文件实现：未启动任何 teammate 进程，未引入 tmux/iTerm/remote backend（符合「不做」边界）。
 
 **目标**：实现最小本地团队编排骨架，让 `SendMessage`、`TeamCreate`、`TeamDelete` 有可运行语义，但不引入 tmux/iTerm/remote backend。
 

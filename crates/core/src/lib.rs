@@ -17,5 +17,6 @@ pub mod session;
 pub mod settings;
 pub mod state;
 pub mod task_list;
+pub mod team;
 pub mod tool_types;
 pub mod trust;

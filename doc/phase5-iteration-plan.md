@@ -108,7 +108,14 @@
 
 ### 迭代 44：文件工具 schema 兼容层
 
-**状态**：规划中
+**状态**：已完成
+
+**完成记录（2026-06-20）**：
+
+- `FileRead` / `FileEdit` / `FileWrite` 工具层早已通过 `#[serde(alias = "file_path")]` + schema `anyOf` 同时接受 `path` 与 `file_path`（在迭代 45 实现时一并落地，各自带 `*_accepts_file_path_alias` 测试）。
+- 本轮补齐 TUI 展示层缺口：`crates/tui/src/app.rs` 的 `summarize_tool_input` 对三个文件工具分支增加 `file_path` 回退（`input.get("path").or_else(|| input.get("file_path"))`），原先只识别 `path`，模型发 `file_path` 时摘要会显示 `(unknown)`。
+- 测试 `test_summarize_tool_input_uses_path_field_for_file_tools` 追加 `file_path` 别名断言，覆盖 FileRead / FileEdit / FileWrite 三个工具。
+- 已通过 `cargo test -p rust-claude-tools file_read` / `file_edit`、`cargo test -p rust-claude-tui summarize_tool_input` 与 `cargo check --workspace`，workspace 测试 0 失败。
 
 **目标**：让 Rust 文件工具同时接受 `path` 与原版 `file_path`，消除模型/工具提示与原版 schema 的兼容风险。
 

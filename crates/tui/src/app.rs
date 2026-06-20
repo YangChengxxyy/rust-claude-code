@@ -2561,12 +2561,14 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
             .unwrap_or_default(),
         "FileRead" => input
             .get("path")
+            .or_else(|| input.get("file_path"))
             .and_then(|v| v.as_str())
             .unwrap_or("(unknown)")
             .to_string(),
         "FileEdit" => {
             let path = input
                 .get("path")
+                .or_else(|| input.get("file_path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("(unknown)");
             format!("{path} (edit)")
@@ -2574,6 +2576,7 @@ fn summarize_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
         "FileWrite" => {
             let path = input
                 .get("path")
+                .or_else(|| input.get("file_path"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("(unknown)");
             format!("{path} (write)")
@@ -4210,6 +4213,23 @@ mod tests {
         );
         assert_eq!(
             summarize_tool_input("FileWrite", &serde_json::json!({ "path": "src/new.rs" })),
+            "src/new.rs (write)"
+        );
+        // Iteration 44: the original `file_path` alias must also render the path,
+        // not "(unknown)".
+        assert_eq!(
+            summarize_tool_input("FileRead", &serde_json::json!({ "file_path": "src/main.rs" })),
+            "src/main.rs"
+        );
+        assert_eq!(
+            summarize_tool_input("FileEdit", &serde_json::json!({ "file_path": "src/lib.rs" })),
+            "src/lib.rs (edit)"
+        );
+        assert_eq!(
+            summarize_tool_input(
+                "FileWrite",
+                &serde_json::json!({ "file_path": "src/new.rs" })
+            ),
             "src/new.rs (write)"
         );
     }

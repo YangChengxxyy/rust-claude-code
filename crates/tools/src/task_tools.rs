@@ -20,9 +20,7 @@ use crate::tool::{Tool, ToolContext, ToolError};
 
 /// Resolve the persisted task store + the current scope (session id) for a tool
 /// invocation. Requires `app_state` in the context.
-async fn resolve_store_and_scope(
-    context: &ToolContext,
-) -> Result<(TaskStore, String), ToolError> {
+async fn resolve_store_and_scope(context: &ToolContext) -> Result<(TaskStore, String), ToolError> {
     let app_state = context
         .app_state
         .clone()
@@ -209,10 +207,10 @@ impl Tool for TaskGetTool {
         true
     }
 
-    fn is_concurrency_safe(&self) -> bool {
-        true
-    }
-
+    // NOTE: deliberately NOT concurrency-safe. Task tools share one on-disk
+    // list per scope, so reads must run serially with writes (in model-given
+    // order) — otherwise a read could be hoisted ahead of a Create/Update in
+    // the same turn and observe stale state.
     async fn execute(
         &self,
         input: serde_json::Value,
@@ -273,9 +271,7 @@ impl Tool for TaskListTool {
         true
     }
 
-    fn is_concurrency_safe(&self) -> bool {
-        true
-    }
+    // NOTE: deliberately NOT concurrency-safe — see TaskGetTool for rationale.
 
     async fn execute(
         &self,
@@ -695,11 +691,13 @@ mod tests {
 
         assert_eq!(TaskGetTool::new().info().name, "TaskGet");
         assert!(TaskGetTool::new().is_read_only());
-        assert!(TaskGetTool::new().is_concurrency_safe());
+        // Reads share the on-disk list with writes, so they must NOT be
+        // concurrency-safe (else they reorder ahead of writes in one turn).
+        assert!(!TaskGetTool::new().is_concurrency_safe());
 
         assert_eq!(TaskListTool::new().info().name, "TaskList");
         assert!(TaskListTool::new().is_read_only());
-        assert!(TaskListTool::new().is_concurrency_safe());
+        assert!(!TaskListTool::new().is_concurrency_safe());
 
         assert_eq!(TaskUpdateTool::new().info().name, "TaskUpdate");
         assert!(!TaskUpdateTool::new().is_read_only());

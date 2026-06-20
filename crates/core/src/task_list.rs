@@ -124,7 +124,7 @@ impl TaskList {
     /// listing is stable across runs regardless of insertion order.
     pub fn list_sorted(&self) -> Vec<&TaskListEntry> {
         let mut refs: Vec<&TaskListEntry> = self.tasks.iter().collect();
-        refs.sort_by(|a, b| sort_key(&a.id).cmp(&sort_key(&b.id)));
+        refs.sort_by_key(|t| sort_key(&t.id));
         refs
     }
 
@@ -267,9 +267,7 @@ impl TaskStore {
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
         let tmp = dir.join(format!(
             ".{}.tmp",
-            path.file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or("tasks")
+            path.file_name().and_then(|s| s.to_str()).unwrap_or("tasks")
         ));
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, &path)?;
@@ -357,7 +355,11 @@ mod tests {
         list.upsert(entry("2", "two"));
         list.upsert(entry("1", "one"));
 
-        let ids: Vec<String> = list.list_sorted().into_iter().map(|t| t.id.clone()).collect();
+        let ids: Vec<String> = list
+            .list_sorted()
+            .into_iter()
+            .map(|t| t.id.clone())
+            .collect();
         assert_eq!(ids, vec!["1", "2", "10"]);
     }
 
@@ -431,7 +433,8 @@ mod tests {
     #[test]
     fn deserialize_partial_entry_uses_defaults() {
         // A minimal JSON object (only required fields) must load with defaults.
-        let json_str = r#"{"schema_version":1,"tasks":[{"id":"1","subject":"x","status":"pending"}]}"#;
+        let json_str =
+            r#"{"schema_version":1,"tasks":[{"id":"1","subject":"x","status":"pending"}]}"#;
         let list: TaskList = serde_json::from_str(json_str).unwrap();
         let e = &list.tasks[0];
         assert_eq!(e.description, "");
@@ -498,8 +501,14 @@ mod tests {
         b.upsert(entry("1", "b-task"));
         store.save("team-b", &b).unwrap();
 
-        assert_eq!(store.load("team-a").unwrap().get("1").unwrap().subject, "a-task");
-        assert_eq!(store.load("team-b").unwrap().get("1").unwrap().subject, "b-task");
+        assert_eq!(
+            store.load("team-a").unwrap().get("1").unwrap().subject,
+            "a-task"
+        );
+        assert_eq!(
+            store.load("team-b").unwrap().get("1").unwrap().subject,
+            "b-task"
+        );
     }
 
     #[test]
@@ -520,7 +529,10 @@ mod tests {
         if std::env::var("HOME").is_ok() {
             let root = TaskStore::default_root().unwrap();
             assert!(root.ends_with("tasks"));
-            assert!(root.starts_with(".config/rust-claude-code") || root.to_string_lossy().contains(".config/rust-claude-code"));
+            assert!(
+                root.starts_with(".config/rust-claude-code")
+                    || root.to_string_lossy().contains(".config/rust-claude-code")
+            );
         }
     }
 }

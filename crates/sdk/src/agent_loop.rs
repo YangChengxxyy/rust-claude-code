@@ -1314,7 +1314,12 @@ where
         for (index, name, input, result) in concurrent_results {
             let result = result.map_err(|error| QueryLoopError::Tool(error.to_string()))?;
             if let Some(output) = &self.output {
-                output.tool_result_with_id(&result.tool_use_id, &name, &result.content, result.is_error);
+                output.tool_result_with_id(
+                    &result.tool_use_id,
+                    &name,
+                    &result.content,
+                    result.is_error,
+                );
             }
             // Fire PostToolUse hooks
             if let Some(runner) = &self.hook_runner {
@@ -1359,7 +1364,12 @@ where
                 .map_err(|error| QueryLoopError::Tool(error.to_string()))?;
 
             if let Some(output) = &self.output {
-                output.tool_result_with_id(&result.tool_use_id, &name, &result.content, result.is_error);
+                output.tool_result_with_id(
+                    &result.tool_use_id,
+                    &name,
+                    &result.content,
+                    result.is_error,
+                );
             }
             // Fire PostToolUse hooks (serial)
             if let Some(runner) = &self.hook_runner {
@@ -1421,7 +1431,12 @@ where
 
         for output in tool_outputs {
             if let Some(sink) = &self.output {
-                sink.tool_result_with_id(&output.result.tool_use_id, &output.name, &output.result.content, output.result.is_error);
+                sink.tool_result_with_id(
+                    &output.result.tool_use_id,
+                    &output.name,
+                    &output.result.content,
+                    output.result.is_error,
+                );
             }
             if self
                 .tools

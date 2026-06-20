@@ -3384,7 +3384,9 @@ mod tests {
     #[test]
     fn unknown_output_format_is_rejected() {
         // The value parser must still reject formats outside the allowed set.
-        assert!(Cli::try_parse_from(["rust-claude", "--output-format", "xml", "-p", "hi"]).is_err());
+        assert!(
+            Cli::try_parse_from(["rust-claude", "--output-format", "xml", "-p", "hi"]).is_err()
+        );
     }
 
     #[test]

@@ -2,10 +2,10 @@ use rust_claude_core::compaction::CompactionResult;
 use rust_claude_core::message::Message;
 use rust_claude_core::session::SessionEvent;
 use rust_claude_core::state::TodoItem;
+use rust_claude_tools::{AskUserQuestionRequest, AskUserQuestionResponse};
 use serde_json::json;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
-use rust_claude_tools::{AskUserQuestionRequest, AskUserQuestionResponse};
 
 /// Decision returned by PermissionUI when a tool requires interactive confirmation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,13 +48,7 @@ pub trait OutputSink: Send + Sync {
     /// Tool result keyed by the originating tool-use id.
     ///
     /// Default delegates to [`OutputSink::tool_result`].
-    fn tool_result_with_id(
-        &self,
-        _id: &str,
-        name: &str,
-        output: &str,
-        is_error: bool,
-    ) {
+    fn tool_result_with_id(&self, _id: &str, name: &str, output: &str, is_error: bool) {
         self.tool_result(name, output, is_error);
     }
 
@@ -333,10 +327,7 @@ mod stream_json_tests {
         sink.emit_done();
 
         let events = parsed_events(&buffer);
-        let types: Vec<&str> = events
-            .iter()
-            .map(|v| v["type"].as_str().unwrap())
-            .collect();
+        let types: Vec<&str> = events.iter().map(|v| v["type"].as_str().unwrap()).collect();
         assert_eq!(
             types,
             vec![

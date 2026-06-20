@@ -335,7 +335,15 @@ cargo test -p rust-claude-tools task
 
 ### 迭代 48：Task 工具族最小实现
 
-**状态**：规划中
+**状态**：已完成
+
+**完成记录（2026-05-19）**：
+
+- 新增 `crates/tools/src/task_tools.rs`：`TaskCreateTool` / `TaskGetTool` / `TaskListTool` / `TaskUpdateTool` 四个独立工具，均基于迭代 47 的 `TaskStore`（scope = 当前 session id）。
+- 真正逻辑放在 `run(&store, &scope, tool_use_id, input)` 同步辅助函数中，`execute()` 只负责从 `app_state` 解析 store+scope 并反序列化输入，便于用临时 store 做确定性测试（不依赖 `$HOME`）。
+- 读写语义：Create/Update 为 `load → 改 → save` 原子往返；Get/List 只读。`TaskList` 按数字 id 稳定排序；`blocked_by` / `blocks` 在 create/update/list/get 中均可表达。
+- 已注册到 CLI（`build_tools`）和 SDK（`default_tool_registry`）默认工具集，与既有 `TaskTool` 并存。
+- 已通过 `cargo test -p rust-claude-tools task_create`、`cargo test -p rust-claude-tools task_list` 与 `cargo check --workspace`，workspace 测试 0 失败。
 
 **目标**：实现独立工具：`TaskCreate`、`TaskGet`、`TaskList`、`TaskUpdate`，先不做后台输出和停止。
 
@@ -903,7 +911,7 @@ cargo check --workspace
 ### 阶段 B 完成标准
 
 - [x] 独立 Task 数据模型和本地存储可用。
-- [ ] `TaskCreate/Get/List/Update` 可用。
+- [x] `TaskCreate/Get/List/Update` 可用。
 - [ ] 本地 `SendMessage`、`TeamCreate`、`TeamDelete` 骨架可用。
 
 ### 阶段 C 完成标准

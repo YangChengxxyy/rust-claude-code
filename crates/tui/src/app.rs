@@ -707,6 +707,9 @@ pub struct App {
     pub session_picker: Option<SessionPicker>,
     pub slash_suggestions: Option<SlashSuggestions>,
     pub slash_registry: crate::slash::SlashCommandRegistry,
+    /// Discovered local skills; feeds the "Skills" slash-suggestion group.
+    /// When `None`, the hardcoded `SKILL_SUGGESTIONS` placeholder is used.
+    pub skills: Option<std::sync::Arc<rust_claude_core::skills::SkillRegistry>>,
 
     // -- task panel --
     pub todo_visible: bool,
@@ -783,6 +786,7 @@ impl App {
                 crate::slash::register_builtin_commands(&mut r);
                 r
             },
+            skills: None,
             todo_visible: false,
             side_panel_mode: SidePanelMode::Todo,
             tasks: Vec::new(),
@@ -840,21 +844,40 @@ impl App {
             }
         }
 
-        for skill in SKILL_SUGGESTIONS {
-            let match_text = format!(
-                "{} {}",
-                skill.name.to_lowercase(),
-                skill.description.to_lowercase()
-            );
-            let item = SuggestionItem::new(
-                SuggestionKind::Skill,
-                skill.name,
-                skill.description,
-                skill.name,
-                match_text,
-            );
-            if query.is_empty() || item.matches_query(&query) {
-                items.push(item);
+        // Skills: prefer discovered local skills; fall back to the hardcoded
+        // placeholder list when none have been loaded yet.
+        if let Some(skills) = &self.skills {
+            for skill in skills.list() {
+                let match_text =
+                    format!("{} {}", skill.name.to_lowercase(), skill.description.to_lowercase());
+                let item = SuggestionItem::new(
+                    SuggestionKind::Skill,
+                    &skill.name,
+                    &skill.description,
+                    &skill.name,
+                    match_text,
+                );
+                if query.is_empty() || item.matches_query(&query) {
+                    items.push(item);
+                }
+            }
+        } else {
+            for skill in SKILL_SUGGESTIONS {
+                let match_text = format!(
+                    "{} {}",
+                    skill.name.to_lowercase(),
+                    skill.description.to_lowercase()
+                );
+                let item = SuggestionItem::new(
+                    SuggestionKind::Skill,
+                    skill.name,
+                    skill.description,
+                    skill.name,
+                    match_text,
+                );
+                if query.is_empty() || item.matches_query(&query) {
+                    items.push(item);
+                }
             }
         }
 
@@ -4326,6 +4349,57 @@ mod tests {
 
         assert!(app.slash_suggestions.is_some());
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn test_slash_suggestions_include_discovered_local_skills() {
+        use rust_claude_core::skills::{SkillRegistry, SkillSource};
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir().join(format!(
+            "tui-skill-suggest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("deploy.md"),
+            "---\nname: deploy\ndescription: Deploy the project\n---\nbody\n",
+        )
+        .unwrap();
+        let registry = Arc::new(SkillRegistry::load_from_dirs(&[(
+            dir.clone(),
+            SkillSource::User,
+        )]));
+
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        app.skills = Some(registry);
+        let (tx, _rx) = mpsc::channel(1);
+
+        // Typing "/" opens suggestions that must include the discovered skill.
+        app.handle_key_event(key(KeyCode::Char('/')), &tx).await;
+
+        let suggestions = app.slash_suggestions.as_ref().unwrap();
+        let deploy = suggestions
+            .items
+            .iter()
+            .find(|item| item.kind == SuggestionKind::Skill && item.label == "deploy");
+        assert!(
+            deploy.is_some(),
+            "local skill 'deploy' should appear in slash suggestions"
+        );
+        assert_eq!(deploy.unwrap().description, "Deploy the project");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

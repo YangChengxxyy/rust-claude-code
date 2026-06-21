@@ -29,9 +29,9 @@ use rust_claude_sdk::plugin::PluginManager;
 use rust_claude_tools::{
     register_mcp_tools, AgentContext, AgentTool, AskUserQuestionTool, AutoMemoryTool, BashTool,
     EnterPlanModeTool, ExitPlanModeTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
-    GrepTool, LspTool, MonitorTool, NotebookEditTool, SendMessageTool, TaskCreateTool, TaskGetTool,
-    TaskListTool, TaskTool, TaskUpdateTool, TeamCreateTool, TeamDeleteTool, ToolRegistry,
-    ToolSearchTool, WebFetchTool, WebSearchTool,
+    GrepTool, LspTool, MonitorTool, NotebookEditTool, SendMessageTool, SkillTool, TaskCreateTool,
+    TaskGetTool, TaskListTool, TaskTool, TaskUpdateTool, TeamCreateTool, TeamDeleteTool,
+    ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool,
 };
 use rust_claude_tui::{App, AppEvent, ChatMessage, TerminalGuard, TuiBridge, UserCommand};
 use tokio::sync::{mpsc, Mutex};
@@ -1605,6 +1605,23 @@ fn truncate_review_diff(diff: &str) -> (String, bool) {
     (diff[..end].to_string(), true)
 }
 
+/// Discover local skills once per process (cached) and share the registry
+/// between `SkillTool` and the TUI slash suggestions. Discovery reads the
+/// user (`~/.claude/skills`) and project (`.claude/skills`) directories, with
+/// project skills overriding user skills on name collision.
+fn discovered_skills() -> std::sync::Arc<rust_claude_core::skills::SkillRegistry> {
+    use std::sync::OnceLock;
+    static SKILLS: OnceLock<std::sync::Arc<rust_claude_core::skills::SkillRegistry>> =
+        OnceLock::new();
+    SKILLS.get_or_init(|| {
+        let project_dir = std::env::current_dir().ok();
+        std::sync::Arc::new(
+            rust_claude_sdk::skill::SkillLoader::discover(project_dir.as_deref()).into_registry(),
+        )
+    })
+    .clone()
+}
+
 fn build_tools() -> std::sync::Arc<ToolRegistry> {
     std::sync::Arc::new_cyclic(|weak| {
         let tools = ToolRegistry::new();
@@ -1630,6 +1647,7 @@ fn build_tools() -> std::sync::Arc<ToolRegistry> {
         tools.register(TeamCreateTool::new());
         tools.register(TeamDeleteTool::new());
         tools.register(SendMessageTool::new());
+        tools.register(SkillTool::new(discovered_skills()));
         tools.register(WebFetchTool::new());
         tools.register(WebSearchTool::new());
         tools.register(ToolSearchTool::new(weak.clone()));
@@ -3231,6 +3249,9 @@ async fn run_tui(
 
     let mut terminal_guard = TerminalGuard::new()?;
     let mut app = App::new(model, model_setting, permission_mode, git_branch, theme);
+
+    // Feed discovered local skills into the TUI slash-suggestion "Skills" group.
+    app.skills = Some(discovered_skills());
 
     // Register plugin slash commands in the TUI registry
     {

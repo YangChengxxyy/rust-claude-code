@@ -512,7 +512,17 @@ cargo test -p rust-claude-sdk skill
 
 ### 迭代 51：SkillTool 最小执行
 
-**状态**：规划中
+**状态**：已完成
+
+**完成记录（2026-06-21）**：
+
+- 新增 `crates/tools/src/skill_tool.rs`：`SkillTool` 持有 `Arc<SkillRegistry>`，输入 `{skill, args?}`。`run(&registry, …)` 同步辅助函数按名查找迭代 50 的 `SkillRegistry`，对 body 做 `{args}` 占位符替换（args 缺省 → 空串），缺失 skill 返回 `ToolError::Execution("skill not found: …")`。`execute()` 只反序列化输入并委托 `run`。纯内存查找、无 I/O、无状态变更 → `is_read_only` + `is_concurrency_safe` 均为 true。导出于 `tools/lib.rs`。
+- 接入注册：CLI `build_tools` 注册 `SkillTool::new(discovered_skills())`；SDK `default_tool_registry` 注册 `SkillTool`（用 `SkillLoader::discover(None)`，仅 user skills，因默认 builder 无 project dir）。`SkillLoader::into_registry()` 暴露底层 registry 供两层共享。
+- CLI 共享发现：`discovered_skills()` 用 `OnceLock` 进程级缓存 `SkillLoader::discover(cwd).into_registry()`，`build_tools` 与 TUI 共用同一份 registry，避免每轮重扫；`build_tools` 签名与 6 处调用点/3 处 sub-agent factory 均无需改动。
+- slash suggestion：TUI 原有 `SuggestionKind::Skill` 分组此前由硬编码 `SKILL_SUGGESTIONS` 占位喂入；新增 `App.skills: Option<Arc<SkillRegistry>>` 字段，`refresh_slash_suggestions` 在 `Some` 时用真实本地 skills 喂入 Skill 分组，`None` 时回退占位（保持既有测试不变）。main.rs 在 `App::new` 后 `app.skills = Some(discovered_skills())`。
+- 不做远程安装、skill 内嵌 hooks、复杂 artifact 生成（边界外）。
+- 已通过 `cargo test -p rust-claude-tools skill`（7 passed）、`cargo test -p rust-claude-tui slash`（10 passed，含新增 discovered-skills 测试）、`cargo check --workspace`，以及 `cargo test --workspace`（全 crate 0 失败；tui 162→163）。
+
 
 **目标**：实现 `Skill` / `SkillTool`，允许模型按 skill 名称加载并执行本地 skill prompt。
 

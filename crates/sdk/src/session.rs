@@ -15,8 +15,8 @@ use rust_claude_core::{
 use rust_claude_tools::{
     AgentTool, AskUserQuestionTool, AutoMemoryTool, BashTool, EnterPlanModeTool, ExitPlanModeTool,
     FileEditTool, FileReadTool, FileWriteTool, GlobTool, GrepTool, LspTool, MonitorTool,
-    NotebookEditTool, SendMessageTool, TaskCreateTool, TaskGetTool, TaskListTool, TaskTool,
-    TaskUpdateTool, TeamCreateTool, TeamDeleteTool, Tool, ToolRegistry, ToolSearchTool,
+    NotebookEditTool, SendMessageTool, SkillTool, TaskCreateTool, TaskGetTool, TaskListTool,
+    TaskTool, TaskUpdateTool, TeamCreateTool, TeamDeleteTool, Tool, ToolRegistry, ToolSearchTool,
     WebFetchTool, WebSearchTool,
 };
 use tokio::sync::{mpsc, Mutex};
@@ -397,6 +397,11 @@ fn default_tool_registry() -> Arc<ToolRegistry> {
         tools.register(TeamCreateTool::new());
         tools.register(TeamDeleteTool::new());
         tools.register(SendMessageTool::new());
+        // SkillTool: load user skills (no project dir available in the default
+        // builder; the CLI path also discovers project skills).
+        tools.register(SkillTool::new(std::sync::Arc::new(
+            crate::skill::SkillLoader::discover(None).into_registry(),
+        )));
         tools.register(WebFetchTool::new());
         tools.register(WebSearchTool::new());
         tools.register(ToolSearchTool::new(weak.clone()));

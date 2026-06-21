@@ -46,6 +46,13 @@ impl SkillLoader {
         Self { registry }
     }
 
+    /// Consume the loader and return the underlying registry. The CLI uses
+    /// this to share one discovered registry between `SkillTool` and the TUI
+    /// slash-suggestion registration.
+    pub fn into_registry(self) -> SkillRegistry {
+        self.registry
+    }
+
     /// Loaded skills, sorted by name.
     pub fn skills(&self) -> Vec<&Skill> {
         self.registry.list()

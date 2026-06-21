@@ -88,6 +88,9 @@ pub struct AppState {
     pub config: Config,
     pub config_provenance: ConfigProvenance,
     pub git_context: Option<GitContextSnapshot>,
+    /// Active git worktree session, if `EnterWorktree` switched the session
+    /// into a linked worktree. `None` when rooted in the main checkout.
+    pub worktree: Option<crate::git::ActiveWorktree>,
     /// Usage from the most recent API response (for accurate token counting).
     pub last_api_usage: Option<Usage>,
     /// Message count at the time of the last API response.
@@ -128,6 +131,7 @@ impl AppState {
             config: Config::with_credential(String::new(), false),
             config_provenance: ConfigProvenance::default(),
             git_context: None,
+            worktree: None,
             last_api_usage: None,
             last_api_message_index: 0,
             file_state_cache: FileStateCache::new(100),
@@ -339,6 +343,7 @@ mod tests {
         assert!(state.most_recent_assistant_usage().is_none());
         assert_eq!(state.config_provenance, ConfigProvenance::default());
         assert!(state.git_context.is_none());
+        assert!(state.worktree.is_none());
     }
 
     #[test]

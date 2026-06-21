@@ -31,7 +31,8 @@ use rust_claude_tools::{
     EnterPlanModeTool, ExitPlanModeTool, FileEditTool, FileReadTool, FileWriteTool, GlobTool,
     GrepTool, LspTool, MonitorTool, NotebookEditTool, SendMessageTool, SkillTool, TaskCreateTool,
     TaskGetTool, TaskListTool, TaskTool, TaskUpdateTool, TeamCreateTool, TeamDeleteTool,
-    ToolRegistry, ToolSearchTool, WebFetchTool, WebSearchTool,
+    EnterWorktreeTool, ExitWorktreeTool, ToolRegistry, ToolSearchTool, WebFetchTool,
+    WebSearchTool,
 };
 use rust_claude_tui::{App, AppEvent, ChatMessage, TerminalGuard, TuiBridge, UserCommand};
 use tokio::sync::{mpsc, Mutex};
@@ -1648,6 +1649,8 @@ fn build_tools() -> std::sync::Arc<ToolRegistry> {
         tools.register(TeamDeleteTool::new());
         tools.register(SendMessageTool::new());
         tools.register(SkillTool::new(discovered_skills()));
+        tools.register(EnterWorktreeTool::new());
+        tools.register(ExitWorktreeTool::new());
         tools.register(WebFetchTool::new());
         tools.register(WebSearchTool::new());
         tools.register(ToolSearchTool::new(weak.clone()));

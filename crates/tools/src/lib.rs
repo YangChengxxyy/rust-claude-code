@@ -25,6 +25,7 @@ pub mod tool_search;
 pub mod web;
 pub mod web_fetch_tool;
 pub mod web_search_tool;
+pub mod worktree_tools;
 
 pub use agent_tool::AgentTool;
 pub use ask_user_question::AskUserQuestionTool;
@@ -53,3 +54,4 @@ pub use tool::{
 pub use tool_search::ToolSearchTool;
 pub use web_fetch_tool::WebFetchTool;
 pub use web_search_tool::WebSearchTool;
+pub use worktree_tools::{EnterWorktreeTool, ExitWorktreeTool};

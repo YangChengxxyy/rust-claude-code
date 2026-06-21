@@ -569,9 +569,20 @@ cargo test -p rust-claude-tui slash
 
 ### 迭代 52：EnterWorktree / ExitWorktree
 
-**状态**：规划中
+**状态**：已完成（2026-06-21）
 
 **目标**：实现 git worktree 隔离工具，支持创建、进入、退出、保留或移除当前会话工作树。
+
+**完成记录**：
+
+- `core/git.rs`：新增 worktree 命令封装（`create_worktree`/`enter_existing_worktree`/`remove_worktree`/`delete_branch`/`has_uncommitted_changes`/`is_inside_work_tree`/`common_repo_root`/`sanitize_worktree_name`/`worktree_dir`/`repo_root`/`current_branch`）与 `ActiveWorktree` 状态类型；`common_repo_root` 通过 `git rev-parse --git-common-dir` 解析主仓库根，使 `worktree remove`/`branch -d` 始终从主仓库运行，避免在链接工作树内触发 "is current working directory"。`sanitize_worktree_name` 拒绝空名、`..`/`.` 段、首尾 `/` 及非法字符，防止路径穿越与非法分支名。新增 10 个 git 测试（`cargo test -p rust-claude-core git` → 15 passed）。
+- `core/state.rs`：`AppState` 新增 `worktree: Option<ActiveWorktree>`，`new()` 初始化为 `None`（`from_config` 经 `..Self::new` 覆盖）。
+- `tools/worktree_tools.rs`：`EnterWorktreeTool`（`name` 新建 `.claude/worktrees/<name>` 或 `path` 进入已存在，二选一；已在 worktree 时拒绝再次新建）与 `ExitWorktreeTool`（`keep`/`remove`，`remove` 默认拒绝未提交改动，`discard_changes=true` 强制）。两者均切换 `cwd`、维护 `worktree` 状态并以 `spawn_blocking` 刷新 `git_context`。`remove` 顺序为「先删工作树目录、再删分支」，分支用 `-d`（默认）/`-D`（discard），`-d` 拒绝未合并分支作为已提交工作的安全网。新增 10 个工具测试（`cargo test -p rust-claude-tools worktree` → 10 passed）。
+- 注册：`cli/main.rs` `build_tools` 与 `sdk/session.rs` `default_tool_registry` 注册 `EnterWorktreeTool`/`ExitWorktreeTool`。
+- 足迹 4 crate（core/tools/cli/sdk），与迭代 49 工具族先例一致。
+- 验收：`cargo test -p rust-claude-tools worktree` ✅、`cargo test -p rust-claude-core git` ✅、`cargo check --workspace` ✅、`cargo test --workspace` ✅（全 crate 0 失败）。
+- 边界：不做远程 worktree、不做 tmux 自动附加、不做冲突处理 UI（符合规划）。CLAUDE.md 重新加载留待后续与 worktree 切换联调。
+
 
 **范围**：
 

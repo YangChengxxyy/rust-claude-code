@@ -631,9 +631,20 @@ cargo test -p rust-claude-core git
 
 ### 迭代 53：MCP resources list/read
 
-**状态**：规划中
+**状态**：已完成（2026-06-21）
 
 **目标**：实现 `ListMcpResources` 与 `ReadMcpResource`，让 Rust 版能浏览和读取 MCP server 暴露的 resources。
+
+**完成记录**：
+
+- `mcp/protocol.rs`：新增 `McpResource`/`ResourcesListResult`/`ResourceContent`/`ReadResourceResult` 类型（`mimeType`/`nextCursor` camelCase 对齐）；`McpClient` 新增 `list_resources()`（`resources/list`）与 `read_resource(uri)`（`resources/read`）；新增 `pub const METHOD_NOT_FOUND_CODE: i64 = -32601`，让上层稳定识别「server 不支持 resources」。新增 6 个 resources 测试（反序列化 + FakeTransport list/read + 不支持时 -32601 经 `check_response` → `McpError::JsonRpcError`）。
+- `mcp/manager.rs`：新增 `list_server_resources(server)`/`read_server_resource(server, uri)`/`server_names()`，按名路由到对应 `ConnectedServer` 的 client，未连接返回 `ServerNotConnected`。3 个路由测试。
+- `tools/mcp_resource_tools.rs`（新）：`ListMcpResourcesTool`（`{server}`）与 `ReadMcpResourceTool`（`{server, uri}`），均 read-only + concurrency-safe。渲染与错误映射抽成纯函数（`render_resource_list`/`render_resource_contents`/`resource_error_message`），便于无 server 注入下完整单测：空列表 → 明确成功信息；blob → 占位；未连接 / 不支持（-32601）→ 清晰错误。15 个测试。
+- 注册：在 `register_mcp_tools` 内一并注册两个工具，使 `cli/main.rs` 所有 MCP 接入点（prompt 构建、交互、worker）自动获得 resource 浏览能力 —— **cli 零改动**。
+- 足迹 2 crate（mcp + tools），远低于 stop-line。
+- 验收：`cargo test -p rust-claude-mcp resources` ✅（6 passed）、`cargo test -p rust-claude-tools mcp_resource` ✅（15 passed）、`cargo check --workspace` ✅、`cargo test --workspace` ✅（全 crate 0 失败；并修正既有 `test_register_mcp_tools_empty_manager` 断言以反映 resource 工具常驻注册）。
+- 边界：不做 MCP auth、elicitation、resource subscription（符合规划）。
+
 
 **范围**：
 

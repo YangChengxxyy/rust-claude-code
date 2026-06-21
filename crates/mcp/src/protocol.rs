@@ -1,4 +1,5 @@
-//! MCP protocol operations: initialize, tools/list, tools/call.
+//! MCP protocol operations: initialize, tools/list, tools/call,
+//! resources/list, resources/read.
 
 use rust_claude_core::mcp_config::{McpServerConfig, McpToolInfo};
 use serde::{Deserialize, Serialize};
@@ -6,6 +7,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::McpError;
 use crate::jsonrpc::JsonRpcRequest;
 use crate::transport::{McpTransport, StdioTransport};
+
+/// JSON-RPC method-not-found error code. Servers return this when a request
+/// targets an optional capability they do not implement (e.g. a server with no
+/// resource support replying to `resources/list`).
+pub const METHOD_NOT_FOUND_CODE: i64 = -32601;
 
 /// Client capabilities sent during initialization.
 #[derive(Debug, Clone, Serialize)]
@@ -83,6 +89,49 @@ pub struct ToolsCallResult {
     pub content: Vec<McpContentItem>,
     #[serde(default)]
     pub is_error: bool,
+}
+
+/// A resource exposed by an MCP server, as returned by `resources/list`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct McpResource {
+    pub uri: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default, rename = "mimeType")]
+    pub mime_type: Option<String>,
+}
+
+/// `resources/list` response.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourcesListResult {
+    #[serde(default)]
+    pub resources: Vec<McpResource>,
+    /// Opaque pagination cursor; servers omit it when there are no more pages.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+/// One content entry in a `resources/read` response. A resource is either
+/// textual (`text`) or binary (`blob`, base64-encoded).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct ResourceContent {
+    pub uri: String,
+    #[serde(default, rename = "mimeType")]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub blob: Option<String>,
+}
+
+/// `resources/read` response.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReadResourceResult {
+    #[serde(default)]
+    pub contents: Vec<ResourceContent>,
 }
 
 /// A connected MCP client wrapping a stdio transport.
@@ -236,6 +285,36 @@ impl McpClient {
         })
     }
 
+    /// Fetch the list of resources from the server (`resources/list`).
+    ///
+    /// Servers that do not implement resources return a JSON-RPC
+    /// method-not-found error (-32601), surfaced here as
+    /// [`McpError::JsonRpcError`].
+    pub async fn list_resources(&self) -> Result<Vec<McpResource>, McpError> {
+        let request = JsonRpcRequest::new("resources/list", Some(serde_json::json!({})));
+        let result_value = self.transport.send_request(&request).await?;
+
+        let list_result: ResourcesListResult = serde_json::from_value(result_value)
+            .map_err(|e| McpError::Protocol(format!("invalid resources/list response: {e}")))?;
+
+        Ok(list_result.resources)
+    }
+
+    /// Read a resource by URI (`resources/read`). Returns the raw content
+    /// entries; callers decide how to render text vs. blob.
+    pub async fn read_resource(&self, uri: &str) -> Result<ReadResourceResult, McpError> {
+        let request = JsonRpcRequest::new(
+            "resources/read",
+            Some(serde_json::json!({ "uri": uri })),
+        );
+        let result_value = self.transport.send_request(&request).await?;
+
+        let read_result: ReadResourceResult = serde_json::from_value(result_value)
+            .map_err(|e| McpError::Protocol(format!("invalid resources/read response: {e}")))?;
+
+        Ok(read_result)
+    }
+
     /// Get the server name.
     pub fn server_name(&self) -> &str {
         &self.server_name
@@ -380,6 +459,15 @@ mod tests {
                     "content": [{"type": "text", "text": "ok"}],
                     "isError": false
                 }),
+                "resources/list" => serde_json::json!({
+                    "resources": [
+                        {"uri": "file:///a.txt", "name": "a", "description": "A file", "mimeType": "text/plain"},
+                        {"uri": "file:///b.txt", "name": "b"}
+                    ]
+                }),
+                "resources/read" => serde_json::json!({
+                    "contents": [{"uri": "file:///a.txt", "mimeType": "text/plain", "text": "hello"}]
+                }),
                 method => panic!("unexpected method: {method}"),
             })
         }
@@ -412,6 +500,145 @@ mod tests {
         assert_eq!(
             *requests.lock().await,
             vec!["tools/list".to_string(), "tools/call".to_string()]
+        );
+    }
+
+    // ── resources/list, resources/read ──
+
+    #[test]
+    fn test_resources_list_result_deserialize() {
+        let json = r#"{
+            "resources": [
+                {"uri": "file:///a.txt", "name": "a", "description": "A", "mimeType": "text/plain"},
+                {"uri": "file:///b.txt", "name": "b"}
+            ],
+            "nextCursor": "page2"
+        }"#;
+        let result: ResourcesListResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.resources.len(), 2);
+        assert_eq!(result.resources[0].uri, "file:///a.txt");
+        assert_eq!(result.resources[0].mime_type.as_deref(), Some("text/plain"));
+        assert_eq!(result.resources[1].description, None);
+        assert_eq!(result.next_cursor.as_deref(), Some("page2"));
+    }
+
+    #[test]
+    fn test_resources_list_result_empty() {
+        let json = r#"{"resources": []}"#;
+        let result: ResourcesListResult = serde_json::from_str(json).unwrap();
+        assert!(result.resources.is_empty());
+        assert!(result.next_cursor.is_none());
+    }
+
+    #[test]
+    fn test_read_resource_result_deserialize_text_and_blob() {
+        let json = r#"{
+            "contents": [
+                {"uri": "file:///a.txt", "mimeType": "text/plain", "text": "hello"},
+                {"uri": "img:///b.bin", "mimeType": "application/octet-stream", "blob": "AAEC"}
+            ]
+        }"#;
+        let result: ReadResourceResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.contents.len(), 2);
+        assert_eq!(result.contents[0].text.as_deref(), Some("hello"));
+        assert!(result.contents[0].blob.is_none());
+        assert_eq!(result.contents[1].blob.as_deref(), Some("AAEC"));
+        assert!(result.contents[1].text.is_none());
+    }
+
+    #[test]
+    fn test_read_resource_result_empty() {
+        let json = r#"{"contents": []}"#;
+        let result: ReadResourceResult = serde_json::from_str(json).unwrap();
+        assert!(result.contents.is_empty());
+    }
+
+    /// Transport that reports `resources/list` and `resources/read` as
+    /// unsupported via a JSON-RPC method-not-found error.
+    struct UnsupportedResourcesTransport {
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl McpTransport for UnsupportedResourcesTransport {
+        async fn send_request(
+            &self,
+            request: &JsonRpcRequest,
+        ) -> Result<serde_json::Value, McpError> {
+            self.requests.lock().await.push(request.method.clone());
+            match request.method.as_str() {
+                "resources/list" | "resources/read" => Err(McpError::JsonRpcError {
+                    code: METHOD_NOT_FOUND_CODE,
+                    message: "Method not found".to_string(),
+                }),
+                method => panic!("unexpected method: {method}"),
+            }
+        }
+
+        async fn send_notification(&self, _json: &[u8]) -> Result<(), McpError> {
+            Ok(())
+        }
+
+        async fn shutdown(&mut self) {}
+    }
+
+    #[tokio::test]
+    async fn test_client_lists_and_reads_resources_via_transport() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let client = McpClient::from_transport(
+            "fake",
+            Box::new(FakeTransport {
+                requests: requests.clone(),
+            }),
+        );
+
+        let resources = client.list_resources().await.unwrap();
+        assert_eq!(resources.len(), 2);
+        assert_eq!(resources[0].uri, "file:///a.txt");
+        assert_eq!(resources[0].name, "a");
+        assert_eq!(resources[0].description.as_deref(), Some("A file"));
+
+        let read = client.read_resource("file:///a.txt").await.unwrap();
+        assert_eq!(read.contents.len(), 1);
+        assert_eq!(read.contents[0].text.as_deref(), Some("hello"));
+
+        assert_eq!(
+            *requests.lock().await,
+            vec![
+                "resources/list".to_string(),
+                "resources/read".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_resources_surfaces_method_not_found() {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let client = McpClient::from_transport(
+            "fake",
+            Box::new(UnsupportedResourcesTransport {
+                requests: requests.clone(),
+            }),
+        );
+
+        let list_err = client.list_resources().await.unwrap_err();
+        assert!(matches!(
+            list_err,
+            McpError::JsonRpcError { code, .. } if code == METHOD_NOT_FOUND_CODE
+        ));
+
+        let read_err = client.read_resource("file:///x").await.unwrap_err();
+        assert!(matches!(
+            read_err,
+            McpError::JsonRpcError { code, .. } if code == METHOD_NOT_FOUND_CODE
+        ));
+
+        assert_eq!(
+            *requests.lock().await,
+            vec![
+                "resources/list".to_string(),
+                "resources/read".to_string(),
+            ]
         );
     }
 }

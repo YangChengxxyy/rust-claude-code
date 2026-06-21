@@ -88,6 +88,10 @@ impl Tool for McpProxyTool {
 }
 
 /// Register all discovered MCP tools from the manager into a `ToolRegistry`.
+///
+/// Also registers the `ListMcpResources` / `ReadMcpResource` browsing tools
+/// (iteration 53), so anywhere MCP proxy tools are wired up, resource access
+/// comes with them.
 pub fn register_mcp_tools(registry: &crate::registry::ToolRegistry, manager: &Arc<McpManager>) {
     for (qualified_name, tool_info) in manager.discovered_tools() {
         let proxy = McpProxyTool::new(
@@ -98,6 +102,12 @@ pub fn register_mcp_tools(registry: &crate::registry::ToolRegistry, manager: &Ar
         );
         registry.register(proxy);
     }
+    registry.register(crate::mcp_resource_tools::ListMcpResourcesTool::new(
+        manager.clone(),
+    ));
+    registry.register(crate::mcp_resource_tools::ReadMcpResourceTool::new(
+        manager.clone(),
+    ));
 }
 
 #[cfg(test)]
@@ -183,7 +193,10 @@ mod tests {
 
         register_mcp_tools(&registry, &manager);
 
-        // No tools should be registered
-        assert!(registry.names().is_empty());
+        // No proxy tools (no discovered tools), but the resource browsing
+        // tools are always registered alongside MCP wiring.
+        let names = registry.names();
+        assert!(names.iter().all(|n| n == "ListMcpResources" || n == "ReadMcpResource"));
+        assert_eq!(names.len(), 2);
     }
 }

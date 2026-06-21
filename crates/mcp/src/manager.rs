@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 
 use crate::error::McpError;
-use crate::protocol::{McpClient, ToolCallResult};
+use crate::protocol::{McpClient, McpResource, ReadResourceResult, ToolCallResult};
 
 /// Configuration for the MCP manager.
 #[derive(Debug, Clone)]
@@ -222,6 +222,44 @@ impl McpManager {
     pub fn tool_count(&self) -> usize {
         self.tool_infos.len()
     }
+
+    /// Names of all currently connected servers, sorted for deterministic
+    /// output.
+    pub fn server_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.servers.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// List the resources exposed by a specific connected server. A server
+    /// that does not implement resources returns a JSON-RPC method-not-found
+    /// error; an unknown/disconnected server returns
+    /// [`McpError::ServerNotConnected`].
+    pub async fn list_server_resources(
+        &self,
+        server_name: &str,
+    ) -> Result<Vec<McpResource>, McpError> {
+        let server = self
+            .servers
+            .get(server_name)
+            .ok_or_else(|| Self::disconnected_tool_error(server_name))?;
+        let server_guard = server.lock().await;
+        server_guard.client.list_resources().await
+    }
+
+    /// Read a resource by URI from a specific connected server.
+    pub async fn read_server_resource(
+        &self,
+        server_name: &str,
+        uri: &str,
+    ) -> Result<ReadResourceResult, McpError> {
+        let server = self
+            .servers
+            .get(server_name)
+            .ok_or_else(|| Self::disconnected_tool_error(server_name))?;
+        let server_guard = server.lock().await;
+        server_guard.client.read_resource(uri).await
+    }
 }
 
 #[cfg(test)]
@@ -387,5 +425,30 @@ mod tests {
         let status = &manager.server_statuses()[0];
         assert_eq!(status.transport_type, McpTransportType::Sse);
         assert!(matches!(status.state, McpServerState::Disconnected(_)));
+    }
+
+    #[test]
+    fn test_server_names_empty_when_no_connections() {
+        let manager = McpManager::empty();
+        assert!(manager.server_names().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_server_resources_not_connected() {
+        // An empty manager has no connected servers, so any lookup must route
+        // to the ServerNotConnected error rather than reaching a client.
+        let manager = McpManager::empty();
+        let err = manager.list_server_resources("ghost").await.unwrap_err();
+        assert!(matches!(err, McpError::ServerNotConnected(name) if name == "ghost"));
+    }
+
+    #[tokio::test]
+    async fn test_read_server_resources_not_connected() {
+        let manager = McpManager::empty();
+        let err = manager
+            .read_server_resource("ghost", "file:///x")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, McpError::ServerNotConnected(name) if name == "ghost"));
     }
 }

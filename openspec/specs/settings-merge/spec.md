@@ -1,5 +1,7 @@
-## ADDED Requirements
+## Purpose
 
+Define how project and user settings are discovered and merged with deterministic precedence, and how runtime budget configuration participates in that merge.
+## Requirements
 ### Requirement: Merge project and user settings with deterministic precedence
 The system SHALL load settings from project-level `.claude/settings.json` and user-level `~/.claude/settings.json`, then merge them with deterministic precedence: CLI arguments MUST override environment variables, environment variables MUST override project settings, project settings MUST override user settings, and user settings MUST override built-in defaults. Sandbox configuration fields MUST follow the same precedence rules as other runtime settings.
 
@@ -78,3 +80,26 @@ The system SHALL validate supported settings fields before applying them to runt
 #### Scenario: Invalid sandbox allowed path is rejected
 - **WHEN** a settings file provides a sandbox allowed path entry that cannot be parsed as a path string
 - **THEN** the system SHALL report a validation error for that field and MUST NOT apply the malformed sandbox configuration
+
+### Requirement: Configure maximum session budget
+The system SHALL support an optional `max_budget_usd` runtime configuration field. The field SHALL follow the same configuration precedence rules as other runtime settings, with higher-precedence sources overriding lower-precedence sources.
+
+#### Scenario: Config file defines budget
+- **WHEN** the rust-claude config file contains `max_budget_usd = 1.0`
+- **THEN** the effective runtime configuration SHALL set the maximum session budget to `1.0` USD
+
+#### Scenario: Environment overrides config budget
+- **WHEN** the config file contains `max_budget_usd = 1.0` and the environment defines `RUST_CLAUDE_MAX_BUDGET_USD = 2.0`
+- **THEN** the effective runtime configuration SHALL set the maximum session budget to `2.0` USD
+
+### Requirement: Run config migrations before applying settings
+The system SHALL run pending migrations for the selected rust-claude config file before deserializing typed configuration and before merging runtime overrides.
+
+#### Scenario: Migration runs before config load
+- **WHEN** the config file contains a value that is changed by a pending migration
+- **THEN** the effective runtime configuration SHALL be derived from the migrated config content
+
+#### Scenario: Migration failure blocks unsafe config use
+- **WHEN** config migration fails
+- **THEN** the system SHALL report the migration failure and MUST NOT continue using a partially migrated config
+

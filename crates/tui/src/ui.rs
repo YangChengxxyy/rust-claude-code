@@ -224,20 +224,20 @@ pub fn draw(f: &mut Frame, app: &App) {
         draw_side_panel(f, app, todo_area);
     }
 
-    if app.trust_dialog.is_some() {
-        draw_trust_dialog(f, app, full);
+    if app.session_picker.is_some() {
+        draw_session_picker(f, app, full);
     }
 
     if app.permission_dialog.is_some() {
         draw_permission_dialog(f, app, full);
     }
 
-    if app.user_question_dialog.is_some() {
-        draw_user_question_dialog(f, app, full);
+    if app.trust_dialog.is_some() {
+        draw_trust_dialog(f, app, full);
     }
 
-    if app.session_picker.is_some() {
-        draw_session_picker(f, app, full);
+    if app.user_question_dialog.is_some() {
+        draw_user_question_dialog(f, app, full);
     }
 }
 
@@ -346,7 +346,7 @@ fn render_message(
                     } else {
                         " [Tab to expand]"
                     },
-                    Style::default().fg(palette.subtle),
+                    Style::default().fg(palette.inactive),
                 ),
             ]));
             if is_expanded {
@@ -366,11 +366,7 @@ fn render_message(
             let display_name = ChatMessage::user_facing_tool_name(name);
 
             if name == "Bash" {
-                let cmd_display = if input_summary.len() > 160 {
-                    format!("{}…", &input_summary[..159])
-                } else {
-                    input_summary.clone()
-                };
+                let cmd_display = truncate_display(input_summary, 160);
                 lines.push(Line::from(vec![
                     Span::styled(
                         format!("  {} ", theme::RESPONSE_PREFIX),
@@ -459,7 +455,7 @@ fn render_message(
                     Span::raw("    "),
                     Span::styled(
                         format!("… ({} more lines)", line_count - 6),
-                        Style::default().fg(palette.subtle),
+                        Style::default().fg(palette.inactive),
                     ),
                 ]));
             }
@@ -472,6 +468,20 @@ fn render_message(
                     lines.push(Line::from(vec![
                         Span::styled("  ", Style::default()),
                         Span::styled(system_line.to_string(), palette.warning_style()),
+                    ]));
+                }
+            }
+        }
+        ChatMessage::Error(text) => {
+            // Errors get their own red channel + ✕ glyph so they never read as
+            // ordinary system notices (DESIGN.md Two-Channel Rule).
+            for error_line in text.split('\n') {
+                if error_line.is_empty() {
+                    lines.push(Line::from(""));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::styled("  ✕ ", palette.error_style()),
+                        Span::styled(error_line.to_string(), palette.error_style()),
                     ]));
                 }
             }
@@ -804,9 +814,15 @@ fn parse_inline_spans(text: &str, palette: Palette) -> Vec<Span<'static>> {
 fn draw_spinner_line(f: &mut Frame, app: &App, area: Rect) {
     let palette = app.palette();
     let content = if app.is_thinking {
-        Line::from(vec![Span::styled("Thinking…", palette.spinner_style())])
+        Line::from(vec![
+            Span::styled("Thinking…", palette.spinner_style()),
+            Span::styled("  esc to interrupt", Style::default().fg(palette.inactive)),
+        ])
     } else if app.is_streaming {
-        Line::from(vec![Span::styled("Streaming…", palette.spinner_style())])
+        Line::from(vec![
+            Span::styled("Streaming…", palette.spinner_style()),
+            Span::styled("  esc to interrupt", Style::default().fg(palette.inactive)),
+        ])
     } else {
         Line::from("")
     };
@@ -2159,5 +2175,41 @@ mod tests {
             } => {}
             _ => panic!("Bash ToolUse should have diff_lines: None"),
         }
+    }
+
+    #[test]
+    fn test_bash_command_cjk_long_truncates_without_panic() {
+        // Regression: pre-fix this path did `&input_summary[..159]` byte slicing,
+        // which panicked when byte 159 fell inside a multibyte UTF-8 char.
+        let app = App::new(
+            "test".into(),
+            "test".into(),
+            "default".into(),
+            None,
+            rust_claude_core::config::Theme::Dark,
+        );
+        // 240 CJK chars = 720 bytes — far past the old 160-byte guard, and
+        // byte 159 is guaranteed to land mid-character.
+        let cmd: String = "你好世界测试".repeat(40);
+        let msg = ChatMessage::ToolUse {
+            name: "Bash".into(),
+            input_summary: cmd.clone(),
+            diff_lines: None,
+        };
+        let mut lines = Vec::new();
+        render_message(&msg, 0, &app, &mut lines);
+        let rendered: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            rendered.contains('…'),
+            "long command should be truncated with an ellipsis"
+        );
+        assert!(
+            !rendered.contains(&cmd),
+            "the full 720-byte command must not appear untruncated"
+        );
     }
 }

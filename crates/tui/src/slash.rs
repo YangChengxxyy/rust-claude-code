@@ -202,7 +202,7 @@ pub fn register_builtin_commands(registry: &mut SlashCommandRegistry) {
         "/resume",
         "/resume [session-id]",
         "Resume a previous session",
-        |args| UserCommand::ListSessions, // simplified — actual resume needs interaction
+        |_args| UserCommand::ListSessions, // simplified — actual resume needs interaction
     ));
     registry.register(command("/exit", "/exit", "Exit the application", |_, _| {
         SlashCommandResult::SystemMessage("Use Ctrl+C to exit".into())

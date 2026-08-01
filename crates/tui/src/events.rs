@@ -233,6 +233,7 @@ pub enum ChatMessage {
         is_error: bool,
     },
     System(String),
+    Error(String),
 }
 
 impl ChatMessage {
@@ -246,13 +247,17 @@ impl ChatMessage {
             ChatMessage::ToolResult { is_error: true, .. } => "Error: ",
             ChatMessage::ToolResult { .. } => "Result: ",
             ChatMessage::System(_) => "System: ",
+            ChatMessage::Error(_) => "Error: ",
         }
     }
 
     /// The body text of the message.
     pub fn body(&self) -> &str {
         match self {
-            ChatMessage::User(s) | ChatMessage::Assistant(s) | ChatMessage::System(s) => s,
+            ChatMessage::User(s)
+            | ChatMessage::Assistant(s)
+            | ChatMessage::System(s)
+            | ChatMessage::Error(s) => s,
             ChatMessage::Thinking { content, .. } => content,
             ChatMessage::ToolUse {
                 name,
@@ -345,5 +350,7 @@ mod tests {
             "Error: "
         );
         assert_eq!(ChatMessage::System("info".into()).prefix(), "System: ");
+        assert_eq!(ChatMessage::Error("boom".into()).prefix(), "Error: ");
+        assert_eq!(ChatMessage::Error("boom".into()).body(), "boom");
     }
 }

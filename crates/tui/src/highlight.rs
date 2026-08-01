@@ -142,13 +142,13 @@ fn theme_item(scope: &str, color: SyntectColor, modifier: Option<Modifier>) -> T
     if let Some(m) = modifier {
         let mut fs = syntect::highlighting::FontStyle::default();
         if m.contains(Modifier::BOLD) {
-            fs = fs | syntect::highlighting::FontStyle::BOLD;
+            fs |= syntect::highlighting::FontStyle::BOLD;
         }
         if m.contains(Modifier::ITALIC) {
-            fs = fs | syntect::highlighting::FontStyle::ITALIC;
+            fs |= syntect::highlighting::FontStyle::ITALIC;
         }
         if m.contains(Modifier::UNDERLINED) {
-            fs = fs | syntect::highlighting::FontStyle::UNDERLINE;
+            fs |= syntect::highlighting::FontStyle::UNDERLINE;
         }
         style.font_style = Some(fs);
     }

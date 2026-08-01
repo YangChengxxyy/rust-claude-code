@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::Stdout;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use ratatui::backend::CrosstermBackend;
@@ -63,15 +63,6 @@ pub struct SuggestionItem {
 pub enum SidePanelMode {
     Todo,
     Task,
-}
-
-impl SidePanelMode {
-    fn toggle(self) -> Self {
-        match self {
-            SidePanelMode::Todo => SidePanelMode::Task,
-            SidePanelMode::Task => SidePanelMode::Todo,
-        }
-    }
 }
 
 impl SuggestionItem {
@@ -689,6 +680,8 @@ pub struct App {
     pub clear_requested: bool,
     /// Set to true to exit the main loop.
     pub should_quit: bool,
+    /// Timestamp of the last idle Ctrl+C; a second press within 2s quits.
+    pub last_ctrl_c_at: Option<Instant>,
 
     // -- status bar info --
     pub model: String,
@@ -768,6 +761,7 @@ impl App {
             selected_thinking: None,
             clear_requested: false,
             should_quit: false,
+            last_ctrl_c_at: None,
             model,
             model_setting,
             permission_mode,
@@ -1137,6 +1131,24 @@ impl App {
         }
     }
 
+    /// Cycle the side panel: hidden → Todo → Task → hidden.
+    /// Replaces the old Ctrl+T that only flipped modes and could never close
+    /// the panel (forcing users to `/todo` to dismiss it).
+    fn cycle_side_panel(&mut self) {
+        if !self.todo_visible {
+            self.todo_visible = true;
+            self.side_panel_mode = SidePanelMode::Todo;
+        } else {
+            match self.side_panel_mode {
+                SidePanelMode::Todo => self.side_panel_mode = SidePanelMode::Task,
+                SidePanelMode::Task => {
+                    self.todo_visible = false;
+                    self.side_panel_mode = SidePanelMode::Todo;
+                }
+            }
+        }
+    }
+
     fn toggle_selected_thinking(&mut self) {
         let Some(index) = self.selected_thinking else {
             return;
@@ -1182,7 +1194,7 @@ impl App {
                 self.sync_chat_viewport();
             }
             Err(_) => {
-                self.messages.push(ChatMessage::System(
+                self.messages.push(ChatMessage::Error(
                     "Failed to submit prompt to background worker.".into(),
                 ));
                 self.sync_chat_viewport();
@@ -1374,9 +1386,13 @@ impl App {
         }
 
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
-            self.side_panel_mode = self.side_panel_mode.toggle();
-            self.todo_visible = true;
+            self.cycle_side_panel();
             return;
+        }
+
+        // Any key that isn't Ctrl+C clears a pending double-press-to-quit.
+        if !(key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')) {
+            self.last_ctrl_c_at = None;
         }
 
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -1384,7 +1400,19 @@ impl App {
                 let _ = user_tx.send(UserCommand::CancelStream).await;
                 self.cancel_stream_local();
             } else {
-                self.should_quit = true;
+                let now = Instant::now();
+                let is_confirm = self
+                    .last_ctrl_c_at
+                    .map(|t| now.duration_since(t) < Duration::from_secs(2))
+                    .unwrap_or(false);
+                if is_confirm {
+                    self.should_quit = true;
+                } else {
+                    self.last_ctrl_c_at = Some(now);
+                    self.messages.push(ChatMessage::System(
+                        "Press Ctrl+C again to exit.".into(),
+                    ));
+                }
             }
             return;
         }
@@ -1471,8 +1499,10 @@ impl App {
                 if self.is_streaming {
                     let _ = user_tx.send(UserCommand::CancelStream).await;
                     self.cancel_stream_local();
+                } else if self.slash_suggestions.take().is_some() {
+                    // First Esc dismisses the suggestion overlay and keeps the
+                    // buffer, so a stray Esc while typing doesn't nuke a draft.
                 } else {
-                    self.slash_suggestions = None;
                     self.input_buffer.clear();
                     self.reset_input_navigation();
                 }
@@ -1850,7 +1880,7 @@ impl App {
                     Some(value) if parts.len() == 2 => match value.parse::<CompactStrategy>() {
                         Ok(strategy) => strategy,
                         Err(error) => {
-                            self.messages.push(ChatMessage::System(error));
+                            self.messages.push(ChatMessage::Error(error));
                             self.sync_chat_viewport();
                             return;
                         }
@@ -1873,7 +1903,7 @@ impl App {
                         self.sync_chat_viewport();
                     }
                     Err(_) => {
-                        self.messages.push(ChatMessage::System(
+                        self.messages.push(ChatMessage::Error(
                             "Error: failed to send compact request".into(),
                         ));
                         self.sync_chat_viewport();
@@ -1891,7 +1921,7 @@ impl App {
                                 Ok(()) => self.messages.push(ChatMessage::System(format!(
                                     "Switching permission mode to: {mode_str}"
                                 ))),
-                                Err(_) => self.messages.push(ChatMessage::System(
+                                Err(_) => self.messages.push(ChatMessage::Error(
                                     "Error: failed to send mode change request".into(),
                                 )),
                             }
@@ -1921,7 +1951,7 @@ impl App {
                         Ok(()) => self.messages.push(ChatMessage::System(format!(
                             "Switching model to: {model_str}"
                         ))),
-                        Err(_) => self.messages.push(ChatMessage::System(
+                        Err(_) => self.messages.push(ChatMessage::Error(
                             "Error: failed to send model change request".into(),
                         )),
                     }
@@ -2032,7 +2062,7 @@ impl App {
                                     "Switching theme to: {theme_str}"
                                 )));
                             }
-                            Err(_) => self.messages.push(ChatMessage::System(
+                            Err(_) => self.messages.push(ChatMessage::Error(
                                 "Error: failed to send theme change request".into(),
                             )),
                         },
@@ -2047,7 +2077,7 @@ impl App {
                                         ));
                                     }
                                     Err(error) => {
-                                        self.messages.push(ChatMessage::System(format!(
+                                        self.messages.push(ChatMessage::Error(format!(
                                             "Failed to load custom theme: {error}"
                                         )));
                                     }
@@ -2202,12 +2232,9 @@ impl App {
             _ => {
                 // Try plugin/dynamic commands first
                 if self.slash_registry.contains(name) {
-                    match self.slash_registry.dispatch(name, arg, user_tx).await {
-                        Some(crate::slash::SlashCommandResult::SystemMessage(msg)) => {
-                            self.messages.push(ChatMessage::System(msg));
-                            self.sync_chat_viewport();
-                        }
-                        _ => {}
+                    if let Some(crate::slash::SlashCommandResult::SystemMessage(msg)) = self.slash_registry.dispatch(name, arg, user_tx).await {
+                        self.messages.push(ChatMessage::System(msg));
+                        self.sync_chat_viewport();
                     }
                     return;
                 }
@@ -2482,7 +2509,7 @@ impl App {
                 self.jump_chat_to_latest();
             }
             AppEvent::Error(msg) => {
-                self.messages.push(ChatMessage::System(msg));
+                self.messages.push(ChatMessage::Error(msg));
                 if let Some(picker) = self.session_picker.as_mut() {
                     picker.loading = false;
                     picker.error = Some(
@@ -3109,7 +3136,7 @@ mod tests {
         assert!(rx.try_recv().is_err());
         assert!(matches!(
             app.messages.last(),
-            Some(ChatMessage::System(message)) if message.contains("unknown compact strategy")
+            Some(ChatMessage::Error(message)) if message.contains("unknown compact strategy")
         ));
     }
 
@@ -3282,6 +3309,43 @@ mod tests {
         assert!(!app.should_quit);
         assert!(!app.is_streaming);
         assert_eq!(rx.recv().await, Some(UserCommand::CancelStream));
+    }
+
+    #[tokio::test]
+    async fn test_idle_ctrl_c_requires_double_press_to_quit() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, _rx) = mpsc::channel(1);
+        // First idle Ctrl+C must NOT quit; it arms a confirmation window.
+        app.handle_key_event(key_ctrl(KeyCode::Char('c')), &tx).await;
+        assert!(!app.should_quit, "single idle Ctrl+C should not quit");
+        assert!(app.last_ctrl_c_at.is_some(), "should arm a confirm window");
+        // Second press within the window quits.
+        app.handle_key_event(key_ctrl(KeyCode::Char('c')), &tx).await;
+        assert!(app.should_quit, "second Ctrl+C within 2s should quit");
+    }
+
+    #[tokio::test]
+    async fn test_other_key_cancels_pending_quit() {
+        let mut app = App::new(
+            "test-model".into(),
+            "test-model".into(),
+            "default".into(),
+            None,
+            Theme::Dark,
+        );
+        let (tx, _rx) = mpsc::channel(1);
+        app.handle_key_event(key_ctrl(KeyCode::Char('c')), &tx).await;
+        assert!(app.last_ctrl_c_at.is_some());
+        // Any non-Ctrl+C key clears the pending state.
+        app.handle_key_event(key(KeyCode::Esc), &tx).await;
+        assert!(app.last_ctrl_c_at.is_none());
+        assert!(!app.should_quit);
     }
 
     #[tokio::test]
@@ -3540,7 +3604,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ctrl_t_switches_to_task_panel() {
+    async fn test_ctrl_t_cycles_side_panel() {
         let mut app = App::new(
             "test-model".into(),
             "test-model".into(),
@@ -3550,14 +3614,22 @@ mod tests {
         );
         let (tx, _rx) = mpsc::channel(1);
 
-        app.handle_key_event(key_ctrl(KeyCode::Char('t')), &tx)
-            .await;
+        // Starts hidden.
+        assert!(!app.todo_visible);
 
+        // hidden → Todo
+        app.handle_key_event(key_ctrl(KeyCode::Char('t')), &tx).await;
+        assert!(app.todo_visible);
+        assert_eq!(app.side_panel_mode, SidePanelMode::Todo);
+
+        // Todo → Task
+        app.handle_key_event(key_ctrl(KeyCode::Char('t')), &tx).await;
         assert!(app.todo_visible);
         assert_eq!(app.side_panel_mode, SidePanelMode::Task);
 
-        app.handle_key_event(key_ctrl(KeyCode::Char('t')), &tx)
-            .await;
+        // Task → hidden
+        app.handle_key_event(key_ctrl(KeyCode::Char('t')), &tx).await;
+        assert!(!app.todo_visible);
         assert_eq!(app.side_panel_mode, SidePanelMode::Todo);
     }
 
@@ -4474,7 +4546,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_escape_clears_slash_input_even_when_suggestions_visible() {
+    async fn test_escape_dismisses_suggestions_but_keeps_buffer() {
         let mut app = App::new(
             "test-model".into(),
             "test-model".into(),
@@ -4486,10 +4558,15 @@ mod tests {
 
         app.handle_key_event(key(KeyCode::Char('/')), &tx).await;
         app.handle_key_event(key(KeyCode::Char('h')), &tx).await;
+        // Suggestions are visible here.
+        assert!(app.slash_suggestions.is_some());
+        // First Esc dismisses the overlay but must NOT nuke the draft.
         app.handle_key_event(key(KeyCode::Esc), &tx).await;
-
-        assert!(app.input_text().is_empty());
+        assert_eq!(app.input_text(), "/h");
         assert!(app.slash_suggestions.is_none());
+        // A second Esc (nothing left to dismiss) clears the buffer.
+        app.handle_key_event(key(KeyCode::Esc), &tx).await;
+        assert!(app.input_text().is_empty());
     }
 
     #[tokio::test]
